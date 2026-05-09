@@ -1,0 +1,83 @@
+plugin_id: limit-up-board
+name: 打板策略
+version: 0.4.0
+type: strategy
+api_version: "1"
+entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
+description: A 股打板策略：双轮 LLM 漏斗（强势标的分析 → 连板预测）
+author: DeepTrade
+
+permissions:
+  tushare_apis:
+    required:
+      - stock_basic
+      - trade_cal
+      - daily
+      - daily_basic
+      - stock_st
+      - limit_list_d
+      - limit_step
+      - moneyflow
+      - top_list
+      - top_inst
+      - cyq_perf
+    optional:
+      - limit_list_ths
+      - limit_cpt_list
+      - ths_hot
+      - dc_hot
+      - stk_auction_o
+      - anns_d
+      - suspend_d
+      - stk_limit
+  llm: true
+  llm_tools: false
+
+migrations:
+  - version: "20260509_001"
+    file: migrations/20260509_001_init.sql
+    checksum: "sha256:8f6bc721fedbd94f652fa356779eea7b4ef801483968dabfa6648cf2f639064f"
+
+tables:
+  - name: lub_stock_basic
+    description: stock_basic 落库（限本插件使用）
+    purge_on_uninstall: true
+  - name: lub_trade_cal
+    description: trade_cal 落库
+    purge_on_uninstall: true
+  - name: lub_daily
+    description: daily 行情落库
+    purge_on_uninstall: true
+  - name: lub_daily_basic
+    description: daily_basic 行情指标落库
+    purge_on_uninstall: true
+  - name: lub_moneyflow
+    description: moneyflow 资金流落库
+    purge_on_uninstall: true
+  - name: lub_limit_list_d
+    description: 涨停明细缓存（limit_list_d）
+    purge_on_uninstall: true
+  - name: lub_limit_ths
+    description: 同花顺涨停榜单缓存（limit_list_ths）
+    purge_on_uninstall: true
+  - name: lub_stage_results
+    description: 策略各阶段（R1/R2/final_ranking）结构化结果
+    purge_on_uninstall: true
+  - name: lub_runs
+    description: 本插件 run 历史（替代框架 strategy_runs）
+    purge_on_uninstall: true
+  - name: lub_events
+    description: 本插件 run 事件流（替代框架 strategy_events）
+    purge_on_uninstall: true
+  - name: lub_top_list
+    description: 龙虎榜个股明细（top_list）
+    purge_on_uninstall: true
+  - name: lub_top_inst
+    description: 龙虎榜机构席位明细（top_inst）
+    purge_on_uninstall: true
+  - name: lub_cyq_perf
+    description: 筹码每日指标（cyq_perf）
+    purge_on_uninstall: true
+  - name: lub_config
+    description: 本插件用户可调设置（流通市值 / 股价上限）
+    purge_on_uninstall: true

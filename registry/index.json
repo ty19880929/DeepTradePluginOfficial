@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "plugins": {
+    "limit-up-board": {
+      "name": "打板策略",
+      "type": "strategy",
+      "description": "A 股打板策略：双轮 LLM 漏斗（强势标的分析 → 连板预测）",
+      "repo": "ty19880929/DeepTradePluginOfficial",
+      "subdir": "limit_up_board",
+      "tag_prefix": "limit-up-board/",
+      "min_framework_version": "0.1.0"
+    },
+    "volume-anomaly": {
+      "name": "成交量异动策略",
+      "type": "strategy",
+      "description": "主板成交量异动筛选 + LLM 主升浪启动预测（screen / analyze / prune 三模式）",
+      "repo": "ty19880929/DeepTradePluginOfficial",
+      "subdir": "volume_anomaly",
+      "tag_prefix": "volume-anomaly/",
+      "min_framework_version": "0.1.0"
+    },
+    "stdout-channel": {
+      "name": "Stdout Channel",
+      "type": "channel",
+      "description": "Reference notification channel — fully consumes the payload but only prints '✔ push success' to stdout.",
+      "repo": "ty19880929/DeepTradePluginOfficial",
+      "subdir": "stdout",
+      "tag_prefix": "stdout-channel/",
+      "min_framework_version": "0.1.0"
+    }
+  }
+}

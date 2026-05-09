@@ -1,0 +1,53 @@
+plugin_id: volume-anomaly
+name: 成交量异动策略
+version: 0.6.0
+type: strategy
+api_version: "1"
+entrypoint: volume_anomaly.plugin:VolumeAnomalyPlugin
+description: 主板成交量异动筛选 + LLM 主升浪启动预测（screen / analyze / prune 三模式）
+author: DeepTrade
+
+permissions:
+  tushare_apis:
+    required:
+      - stock_basic
+      - trade_cal
+      - daily
+      - daily_basic
+      - stock_st
+    optional:
+      - suspend_d
+      - moneyflow
+      - limit_list_d
+      - limit_cpt_list
+      - top_list
+      - anns_d
+      - adj_factor
+      - index_daily
+  llm: true
+  llm_tools: false
+
+migrations:
+  - version: "20260509_001"
+    file: migrations/20260509_001_init.sql
+    checksum: "sha256:118bffd149dc4f698c45be989c9f6122a9e9ade2df97f4cf7da995994840e823"
+
+tables:
+  - name: va_watchlist
+    description: 异动筛选后的待追踪标的池（每只一行，PK=ts_code）
+    purge_on_uninstall: true
+  - name: va_anomaly_history
+    description: 历次异动筛选命中明细（审计用）
+    purge_on_uninstall: true
+  - name: va_stage_results
+    description: 走势分析（LLM）阶段的结构化结果
+    purge_on_uninstall: true
+  - name: va_runs
+    description: 本插件 run 历史（替代框架 strategy_runs）
+    purge_on_uninstall: true
+  - name: va_events
+    description: 本插件 run 事件流（替代框架 strategy_events）
+    purge_on_uninstall: true
+  - name: va_realized_returns
+    description: T+N 事后实际收益指标（PK=anomaly_date+ts_code）
+    purge_on_uninstall: true
