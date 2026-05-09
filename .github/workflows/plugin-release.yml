@@ -1,0 +1,43 @@
+name: Plugin Release
+
+on:
+  push:
+    tags: ['*/v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Parse tag
+        id: parse
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PLUGIN_ID="${TAG%/v*}"
+          VERSION="${TAG#*/v}"
+          echo "plugin_id=$PLUGIN_ID" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Parsed: plugin_id=$PLUGIN_ID, version=$VERSION"
+
+      - name: Verify tag matches plugin yaml
+        run: |
+          python tools/check_release.py \
+            "${{ steps.parse.outputs.plugin_id }}" \
+            "${{ steps.parse.outputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.parse.outputs.plugin_id }} v${{ steps.parse.outputs.version }}
+          generate_release_notes: true
