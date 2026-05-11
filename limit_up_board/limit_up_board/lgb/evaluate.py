@@ -392,3 +392,208 @@ def _fmt(v: float | None, spec: str) -> str:
     if v is None:
         return "—"
     return format(v, spec)
+
+
+# ---------------------------------------------------------------------------
+# PR-3.3 — Feature drift detection
+# ---------------------------------------------------------------------------
+
+
+# Standard PSI interpretation thresholds (industry convention).
+PSI_THRESHOLD_STABLE: float = 0.10
+PSI_THRESHOLD_SHIFT: float = 0.25
+
+
+@dataclass
+class FeatureDrift:
+    """Per-feature drift snapshot."""
+
+    feature: str
+    psi: float | None
+    baseline_mean: float | None
+    current_mean: float | None
+    baseline_std: float | None
+    current_std: float | None
+    n_baseline: int
+    n_current: int
+    status: str  # "stable" / "moderate" / "shift" / "insufficient_data"
+
+
+@dataclass
+class DriftResult:
+    """Output of :func:`compute_drift`."""
+
+    baseline_model_id: str
+    window_start: str
+    window_end: str
+    n_features_compared: int
+    features: list[FeatureDrift] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def to_json_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _psi(
+    baseline: np.ndarray, current: np.ndarray, *, n_bins: int = 10
+) -> float | None:
+    """Population Stability Index between two 1-D float distributions.
+
+    Returns ``None`` when either side has fewer than ``n_bins`` finite values,
+    or when bucket cut-points collapse to a single value (degenerate).
+    """
+    base = baseline[np.isfinite(baseline)]
+    cur = current[np.isfinite(current)]
+    if len(base) < n_bins or len(cur) < n_bins:
+        return None
+    qs = np.linspace(0.0, 1.0, n_bins + 1)
+    edges = np.unique(np.quantile(base, qs))
+    if len(edges) < 3:
+        return None
+    edges[0] = -np.inf
+    edges[-1] = np.inf
+
+    eps = 1e-6
+
+    def _hist(x: np.ndarray) -> np.ndarray:
+        counts, _ = np.histogram(x, bins=edges)
+        total = counts.sum()
+        if total <= 0:
+            return np.zeros_like(counts, dtype=float)
+        pct = counts.astype(float) / float(total)
+        return np.clip(pct, eps, 1.0)
+
+    base_pct = _hist(base)
+    cur_pct = _hist(cur)
+    psi = float(np.sum((cur_pct - base_pct) * np.log(cur_pct / base_pct)))
+    return psi
+
+
+def _psi_status(psi: float | None) -> str:
+    if psi is None:
+        return "insufficient_data"
+    if psi < PSI_THRESHOLD_STABLE:
+        return "stable"
+    if psi < PSI_THRESHOLD_SHIFT:
+        return "moderate"
+    return "shift"
+
+
+def compute_drift(
+    *,
+    baseline_feature_matrix: pd.DataFrame,
+    current_feature_matrix: pd.DataFrame,
+    baseline_model_id: str,
+    window_start: str,
+    window_end: str,
+    n_bins: int = 10,
+) -> DriftResult:
+    """Per-feature PSI between two feature matrices.
+
+    Columns are aligned by name; any column missing on either side is omitted
+    with ``status='insufficient_data'``. The result is sorted by PSI descending
+    so the most-drifted features surface first.
+    """
+    expected_cols = set(baseline_feature_matrix.columns) & set(current_feature_matrix.columns)
+    result = DriftResult(
+        baseline_model_id=baseline_model_id,
+        window_start=window_start,
+        window_end=window_end,
+        n_features_compared=len(expected_cols),
+    )
+    if not expected_cols:
+        result.notes.append("no overlapping feature columns")
+        return result
+
+    drifts: list[FeatureDrift] = []
+    for col in baseline_feature_matrix.columns:
+        if col not in expected_cols:
+            continue
+        base = baseline_feature_matrix[col].astype("float64").to_numpy()
+        cur = current_feature_matrix[col].astype("float64").to_numpy()
+        psi_val = _psi(base, cur, n_bins=n_bins)
+        n_base = int(np.isfinite(base).sum())
+        n_cur = int(np.isfinite(cur).sum())
+        base_mean = float(np.nanmean(base)) if n_base else None
+        cur_mean = float(np.nanmean(cur)) if n_cur else None
+        base_std = float(np.nanstd(base)) if n_base > 1 else None
+        cur_std = float(np.nanstd(cur)) if n_cur > 1 else None
+        drifts.append(
+            FeatureDrift(
+                feature=col,
+                psi=None if psi_val is None else round(psi_val, 4),
+                baseline_mean=None if base_mean is None else round(base_mean, 4),
+                current_mean=None if cur_mean is None else round(cur_mean, 4),
+                baseline_std=None if base_std is None else round(base_std, 4),
+                current_std=None if cur_std is None else round(cur_std, 4),
+                n_baseline=n_base,
+                n_current=n_cur,
+                status=_psi_status(psi_val),
+            )
+        )
+
+    drifts.sort(key=lambda d: (d.psi if d.psi is not None else -1.0), reverse=True)
+    result.features = drifts
+    return result
+
+
+def format_drift_table(result: DriftResult, *, top_n: int = 20) -> str:
+    """Human-readable drift table; top ``top_n`` features by PSI."""
+    lines: list[str] = []
+    lines.append(
+        f"Feature drift · baseline={result.baseline_model_id} · "
+        f"current {result.window_start}..{result.window_end} · "
+        f"compared {result.n_features_compared} features"
+    )
+    if not result.features:
+        if result.notes:
+            for n in result.notes:
+                lines.append(f"note: {n}")
+        return "\n".join(lines)
+
+    lines.append("")
+    lines.append(
+        f"PSI thresholds: <{PSI_THRESHOLD_STABLE} stable · "
+        f"<{PSI_THRESHOLD_SHIFT} moderate · ≥{PSI_THRESHOLD_SHIFT} shift"
+    )
+    lines.append(
+        "feature                              | PSI    | status     | "
+        "Δmean (cur-base)"
+    )
+    lines.append("-" * 90)
+    for d in result.features[:top_n]:
+        psi_str = f"{d.psi:.4f}" if d.psi is not None else "—"
+        if d.baseline_mean is not None and d.current_mean is not None:
+            delta = d.current_mean - d.baseline_mean
+            delta_str = f"{delta:+.4f}"
+        else:
+            delta_str = "—"
+        lines.append(
+            f"{d.feature:<36} | {psi_str:<6} | {d.status:<10} | {delta_str}"
+        )
+    if len(result.features) > top_n:
+        lines.append(f"... (+{len(result.features) - top_n} more, see JSON)")
+    return "\n".join(lines)
+
+
+def load_baseline_feature_matrix(parquet_path: Any) -> pd.DataFrame | None:
+    """Read the training dataset snapshot parquet produced by ``lgb train``.
+
+    Returns ``None`` if the file doesn't exist or pyarrow/fastparquet isn't
+    installed; the caller should surface a friendly error.
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    p = Path(parquet_path)
+    if not p.is_file():
+        return None
+    try:
+        df = pd.read_parquet(p)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("load_baseline_feature_matrix failed: %s", e)
+        return None
+    # Keep only the feature columns; train CLI appended label / ts_code / etc.
+    cols = [c for c in df.columns if c in FEATURE_NAMES]
+    if not cols:
+        return None
+    return df[cols].copy()

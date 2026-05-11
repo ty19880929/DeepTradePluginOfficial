@@ -739,11 +739,11 @@ def cmd_lgb_evaluate(
         "--k",
         help="逗号分隔的 Top-K 列表；默认 5,10,20",
     ),
-    drift: bool = typer.Option(  # noqa: ARG001 — wired in PR-3.3
-        False, "--drift", help="附带输出特征 drift 报表（PR-3.3）"
+    drift: bool = typer.Option(
+        False, "--drift", help="附带输出特征 drift 报表（PSI vs 训练数据快照）"
     ),
-    baseline: str | None = typer.Option(  # noqa: ARG001 — wired in PR-3.3
-        None, "--baseline", help="drift baseline 模型 ID（默认 = active）"
+    baseline: str | None = typer.Option(
+        None, "--baseline", help="drift baseline 模型 ID（默认 = active 或 --model-id）"
     ),
 ) -> None:
     """对指定窗口跑离线评估（AUC / logloss / Top-K 命中率 vs baseline）。"""
@@ -759,7 +759,14 @@ def cmd_lgb_evaluate(
         typer.echo(f"✘ --k 必须是 ≥1 的整数列表: {k_values!r}")
         raise typer.Exit(2)
 
-    from .lgb.evaluate import evaluate_model, format_evaluate_table  # noqa: PLC0415
+    from .lgb.evaluate import (  # noqa: PLC0415
+        compute_drift,
+        evaluate_model,
+        format_drift_table,
+        format_evaluate_table,
+        load_baseline_feature_matrix,
+    )
+    from .lgb.dataset import collect_training_window as _collect_window  # noqa: PLC0415
 
     db, rt = _open_runtime()
     try:
@@ -817,6 +824,64 @@ def cmd_lgb_evaluate(
             encoding="utf-8",
         )
         typer.echo(f"\n📄 JSON 报告：{out_path}")
+
+        # ---- PR-3.3: optional drift report --------------------------------
+        if drift:
+            baseline_id = baseline or target_id
+            baseline_record = _safe_get_model(db, baseline_id)
+            if baseline_record is None:
+                typer.echo(f"⚠ drift baseline model_id not found: {baseline_id!r}")
+            else:
+                parquet_path = (
+                    lgb_paths.datasets_dir()
+                    / lgb_paths.dataset_file_name(baseline_id)
+                )
+                base_df = load_baseline_feature_matrix(parquet_path)
+                if base_df is None:
+                    typer.echo(
+                        f"⚠ baseline dataset snapshot 缺失或不可读：{parquet_path}"
+                    )
+                else:
+                    typer.echo(
+                        f"\n🔬 计算 drift · baseline={baseline_id} → "
+                        f"current {start}..{end} (PSI, 10 buckets)"
+                    )
+                    cur_ds = _collect_window(
+                        tushare=tushare,
+                        calendar=calendar,
+                        start_date=start,
+                        end_date=end,
+                        max_float_mv_yi=cfg.max_float_mv_yi,
+                        max_close_yuan=cfg.max_close_yuan,
+                        label_threshold_pct=cfg.lgb_label_threshold_pct,
+                        force_sync=force_sync,
+                    )
+                    drift_result = compute_drift(
+                        baseline_feature_matrix=base_df,
+                        current_feature_matrix=cur_ds.feature_matrix,
+                        baseline_model_id=baseline_id,
+                        window_start=start,
+                        window_end=end,
+                    )
+                    typer.echo("")
+                    typer.echo(format_drift_table(drift_result))
+                    drift_path = (
+                        reports_root
+                        / f"lgb_drift_{baseline_id}_{start}_{end}.json"
+                    )
+                    drift_path.write_text(
+                        json.dumps(
+                            drift_result.to_json_dict(),
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                    typer.echo(f"\n📄 drift JSON：{drift_path}")
+                    typer.echo(
+                        "提示: PSI>0.25 视为显著漂移；若同时 AUC 较训练阶段下降 >5pt，"
+                        "建议增加训练窗口 / 重新训练（lightgbm_iteration_plan §4.1 PR-3.3）。"
+                    )
     finally:
         db.close()
 

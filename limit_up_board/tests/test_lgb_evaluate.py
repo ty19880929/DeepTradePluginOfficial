@@ -199,3 +199,136 @@ def test_format_evaluate_table_shows_schema_mismatch() -> None:
 
 def test_default_k_values_constant() -> None:
     assert DEFAULT_K_VALUES == (5, 10, 20)
+
+
+# ---------------------------------------------------------------------------
+# PR-3.3 — Feature drift detection
+# ---------------------------------------------------------------------------
+
+
+def test_psi_identical_distributions_zero() -> None:
+    from limit_up_board.lgb.evaluate import _psi
+
+    rng = np.random.default_rng(42)
+    x = rng.normal(0, 1, 500)
+    psi = _psi(x, x.copy(), n_bins=10)
+    assert psi is not None
+    assert psi == pytest.approx(0.0, abs=1e-9)
+
+
+def test_psi_shifted_distribution_high() -> None:
+    from limit_up_board.lgb.evaluate import _psi
+
+    rng = np.random.default_rng(7)
+    base = rng.normal(0, 1, 1000)
+    shifted = rng.normal(2.0, 1, 1000)  # mean shift by 2 std
+    psi = _psi(base, shifted, n_bins=10)
+    assert psi is not None
+    assert psi > 0.5, f"Expected significant drift PSI, got {psi}"
+
+
+def test_psi_insufficient_data_returns_none() -> None:
+    from limit_up_board.lgb.evaluate import _psi
+
+    psi = _psi(np.array([1.0, 2.0]), np.array([1.0, 2.0, 3.0]), n_bins=10)
+    assert psi is None
+
+
+def test_psi_status_thresholds() -> None:
+    from limit_up_board.lgb.evaluate import _psi_status
+
+    assert _psi_status(0.05) == "stable"
+    assert _psi_status(0.15) == "moderate"
+    assert _psi_status(0.30) == "shift"
+    assert _psi_status(None) == "insufficient_data"
+
+
+def test_compute_drift_returns_sorted_features() -> None:
+    from limit_up_board.lgb.evaluate import compute_drift
+
+    rng = np.random.default_rng(0)
+    base = pd.DataFrame(
+        {
+            "stable_a": rng.normal(0, 1, 500),
+            "stable_b": rng.normal(0, 1, 500),
+            "drifted":  rng.normal(0, 1, 500),
+        }
+    )
+    cur = pd.DataFrame(
+        {
+            "stable_a": rng.normal(0, 1, 500),
+            "stable_b": rng.normal(0, 1, 500),
+            "drifted":  rng.normal(3, 1, 500),
+        }
+    )
+    res = compute_drift(
+        baseline_feature_matrix=base,
+        current_feature_matrix=cur,
+        baseline_model_id="20260530_demo",
+        window_start="20260601",
+        window_end="20260630",
+    )
+    assert res.n_features_compared == 3
+    # Drifted feature should bubble to the top.
+    assert res.features[0].feature == "drifted"
+    assert res.features[0].status == "shift"
+    # Stable features after the drifted one.
+    statuses = [f.status for f in res.features]
+    assert statuses[0] == "shift"
+    assert all(s in ("stable", "moderate") for s in statuses[1:])
+
+
+def test_compute_drift_no_overlap_returns_note() -> None:
+    from limit_up_board.lgb.evaluate import compute_drift
+
+    base = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
+    cur = pd.DataFrame({"b": [1.0, 2.0, 3.0]})
+    res = compute_drift(
+        baseline_feature_matrix=base,
+        current_feature_matrix=cur,
+        baseline_model_id="m",
+        window_start="20260601",
+        window_end="20260630",
+    )
+    assert res.n_features_compared == 0
+    assert res.features == []
+    assert any("no overlapping" in n for n in res.notes)
+
+
+def test_format_drift_table_truncates() -> None:
+    from limit_up_board.lgb.evaluate import (
+        DriftResult,
+        FeatureDrift,
+        format_drift_table,
+    )
+
+    features = [
+        FeatureDrift(
+            feature=f"f{i}",
+            psi=0.5 - 0.01 * i,
+            baseline_mean=0.0,
+            current_mean=0.5,
+            baseline_std=1.0,
+            current_std=1.0,
+            n_baseline=100,
+            n_current=100,
+            status="shift",
+        )
+        for i in range(25)
+    ]
+    res = DriftResult(
+        baseline_model_id="m",
+        window_start="20260601",
+        window_end="20260630",
+        n_features_compared=25,
+        features=features,
+    )
+    text = format_drift_table(res, top_n=10)
+    assert "Feature drift" in text
+    assert "+15 more" in text
+
+
+def test_load_baseline_feature_matrix_missing(tmp_path) -> None:
+    from limit_up_board.lgb.evaluate import load_baseline_feature_matrix
+
+    assert load_baseline_feature_matrix(tmp_path / "nope.parquet") is None
