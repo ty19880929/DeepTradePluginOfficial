@@ -1,6 +1,8 @@
 # DeepTradePluginOfficial
 
-[DeepTrade](https://github.com/ty19880929/deeptrade) 框架的官方插件 monorepo。DeepTrade 是一款基于插件、由 LLM 驱动的 A 股选股 CLI；本仓库统一收纳官方维护的策略与通道插件，并通过 `registry/index.json` 暴露给框架的 `deeptrade plugin install <短名>` 命令。
+[DeepTrade](https://github.com/ty19880929/DeepTrade) 框架的官方插件 monorepo。DeepTrade 是一款基于插件、由 LLM 驱动的 A 股选股 CLI；本仓库统一收纳官方维护的策略插件，并通过 `registry/index.json` 暴露给框架的 `deeptrade plugin install <短名>` 命令。
+
+> 📖 **在线插件目录**：[deeptrade.tiey.ai/plugins](https://deeptrade.tiey.ai/plugins) — 自动同步本注册表
 
 ## 插件清单
 
