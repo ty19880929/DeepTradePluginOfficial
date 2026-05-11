@@ -11,7 +11,6 @@ via ``rt.llms.get_client(name, plugin_id=, run_id=)``.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -22,9 +21,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from deeptrade.core.db import Database
     from deeptrade.core.llm_manager import LLMManager
     from deeptrade.core.tushare_client import TushareClient
-    from deeptrade.plugins_api.notify import NotificationPayload
-
-logger = logging.getLogger(__name__)
 
 PLUGIN_ID = "limit-up-board"
 
@@ -56,29 +52,6 @@ class LubRuntime:
         **payload: object,
     ) -> StrategyEvent:
         return StrategyEvent(type=event_type, level=level, message=message, payload=dict(payload))
-
-    def notify(self, payload: NotificationPayload) -> bool:
-        """Push a NotificationPayload through the framework's notifier.
-
-        Returns True on success, False if no channel is enabled or dispatch
-        raised. Never blocks on HTTP — top-level ``deeptrade.notify`` builds
-        a notifier that uses an async dispatch worker.
-        """
-        from deeptrade import notify as _notify
-
-        try:
-            _notify(self.db, payload)
-            return True
-        except Exception as e:  # noqa: BLE001
-            logger.warning("notify dispatch failed: %s", e)
-            return False
-
-    def is_notify_enabled(self) -> bool:
-        """Cheap probe: any channel plugin enabled?"""
-        from deeptrade.core.plugin_manager import PluginManager
-
-        mgr = PluginManager(self.db)
-        return any(r.type == "channel" and r.enabled for r in mgr.list_all())
 
 
 def build_tushare_client(

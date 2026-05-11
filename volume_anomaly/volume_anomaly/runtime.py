@@ -7,7 +7,6 @@ via ``rt.llms.get_client(name, plugin_id=, run_id=)``.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -18,9 +17,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from deeptrade.core.db import Database
     from deeptrade.core.llm_manager import LLMManager
     from deeptrade.core.tushare_client import TushareClient
-    from deeptrade.plugins_api.notify import NotificationPayload
-
-logger = logging.getLogger(__name__)
 
 PLUGIN_ID = "volume-anomaly"
 
@@ -44,16 +40,6 @@ class VaRuntime:
         **payload: object,
     ) -> StrategyEvent:
         return StrategyEvent(type=event_type, level=level, message=message, payload=dict(payload))
-
-    def notify(self, payload: NotificationPayload) -> bool:
-        from deeptrade import notify as _notify
-
-        try:
-            _notify(self.db, payload)
-            return True
-        except Exception as e:  # noqa: BLE001
-            logger.warning("notify dispatch failed: %s", e)
-            return False
 
 
 def build_tushare_client(rt: VaRuntime, *, intraday: bool = False, event_cb: Any = None):
