@@ -1,6 +1,8 @@
 # DeepTradePluginOfficial
 
-Official plugin monorepo for [DeepTrade](https://github.com/ty19880929/deeptrade) — a plugin-based A-share screening CLI driven by LLMs.
+Official plugin monorepo for [DeepTrade](https://github.com/ty19880929/DeepTrade) — a plugin-based A-share screening CLI driven by LLMs.
+
+> 📖 **在线插件目录**：[deeptrade.tiey.ai/plugins](https://deeptrade.tiey.ai/plugins) — 自动同步本注册表
 
 ## Plugins
 
