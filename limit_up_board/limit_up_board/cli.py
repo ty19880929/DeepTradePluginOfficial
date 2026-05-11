@@ -615,16 +615,95 @@ def cmd_lgb_train(
 def cmd_lgb_evaluate(
     start: str = typer.Option(..., "--start", help="评估窗口起始日期 YYYYMMDD"),
     end: str = typer.Option(..., "--end", help="评估窗口结束日期 YYYYMMDD"),
-    model_id: str | None = typer.Option(None, "--model-id"),
-    drift: bool = typer.Option(False, "--drift", help="顺便输出特征 drift 报表（PR-3.3）"),
+    model_id: str | None = typer.Option(
+        None, "--model-id", help="模型 ID；不指定则评估当前 active 模型"
+    ),
+    force_sync: bool = typer.Option(False, "--force-sync", help="强制刷新 tushare 缓存"),
+    k_values: str = typer.Option(
+        "5,10,20",
+        "--k",
+        help="逗号分隔的 Top-K 列表；默认 5,10,20",
+    ),
+    drift: bool = typer.Option(  # noqa: ARG001 — wired in PR-3.3
+        False, "--drift", help="附带输出特征 drift 报表（PR-3.3）"
+    ),
+    baseline: str | None = typer.Option(  # noqa: ARG001 — wired in PR-3.3
+        None, "--baseline", help="drift baseline 模型 ID（默认 = active）"
+    ),
 ) -> None:
-    """对指定窗口跑离线评估（PR-3.1 实现）。"""
-    typer.echo(
-        f"Not yet implemented in this iteration: lgb evaluate --start {start} --end {end} "
-        f"--model-id={model_id} --drift={drift}"
-    )
-    typer.echo(_LGB_PENDING_HINT)
-    raise typer.Exit(2)
+    """对指定窗口跑离线评估（AUC / logloss / Top-K 命中率 vs baseline）。"""
+    if start > end:
+        typer.echo("✘ --start 必须 ≤ --end")
+        raise typer.Exit(2)
+    try:
+        ks = tuple(int(x.strip()) for x in k_values.split(",") if x.strip())
+    except ValueError as e:
+        typer.echo(f"✘ --k 解析失败: {e}")
+        raise typer.Exit(2) from e
+    if not ks or any(k < 1 for k in ks):
+        typer.echo(f"✘ --k 必须是 ≥1 的整数列表: {k_values!r}")
+        raise typer.Exit(2)
+
+    from .lgb.evaluate import evaluate_model, format_evaluate_table  # noqa: PLC0415
+
+    db, rt = _open_runtime()
+    try:
+        cfg = load_config(db)
+        tushare = build_tushare_client(rt)
+        cal_df = tushare.call("trade_cal", force_sync=force_sync)
+        calendar = TradeCalendar(cal_df)
+
+        # Pre-resolve the model so we can name the JSON output file even when
+        # the user passed --model-id explicitly.
+        target_id = model_id
+        if target_id is None:
+            active = _safe_get_active(db)
+            if active is None:
+                typer.echo("✘ no active model — 用 --model-id 指定，或先运行 lgb train")
+                raise typer.Exit(2)
+            target_id = active.model_id
+        else:
+            if _safe_get_model(db, target_id) is None:
+                typer.echo(f"✘ model_id not found: {target_id!r}")
+                raise typer.Exit(2)
+
+        typer.echo(
+            f"📊 评估 model={target_id} · window {start}..{end} · "
+            f"thresh={cfg.lgb_label_threshold_pct}%"
+        )
+
+        def _on_day(T: str, n: int, cum: int) -> None:
+            typer.echo(f"  [{T}] +{n} samples (cum. {cum})")
+
+        result = evaluate_model(
+            tushare=tushare,
+            calendar=calendar,
+            db=db,
+            start_date=start,
+            end_date=end,
+            model_id=target_id,
+            k_values=ks,
+            label_threshold_pct=cfg.lgb_label_threshold_pct,
+            max_float_mv_yi=cfg.max_float_mv_yi,
+            max_close_yuan=cfg.max_close_yuan,
+            force_sync=force_sync,
+            on_day=_on_day,
+        )
+
+        typer.echo("")
+        typer.echo(format_evaluate_table(result))
+
+        # JSON dump alongside the existing reports/ tree.
+        reports_root = paths.reports_dir()
+        reports_root.mkdir(parents=True, exist_ok=True)
+        out_path = reports_root / f"lgb_evaluate_{result.model_id or 'none'}_{start}_{end}.json"
+        out_path.write_text(
+            json.dumps(result.to_json_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        typer.echo(f"\n📄 JSON 报告：{out_path}")
+    finally:
+        db.close()
 
 
 @lgb_app.command("activate")
