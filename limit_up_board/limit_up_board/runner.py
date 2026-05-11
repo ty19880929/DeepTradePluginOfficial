@@ -96,6 +96,9 @@ class RunParams:
     moneyflow_lookback: int = 5
     debate: bool = False
     debate_llms: list[str] | None = None
+    # v0.5 LGB 开关：用户传 --no-lgb 时设为 False（一次性覆盖 LubConfig.lgb_enabled）。
+    # PR-0.3 仅落字段，pipeline 接入在 PR-2.2。
+    lgb_enabled: bool = True
 
 
 # ---------------------------------------------------------------------------

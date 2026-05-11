@@ -1,11 +1,20 @@
-"""Plugin-local settings (v0.4).
+"""Plugin-local settings (v0.4 + v0.5 LGB 扩展).
 
 Persisted in the ``lub_config`` table. Defaults live on :class:`LubConfig` and
 are re-applied automatically when a row is missing — DB rows only override.
 
-Currently exposed via ``deeptrade limit-up-board settings``:
+v0.4 字段（已沿用）：
     * ``max_float_mv_yi``  — 流通市值上限（亿）
     * ``max_close_yuan``   — 当前股价上限（元）
+
+v0.5 LGB 字段（lightgbm_design.md §10）：
+    * ``lgb_enabled``                  — 全局开关
+    * ``lgb_min_score_floor``          — R1 prompt 中提示 LLM 的分数下限
+    * ``lgb_decile_in_prompt``         — 是否注入 lgb_decile
+    * ``lgb_label_threshold_pct``      — T+1 阈值（默认 9.7）
+    * ``lgb_train_lookback_days``      — train CLI 默认窗口
+    * ``lgb_train_min_samples``        — 训练样本量下限
+    * ``lgb_max_models_to_keep``       — prune 默认保留模型数
 """
 
 from __future__ import annotations
@@ -20,10 +29,19 @@ if TYPE_CHECKING:  # pragma: no cover
 
 @dataclass
 class LubConfig:
-    """User-tunable run filters. Defaults reflect a typical 打板 watchlist."""
+    """User-tunable run filters + LGB knobs. Defaults reflect a typical 打板 watchlist."""
 
     max_float_mv_yi: float = 100.0
     max_close_yuan: float = 15.0
+
+    # ---- v0.5 LightGBM 评分相关 ----
+    lgb_enabled: bool = True
+    lgb_min_score_floor: float | None = 30.0
+    lgb_decile_in_prompt: bool = True
+    lgb_label_threshold_pct: float = 9.7
+    lgb_train_lookback_days: int = 730
+    lgb_train_min_samples: int = 1500
+    lgb_max_models_to_keep: int = 5
 
 
 _KEY_PREFIX = "lub."
