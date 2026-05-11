@@ -1,6 +1,6 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.4.0
+version: 0.5.0-alpha.1
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
@@ -37,6 +37,9 @@ migrations:
   - version: "20260509_001"
     file: migrations/20260509_001_init.sql
     checksum: "sha256:8f6bc721fedbd94f652fa356779eea7b4ef801483968dabfa6648cf2f639064f"
+  - version: "20260601_001"
+    file: migrations/20260601_001_lgb_tables.sql
+    checksum: "sha256:56e3bbd9b678a953c1fbe4fbde6d54d65ff191a1e5a385a2e9ef889aec93826e"
 
 tables:
   - name: lub_stock_basic
@@ -80,4 +83,10 @@ tables:
     purge_on_uninstall: true
   - name: lub_config
     description: 本插件用户可调设置（流通市值 / 股价上限）
+    purge_on_uninstall: true
+  - name: lub_lgb_models
+    description: LightGBM 模型版本登记（v0.5+）
+    purge_on_uninstall: true
+  - name: lub_lgb_predictions
+    description: 每次 run 的 LGB 推理结果审计（含特征摘要，便于复盘）
     purge_on_uninstall: true
