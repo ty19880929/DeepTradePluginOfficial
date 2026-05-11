@@ -23,6 +23,8 @@ from limit_up_board.render import (
     _lgb_cell,
     _lgb_compact,
     _lgb_model_id_repr,
+    _quantile,
+    _render_lgb_distribution_section,
     render_summary_md,
     write_report,
 )
@@ -272,3 +274,69 @@ def test_lgb_model_id_repr() -> None:
     assert _lgb_model_id_repr(bundle) == "`20260530_1_demo`"
     bundle.lgb_model_id = None
     assert _lgb_model_id_repr(bundle) == "`disabled`"
+
+
+# ---------------------------------------------------------------------------
+# PR-3.2 — LGB score distribution section
+# ---------------------------------------------------------------------------
+
+
+def test_distribution_section_empty_when_no_model() -> None:
+    bundle = _make_bundle(with_lgb=False)
+    assert _render_lgb_distribution_section(bundle) == ""
+
+
+def test_distribution_section_empty_when_no_scores() -> None:
+    bundle = _make_bundle(with_lgb=True)
+    for c in bundle.candidates:
+        c["lgb_score"] = None
+    assert _render_lgb_distribution_section(bundle) == ""
+
+
+def test_distribution_section_renders_stats_and_histogram() -> None:
+    bundle = _make_bundle(with_lgb=True)
+    # Inject more candidates to make the histogram informative.
+    for i, s in enumerate([5, 15, 25, 35, 45, 55, 65, 75, 85, 95]):
+        bundle.candidates.append(
+            {
+                "candidate_id": f"X{i}",
+                "ts_code": f"6{i:05d}.SH",
+                "name": f"x{i}",
+                "lgb_score": s,
+                "lgb_decile": (i // 1) + 1,
+                "lgb_feature_missing": [],
+            }
+        )
+    text = _render_lgb_distribution_section(bundle)
+    assert "本次 LGB 评分分布" in text
+    assert "n=" in text
+    assert "median=" in text
+    # Histogram fence
+    assert "```" in text
+    # Every 10-pt bucket appears as a row header
+    assert " 50-59 " in text
+
+
+def test_distribution_section_in_summary_md() -> None:
+    bundle = _make_bundle(with_lgb=True)
+    md = render_summary_md(
+        status=RunStatus.SUCCESS,
+        is_intraday=False,
+        bundle=bundle,
+        selected=_make_selected(),
+        predictions=_make_predictions(),
+        final_ranking=None,
+    )
+    assert "本次 LGB 评分分布" in md
+
+
+def test_quantile_helper() -> None:
+    arr = [10.0, 20.0, 30.0, 40.0]
+    assert _quantile(arr, 0.0) == 10.0
+    assert _quantile(arr, 1.0) == 40.0
+    assert _quantile(arr, 0.5) == 25.0
+    # Single element
+    assert _quantile([42.0], 0.5) == 42.0
+    # Empty
+    import math
+    assert math.isnan(_quantile([], 0.5))

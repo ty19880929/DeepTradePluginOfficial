@@ -304,6 +304,71 @@ def _safe_get_active(db: Database) -> ModelRecord | None:
         return None
 
 
+def _safe_predictions_usage(db: Database, model_id: str) -> dict[str, int] | None:
+    """Aggregate counts from ``lub_lgb_predictions`` for the given model.
+
+    Returns ``{'n_rows', 'n_runs', 'n_trade_dates'}``; ``None`` 表示表本身
+    不可访问（迁移未应用 / 旧 DB），让调用方静默降级。
+    """
+    try:
+        row = db.fetchone(
+            "SELECT COUNT(*), COUNT(DISTINCT run_id), COUNT(DISTINCT trade_date) "
+            "FROM lub_lgb_predictions WHERE model_id = ?",
+            (model_id,),
+        )
+    except Exception:  # noqa: BLE001 — table may not exist on legacy DBs
+        return None
+    if row is None:
+        return {"n_rows": 0, "n_runs": 0, "n_trade_dates": 0}
+    return {
+        "n_rows": int(row[0] or 0),
+        "n_runs": int(row[1] or 0),
+        "n_trade_dates": int(row[2] or 0),
+    }
+
+
+def _safe_predictions_recent(
+    db: Database, model_id: str, recent_n: int
+) -> list[dict[str, Any]]:
+    """Per-day score distribution snapshots for the most recent ``recent_n`` days.
+
+    Returns rows ordered by trade_date desc; each row has ``trade_date``, ``n``,
+    ``min``, ``p25``, ``median``, ``p75``, ``max``.
+
+    Implementation note: DuckDB exposes ``approx_quantile`` / ``percentile_cont``;
+    we use ``quantile_cont`` which is supported in current DuckDB releases.
+    """
+    if recent_n <= 0:
+        return []
+    try:
+        rows = db.fetchall(
+            "SELECT trade_date, COUNT(*) AS n, MIN(lgb_score) AS lo, "
+            "quantile_cont(lgb_score, 0.25) AS q25, "
+            "quantile_cont(lgb_score, 0.5)  AS med, "
+            "quantile_cont(lgb_score, 0.75) AS q75, "
+            "MAX(lgb_score) AS hi "
+            "FROM lub_lgb_predictions WHERE model_id = ? "
+            "GROUP BY trade_date ORDER BY trade_date DESC LIMIT ?",
+            (model_id, recent_n),
+        )
+    except Exception:  # noqa: BLE001 — table missing or function unavailable
+        return []
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "trade_date": str(r[0]),
+                "n": int(r[1] or 0),
+                "min": float(r[2] or 0.0),
+                "p25": float(r[3] or 0.0),
+                "median": float(r[4] or 0.0),
+                "p75": float(r[5] or 0.0),
+                "max": float(r[6] or 0.0),
+            }
+        )
+    return out
+
+
 def _git_short_commit() -> str | None:
     try:
         out = subprocess.check_output(
@@ -399,8 +464,13 @@ def cmd_lgb_info(
         "--model-id",
         help="模型 ID；不指定则展示当前 active 模型；无 active 时报错。",
     ),
+    recent_n: int = typer.Option(
+        0,
+        "--recent-N",
+        help="额外列出最近 N 天每天的 candidate × score 分布快照（来自 lub_lgb_predictions）",
+    ),
 ) -> None:
-    """展示单个模型的详细信息（CV 指标 / 特征数 / 超参 / 文件路径）。"""
+    """展示单个模型的详细信息（CV 指标 / 特征数 / 超参 / 文件路径 + 使用统计）。"""
     db = Database(paths.db_path())
     try:
         if model_id is None:
@@ -412,6 +482,12 @@ def cmd_lgb_info(
                 raise typer.Exit(2)
             model_id = active.model_id
         record = _safe_get_model(db, model_id)
+        usage = _safe_predictions_usage(db, model_id) if record is not None else None
+        recent = (
+            _safe_predictions_recent(db, model_id, recent_n)
+            if record is not None and recent_n > 0
+            else []
+        )
     finally:
         db.close()
     if record is None:
@@ -442,7 +518,46 @@ def cmd_lgb_info(
     table.add_row("created_at", str(record.created_at) if record.created_at else "—")
     table.add_row("feature_list_json (preview)", record.feature_list_json[:120] + "...")
     table.add_row("hyperparams_json", record.hyperparams_json)
+    # PR-3.2 — usage stats from lub_lgb_predictions.
+    if usage is not None:
+        table.add_row(
+            "predictions usage",
+            (
+                f"runs={usage['n_runs']}  trade_dates={usage['n_trade_dates']}  "
+                f"rows={usage['n_rows']}"
+                if usage["n_rows"]
+                else "(no predictions yet)"
+            ),
+        )
     console.print(table)
+
+    if recent_n > 0:
+        recent_table = Table(
+            title=f"recent {recent_n} trade dates · score distribution",
+            show_header=True,
+            header_style="cyan",
+        )
+        recent_table.add_column("trade_date")
+        recent_table.add_column("n", justify="right")
+        recent_table.add_column("min", justify="right")
+        recent_table.add_column("p25", justify="right")
+        recent_table.add_column("median", justify="right")
+        recent_table.add_column("p75", justify="right")
+        recent_table.add_column("max", justify="right")
+        if not recent:
+            recent_table.add_row("(none)", "—", "—", "—", "—", "—", "—")
+        else:
+            for row in recent:
+                recent_table.add_row(
+                    row["trade_date"],
+                    str(row["n"]),
+                    f"{row['min'] * 100:.1f}",
+                    f"{row['p25'] * 100:.1f}",
+                    f"{row['median'] * 100:.1f}",
+                    f"{row['p75'] * 100:.1f}",
+                    f"{row['max'] * 100:.1f}",
+                )
+        console.print(recent_table)
 
 
 @lgb_app.command("train")

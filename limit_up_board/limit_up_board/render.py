@@ -101,6 +101,11 @@ def render_summary_md(
     if bundle.data_unavailable:
         out.append(f"\n*data_unavailable*: `{bundle.data_unavailable}`\n")
 
+    # ----- LGB score distribution (PR-3.2) -----
+    lgb_section = _render_lgb_distribution_section(bundle)
+    if lgb_section:
+        out.append(lgb_section)
+
     # ----- R1 -----
     out.append(f"\n## R1 强势标的（{len(selected)}/{len(bundle.candidates)} selected）\n")
     if selected:
@@ -371,6 +376,11 @@ def render_debate_summary_md(
     )
     if bundle.data_unavailable:
         out.append(f"\n*data_unavailable*: `{bundle.data_unavailable}`\n")
+
+    # ----- LGB score distribution (PR-3.2) -----
+    lgb_section = _render_lgb_distribution_section(bundle)
+    if lgb_section:
+        out.append(lgb_section)
 
     # ----- §1 参与 LLM 状态 ------------------------------------------------
     out.append("\n## 1. 参与 LLM 状态\n\n")
@@ -819,6 +829,60 @@ def _lgb_compact(c: dict[str, Any]) -> str:
         return f"{float(score):.0f}"
     except (TypeError, ValueError):
         return "—"
+
+
+def _render_lgb_distribution_section(bundle: Round1Bundle) -> str:
+    """Optional "本次 LGB 评分分布" small section for summary.md (PR-3.2).
+
+    Returns the empty string when the bundle has no LGB model or no scores;
+    otherwise emits a compact min / p25 / median / p75 / max line plus a
+    coarse text histogram (one cell per 10-point bucket).
+    """
+    if not bundle.lgb_model_id or not bundle.candidates:
+        return ""
+    scores = [
+        c["lgb_score"]
+        for c in bundle.candidates
+        if c.get("lgb_score") is not None
+    ]
+    if not scores:
+        return ""
+    arr = sorted(float(s) for s in scores)
+    n = len(arr)
+    lo = arr[0]
+    hi = arr[-1]
+    med = _quantile(arr, 0.5)
+    p25 = _quantile(arr, 0.25)
+    p75 = _quantile(arr, 0.75)
+    parts = [
+        "\n## 本次 LGB 评分分布\n",
+        f"- n={n}  min={lo:.1f}  p25={p25:.1f}  median={med:.1f}  p75={p75:.1f}  max={hi:.1f}\n",
+    ]
+    # 10-point histogram (0..100) — ASCII art friendly even in plain terminals.
+    buckets = [0] * 10
+    for s in arr:
+        idx = min(9, max(0, int(s // 10)))
+        buckets[idx] += 1
+    max_bucket = max(buckets) or 1
+    parts.append("\n```\n")
+    for i, count in enumerate(buckets):
+        bar = "█" * int(round(count / max_bucket * 30)) if count else ""
+        parts.append(f"{i * 10:>3}-{(i + 1) * 10 - 1:<3} | {count:>3} {bar}\n")
+    parts.append("```\n")
+    return "".join(parts)
+
+
+def _quantile(sorted_arr: list[float], q: float) -> float:
+    """Linear interpolation quantile; sorted_arr must be ascending."""
+    if not sorted_arr:
+        return float("nan")
+    if len(sorted_arr) == 1:
+        return sorted_arr[0]
+    pos = q * (len(sorted_arr) - 1)
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_arr) - 1)
+    frac = pos - lo
+    return sorted_arr[lo] * (1 - frac) + sorted_arr[hi] * frac
 
 
 def _render_debate_terminal(
