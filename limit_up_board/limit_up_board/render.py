@@ -89,6 +89,7 @@ def render_summary_md(
         f"- next_trade_date: **{bundle.next_trade_date}**\n"
         f"- status: `{status.value}`\n"
         f"- intraday: `{is_intraday}`\n"
+        f"- lgb_model_id: {_lgb_model_id_repr(bundle)}\n"
     )
 
     # Sector strength source label is meaningful — surface it.
@@ -103,13 +104,13 @@ def render_summary_md(
     # ----- R1 -----
     out.append(f"\n## R1 强势标的（{len(selected)}/{len(bundle.candidates)} selected）\n")
     if selected:
-        out.append("| Rank | Code | Name | T收盘 (元) | Score | Level | Theme/Industry | Rationale |\n")
-        out.append("|------|------|------|-----------|-------|-------|----------------|-----------|\n")
+        out.append("| Rank | Code | Name | T收盘 (元) | Score | LGB | Level | Theme/Industry | Rationale |\n")
+        out.append("|------|------|------|-----------|-------|----:|-------|----------------|-----------|\n")
         for i, c in enumerate(selected, 1):
             theme = _industry_for(c.candidate_id, bundle.candidates)
             out.append(
                 f"| {i} | `{c.ts_code}` | {c.name} | {_close_for(c.candidate_id, bundle.candidates)} | "
-                f"{c.score:.1f} | {c.strength_level} | {theme} | {c.rationale} |\n"
+                f"{c.score:.1f} | {_lgb_cell(c.candidate_id, bundle.candidates)} | {c.strength_level} | {theme} | {c.rationale} |\n"
             )
     else:
         out.append("_(本轮无强势标的)_\n")
@@ -118,25 +119,28 @@ def render_summary_md(
     if predictions:
         if final_ranking is not None:
             out.append("\n## 次日连板预测（按 final_rank 排序）\n")
-            out.append("| # | Code | Name | T收盘 (元) | Final Pred | Conf. | Δ vs batch | Reason |\n")
-            out.append("|---|------|------|-----------|-----------|-------|-----------|--------|\n")
+            out.append("| # | Code | Name | T收盘 (元) | LGB | Final Pred | Conf. | Δ vs batch | Reason |\n")
+            out.append("|---|------|------|-----------|----:|-----------|-------|-----------|--------|\n")
             for fi in sorted(final_ranking.finalists, key=lambda f: f.final_rank):
                 out.append(
                     f"| {fi.final_rank} | `{fi.ts_code}` | "
                     f"{_name_for(fi.candidate_id, predictions)} | "
                     f"{_close_for(fi.candidate_id, bundle.candidates)} | "
+                    f"{_lgb_cell(fi.candidate_id, bundle.candidates)} | "
                     f"{fi.final_prediction} | {fi.final_confidence} | "
                     f"{fi.delta_vs_batch} | {fi.reason_vs_peers} |\n"
                 )
         else:
             out.append("\n## 次日连板预测（单批）\n")
-            out.append("| Rank | Code | Name | T收盘 (元) | Score | Conf. | Pred | Rationale |\n")
-            out.append("|------|------|------|-----------|-------|-------|------|-----------|\n")
+            out.append("| Rank | Code | Name | T收盘 (元) | Score | LGB | Conf. | Pred | Rationale |\n")
+            out.append("|------|------|------|-----------|-------|----:|-------|------|-----------|\n")
             for p in sorted(predictions, key=lambda x: x.rank):
                 out.append(
                     f"| {p.rank} | `{p.ts_code}` | {p.name} | "
                     f"{_close_for(p.candidate_id, bundle.candidates)} | "
-                    f"{p.continuation_score:.1f} | {p.confidence} | "
+                    f"{p.continuation_score:.1f} | "
+                    f"{_lgb_cell(p.candidate_id, bundle.candidates)} | "
+                    f"{p.confidence} | "
                     f"{p.prediction} | {p.rationale} |\n"
                 )
     else:
@@ -203,6 +207,7 @@ def write_report(
     )
 
     # 3. round2_predictions.json (ALL predictions, with batch_local_rank)
+    cand_by_id = {c.get("candidate_id"): c for c in bundle.candidates}
     r2_out = []
     for p in predictions:
         rec = p.model_dump(mode="json")
@@ -215,6 +220,14 @@ def write_report(
             if match is not None:
                 rec["final_rank"] = match.final_rank
                 rec["delta_vs_batch"] = match.delta_vs_batch
+        # v0.5 — surface the candidate's LGB attribution in the JSON export
+        # (see lightgbm_design.md §11.3). Always present (None when LGB
+        # disabled / not loaded for this run) so downstream tools have a
+        # stable schema.
+        src = cand_by_id.get(p.candidate_id, {})
+        rec["lgb_score"] = src.get("lgb_score")
+        rec["lgb_decile"] = src.get("lgb_decile")
+        rec["lgb_model_id"] = bundle.lgb_model_id
         r2_out.append(rec)
     (root / "round2_predictions.json").write_text(
         json.dumps(r2_out, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -350,6 +363,7 @@ def render_debate_summary_md(
         f"- status: `{status.value}`\n"
         f"- intraday: `{is_intraday}`\n"
         f"- providers: {', '.join(f'`{r.provider}`' for r in results)}\n"
+        f"- lgb_model_id: {_lgb_model_id_repr(bundle)}\n"
     )
     out.append(
         f"\n*sector_strength_source*: `{bundle.sector_strength.source}`  "
@@ -660,7 +674,8 @@ def _render_prediction_table(
 
     All three R2 prediction classes (top_candidate / watchlist / avoid) share the
     same column layout — visual hierarchy is conveyed via title_style and
-    border_style only.
+    border_style only. v0.5: an ``LGB`` column was added between ``分`` and
+    ``信`` (lightgbm_design.md §11.2).
     """
     t = table_cls(
         title=title,
@@ -674,6 +689,7 @@ def _render_prediction_table(
     t.add_column("名称", no_wrap=True, max_width=10)
     t.add_column("T收盘", justify="right", width=7)
     t.add_column("分", justify="right", width=4)
+    t.add_column("LGB", justify="right", width=4)
     t.add_column("信", width=4)
     t.add_column("理由", overflow="fold")
     for p in group:
@@ -683,6 +699,7 @@ def _render_prediction_table(
             p.get("name", "?"),
             _close_str(close_lookup.get(p.get("ts_code"))),
             f"{p.get('continuation_score', 0):.0f}",
+            _lgb_compact(p),
             _conf_short(p.get("confidence", "")),
             p.get("rationale", ""),
         )
@@ -754,6 +771,52 @@ def _close_str(v: Any) -> str:
         return "—"
     try:
         return f"{float(v):.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+# ---------------------------------------------------------------------------
+# v0.5 — LGB rendering helpers
+# ---------------------------------------------------------------------------
+
+
+def _lgb_model_id_repr(bundle: Round1Bundle) -> str:
+    """Header line label: ``\\`<model_id>\\``` or ``\\`disabled\\``` for the
+    summary.md metadata block."""
+    if bundle.lgb_model_id:
+        return f"`{bundle.lgb_model_id}`"
+    return "`disabled`"
+
+
+def _lgb_cell(cid: str, candidates: list[dict[str, Any]]) -> str:
+    """One table-cell representation of a candidate's lgb_score / lgb_decile.
+
+    Format: ``73 (d8)`` for score=73, decile=8; ``—`` when missing.
+    """
+    for c in candidates:
+        if c.get("candidate_id") != cid:
+            continue
+        score = c.get("lgb_score")
+        decile = c.get("lgb_decile")
+        if score is None:
+            return "—"
+        try:
+            s_str = f"{float(score):.0f}"
+        except (TypeError, ValueError):
+            return "—"
+        if decile is None:
+            return s_str
+        return f"{s_str} (d{int(decile)})"
+    return "—"
+
+
+def _lgb_compact(c: dict[str, Any]) -> str:
+    """Compact terminal-table representation. Width-3 friendly."""
+    score = c.get("lgb_score")
+    if score is None:
+        return "—"
+    try:
+        return f"{float(score):.0f}"
     except (TypeError, ValueError):
         return "—"
 

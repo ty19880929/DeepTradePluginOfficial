@@ -29,9 +29,9 @@ from .data import Round1Bundle, SectorStrength
 from .profiles import STAGE_FINAL, STAGE_R1, STAGE_R2, STAGE_R3, resolve_profile
 from .prompts import (
     FINAL_RANKING_SYSTEM,
-    R1_SYSTEM,
-    R2_SYSTEM,
     R3_DEBATE_SYSTEM,
+    build_r1_system,
+    build_r2_system,
     final_ranking_user_prompt,
     r1_user_prompt,
     r2_user_prompt,
@@ -224,6 +224,7 @@ def run_r1(
     bundle: Round1Bundle,
     preset: str,
     input_budget: int = DEFAULT_R1_INPUT_BUDGET,
+    lgb_min_score_floor: float | None = 30.0,
 ) -> Iterable[tuple[StrategyEvent, RoundResult | None]]:
     """Run all R1 batches, yielding (event, terminal_result_or_None).
 
@@ -238,6 +239,7 @@ def run_r1(
         input_budget=input_budget,
         output_budget=profile.max_output_tokens,
     )
+    r1_system = build_r1_system(lgb_min_score_floor=lgb_min_score_floor)
     yield (
         StrategyEvent(
             type=EventType.LIVE_STATUS,
@@ -304,7 +306,7 @@ def run_r1(
         try:
             obj, meta = _complete_with_set_check(
                 llm,
-                system=R1_SYSTEM,
+                system=r1_system,
                 user=user,
                 schema=StrongAnalysisResponse,
                 profile=profile,
@@ -392,6 +394,7 @@ def run_r2(
     bundle: Round1Bundle,
     preset: str,
     input_budget: int = DEFAULT_R2_INPUT_BUDGET,
+    lgb_min_score_floor: float | None = 30.0,
 ) -> Iterable[tuple[StrategyEvent, RoundResult | None]]:
     """Run R2; if the candidate set exceeds the input budget, multi-batch + final_ranking."""
     profile = resolve_profile(preset, STAGE_R2)
@@ -400,6 +403,7 @@ def run_r2(
         input_budget=input_budget,
         output_budget=profile.max_output_tokens,
     )
+    r2_system = build_r2_system(lgb_min_score_floor=lgb_min_score_floor)
     yield (
         StrategyEvent(
             type=EventType.LIVE_STATUS,
@@ -469,7 +473,7 @@ def run_r2(
         try:
             obj, meta = _complete_with_set_check(
                 llm,
-                system=R2_SYSTEM,
+                system=r2_system,
                 user=user,
                 schema=ContinuationResponse,
                 profile=profile,

@@ -16,7 +16,26 @@ from typing import Any
 # R1: strong target analysis
 # ---------------------------------------------------------------------------
 
-R1_SYSTEM = """\
+_R1_LGB_BLOCK_FLOOR = (
+    "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，越大越倾向次日溢价/连板）；"
+    "lgb_decile（1=最弱，10=最强，当批分位）。\n"
+    "  · lgb_score < {floor} 的标的，除非有极强的突发题材或一线游资认可，否则倾向 selected=false。\n"
+    "  · lgb_score 缺失（null）或本次未启用模型时，按其他证据判断，不要因为缺失就一概 selected=false。\n"
+    "  · 在 evidence 中引用时 field=lgb_score，unit=\"无\"，interpretation 形如 "
+    "\"分位 X / 模型分 Y\"；不可同时把 lgb_score 当做 risk_flags 与 evidence 的唯一支柱。"
+)
+
+_R1_LGB_BLOCK_NO_FLOOR = (
+    "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，越大越倾向次日溢价/连板）；"
+    "lgb_decile（1=最弱，10=最强，当批分位）。\n"
+    "  · lgb_score 缺失（null）或本次未启用模型时，按其他证据判断，不要因为缺失就一概 selected=false。\n"
+    "  · 在 evidence 中引用时 field=lgb_score，unit=\"无\"，interpretation 形如 "
+    "\"分位 X / 模型分 Y\"；不可同时把 lgb_score 当做 risk_flags 与 evidence 的唯一支柱。"
+)
+
+
+def _r1_system_with(lgb_block: str) -> str:
+    return f"""\
 你是一个 A 股打板策略研究助手。你只能基于本次消息中提供的结构化数据进行分析。
 
 【硬性纪律】
@@ -37,9 +56,30 @@ R1_SYSTEM = """\
 - 形态：ma5 / ma10 / ma20 / ma_bull_aligned（多头排列时增强）
 - 历史基因：up_count_30d（近 30 日涨停次数）/ up_stat
 - 市场情绪：参考下方【市场摘要】中 limit_step_trend / yesterday_failure_rate / yesterday_winners_today
+{lgb_block}
 - 风险：是否一字板 / 过度连板 / 题材孤立 / 缺数据
 
-【evidence 要求】
+【evidence 要求】"""
+
+
+def build_r1_system(*, lgb_min_score_floor: float | None = 30.0) -> str:
+    """Render R1 system prompt with the LGB §8.1 paragraph.
+
+    ``lgb_min_score_floor=None`` → omit the soft-floor sentence (the model still
+    sees the lgb_score description, but no numeric threshold is suggested).
+    """
+    if lgb_min_score_floor is None:
+        block = _R1_LGB_BLOCK_NO_FLOOR
+    else:
+        # Format inline; ``floor`` is the only placeholder. Trim trailing zeros
+        # so 30.0 renders as "30" but 32.5 stays as "32.5".
+        floor_repr = f"{lgb_min_score_floor:g}"
+        block = _R1_LGB_BLOCK_FLOOR.format(floor=floor_repr)
+    return _r1_system_with(block) + _R1_TAIL
+
+
+_R1_TAIL = """
+
 每个候选股至少给出 1 条、至多 4 条 evidence；每条必须引用真实出现在输入中的字段名 (`field`)，并填上对应数值 (`value`)、单位 (`unit`) 和你的解读 (`interpretation`)。
 任何无法用输入字段佐证的 rationale 都视为幻觉。
 当 candidate 的 missing_data 包含某字段时，evidence 中**不得**引用该字段。
@@ -84,6 +124,12 @@ rationale 不超过 80 字（输出截断会触发 JSON 失败）。
 - missing_data:    数据缺失字段名数组（参见 data_unavailable）
 - 本批每只候选股都必须出现在 candidates 中，candidate_id 与输入完全一致，不可漏不可加。
 """
+
+
+# Backward-compatible constant — reflects the LubConfig default
+# (lgb_min_score_floor=30.0). Pipelines that want a different floor must call
+# ``build_r1_system(...)`` directly.
+R1_SYSTEM = build_r1_system(lgb_min_score_floor=30.0)
 
 
 def r1_user_prompt(
@@ -139,6 +185,12 @@ R2_SYSTEM = """\
   最高板地位的标的可适度上调 continuation_score；score 仍受 0–100 上限约束。
 - 不允许引用 missing_data 中的字段；可引用所有派生字段
   （amplitude_pct / fd_amount_ratio / ma_* / up_count_30d）。
+- LightGBM 量化分（lgb_score / lgb_decile）作为 continuation_score 的统计学锚点之一：
+  · lgb_score ≥ 70 的标的可适度上调 confidence；但若同时存在 cyq_winner_pct > 70 / 高位连板等
+    分歧风险，仍需下调；模型分不优先于盘口风险信号。
+  · lgb_score < __R2_LGB_FLOOR__ 的标的若你给出 top_candidate，rationale 必须明确写出"为何超越模型判断"。
+  · lgb_score 缺失（null）或本次未启用模型时，忽略此维度，按其他证据评估。
+  · 引用时 field 可以是 lgb_score 或 lgb_decile，value 必须填标量（分数 / 分位数）。
 - 筹码维度（参考候选行 cyq_winner_pct / cyq_top10_concentration /
   cyq_avg_cost_yuan / cyq_close_to_avg_cost_pct）：
   · cyq_winner_pct > 70% 视为"获利盘抛压重"，下调 confidence；
@@ -204,6 +256,34 @@ R2_SYSTEM = """\
 - next_day_watch_points / failure_triggers: 各 1–4 条字符串数组（不可为空）
 - 输入清单中的每一只标的都必须出现在 candidates 中，candidate_id 与输入完全一致。
 """
+
+
+# v0.5 — LGB §8.2 block uses `__R2_LGB_FLOOR__` sentinel so config can override
+# at render time. Constant default (LubConfig.lgb_min_score_floor=30) bakes in
+# the typical value so the constant string stays self-describing.
+R2_SYSTEM = R2_SYSTEM.replace("__R2_LGB_FLOOR__", "30")
+
+
+def build_r2_system(*, lgb_min_score_floor: float | None = 30.0) -> str:
+    """Render R2 system prompt with the §8.2 LGB paragraph.
+
+    ``lgb_min_score_floor=None`` → drop the soft-floor sentence entirely; the
+    rest of the LGB guidance (≥70 boost, missing-handling, evidence shape) is
+    preserved.
+    """
+    if lgb_min_score_floor is None:
+        # Re-derive the template and strip the floor line; cheap (one string op).
+        from re import sub as _re_sub
+
+        return _re_sub(
+            r"\n  · lgb_score < 30 的标的若你给出 top_candidate[^\n]*\n",
+            "\n",
+            R2_SYSTEM,
+        )
+    if lgb_min_score_floor == 30.0:
+        return R2_SYSTEM
+    floor_repr = f"{lgb_min_score_floor:g}"
+    return R2_SYSTEM.replace("lgb_score < 30 的标的", f"lgb_score < {floor_repr} 的标的")
 
 
 def r2_user_prompt(

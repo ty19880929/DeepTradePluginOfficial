@@ -421,8 +421,17 @@ class LubRunner:
 
         # Step 2 — R1
         preset = cfg.app_profile  # v0.7: per-stage tuning resolved by plugin
+        # v0.5 LGB: thread the configured min_score_floor into the prompts;
+        # when LGB is fully disabled we pass None so the prompt drops the
+        # numeric threshold sentence (the rest of the LGB guidance survives).
+        lgb_floor = lub_cfg.lgb_min_score_floor if rt.lgb_scorer is not None else None
         r1_result = None
-        for ev, res in run_r1(llm=self._llm, bundle=bundle, preset=preset):
+        for ev, res in run_r1(
+            llm=self._llm,
+            bundle=bundle,
+            preset=preset,
+            lgb_min_score_floor=lgb_floor,
+        ):
             yield ev
             if res is not None:
                 r1_result = res
@@ -434,7 +443,11 @@ class LubRunner:
         # Step 4 — R2
         r2_result = None
         for ev, res in run_r2(
-            llm=self._llm, selected=selected, bundle=bundle, preset=preset
+            llm=self._llm,
+            selected=selected,
+            bundle=bundle,
+            preset=preset,
+            lgb_min_score_floor=lgb_floor,
         ):
             yield ev
             if res is not None:
@@ -559,6 +572,10 @@ class LubRunner:
             preset = cfg.app_profile
             reports_dir = paths.reports_dir() / run_id
 
+            # v0.5 — resolve the LGB floor once per run; workers all share it.
+            lub_cfg = load_config(rt.db)
+            lgb_floor = lub_cfg.lgb_min_score_floor if rt.lgb_scorer is not None else None
+
             # ----- Phase A: parallel R1 + R2 + (final_ranking) ---------------
             emit(
                 rt.emit(
@@ -578,6 +595,7 @@ class LubRunner:
                         reports_dir,
                         params.allow_intraday,
                         rt.config,
+                        lgb_floor,
                     ): provider
                     for provider in providers
                 }
@@ -986,6 +1004,7 @@ def _worker_phase_a(
     reports_dir: Path,
     is_intraday: bool,
     config: ConfigService,
+    lgb_min_score_floor: float | None = 30.0,
 ) -> ProviderDebateResult:
     """One provider's R1 + R2 + (optional) final_ranking. Tagged events are
     attached to the returned ProviderDebateResult; the main thread will emit
@@ -1001,14 +1020,20 @@ def _worker_phase_a(
 
         events: list[StrategyEvent] = []
 
-        for ev, res in run_r1(llm=llm, bundle=bundle, preset=preset):
+        for ev, res in run_r1(
+            llm=llm, bundle=bundle, preset=preset,
+            lgb_min_score_floor=lgb_min_score_floor,
+        ):
             events.append(ev)
             if res is not None:
                 out.r1_result = res
         selected = out.r1_result.selected if out.r1_result else []
 
         if selected:
-            for ev, res in run_r2(llm=llm, selected=selected, bundle=bundle, preset=preset):
+            for ev, res in run_r2(
+                llm=llm, selected=selected, bundle=bundle, preset=preset,
+                lgb_min_score_floor=lgb_min_score_floor,
+            ):
                 events.append(ev)
                 if res is not None:
                     out.r2_result = res
