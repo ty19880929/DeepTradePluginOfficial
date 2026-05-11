@@ -1189,3 +1189,23 @@ def _opt_int(v: Any) -> int | None:
     if v is None or pd.isna(v):
         return None
     return int(v)
+
+
+# ---------------------------------------------------------------------------
+# v0.5 — public aliases for lgb.dataset reuse (lightgbm_iteration_plan.md PR-1.2)
+# ---------------------------------------------------------------------------
+#
+# The underscore-prefixed helpers above were originally module-internal; the
+# LightGBM training pipeline needs to call them from ``limit_up_board.lgb.dataset``.
+# We expose public names without renaming the originals so that existing tests
+# (which import the underscore names) continue to work unchanged.
+
+apply_market_filter = _apply_market_filter
+build_lhb_rollup = _build_lhb_rollup
+build_cyq_lookup = _build_cyq_lookup
+index_by_code = _index_by_code
+build_candidate_rows = _build_candidate_rows
+summarize_limit_step = _summarize_limit_step
+fetch_history_window = _fetch_history_window
+try_optional = _try_optional
+shift_date = _shift_date
