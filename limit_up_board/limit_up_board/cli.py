@@ -14,8 +14,13 @@ Invoked via the framework's pure pass-through dispatch:
 
 from __future__ import annotations
 
+import json
+import logging
+import subprocess
 import sys
 from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
 import questionary
 import typer
@@ -27,9 +32,16 @@ from deeptrade.core.config import ConfigService
 from deeptrade.core.db import Database
 from deeptrade.core.llm_manager import LLMManager
 
+from .calendar import TradeCalendar
 from .config import LubConfig, list_for_show, load_config, save_config
+from .lgb import paths as lgb_paths
+from .lgb import registry as lgb_registry
+from .lgb.dataset import collect_training_window
+from .lgb.features import FEATURE_NAMES, SCHEMA_VERSION
+from .lgb.registry import ModelRecord, ensure_unique_model_id, insert_model, mint_model_id
+from .lgb.trainer import train_lightgbm
 from .runner import LubRunner, PreconditionError, RunParams, render_finished_run
-from .runtime import LubRuntime
+from .runtime import LubRuntime, build_tushare_client
 
 app = typer.Typer(
     name="limit-up-board",
@@ -263,50 +275,75 @@ def cmd_settings_show() -> None:
 
 
 # ---------------------------------------------------------------------------
-# lgb — LightGBM 评分模型生命周期（v0.5+ 骨架，逐 PR 填实现）
+# lgb — LightGBM 评分模型生命周期
 # ---------------------------------------------------------------------------
 
 
-_LGB_PENDING_HINT = "（实现将在后续 PR 中补齐——本次仅落地 CLI 骨架与持久化表）"
+_LGB_PENDING_HINT = "（实现将在后续 PR 中补齐）"
 
 
-def _fetch_lgb_models(db: Database) -> list[tuple]:
-    """Return all rows in ``lub_lgb_models`` ordered by created_at DESC.
-
-    Returns ``[]`` when the table doesn't exist (e.g. plugin newly installed but
-    migration not yet applied via daily run) — keeps the CLI from raising.
-    """
+def _safe_list_models(db: Database) -> list[ModelRecord]:
+    """Wrap registry.list_models with a safety net for missing-table cases."""
     try:
-        return db.fetchall(
-            "SELECT model_id, schema_version, train_start_date, train_end_date, "
-            "n_samples, n_positive, cv_auc_mean, cv_auc_std, feature_count, "
-            "plugin_version, file_path, is_active, created_at "
-            "FROM lub_lgb_models ORDER BY created_at DESC"
-        )
+        return lgb_registry.list_models(db)
     except Exception:  # noqa: BLE001 — duckdb CatalogException 不公开导出
         return []
 
 
-def _fetch_lgb_model(db: Database, model_id: str) -> tuple | None:
+def _safe_get_model(db: Database, model_id: str) -> ModelRecord | None:
     try:
-        return db.fetchone(
-            "SELECT model_id, schema_version, train_start_date, train_end_date, "
-            "n_samples, n_positive, cv_auc_mean, cv_auc_std, cv_logloss_mean, "
-            "feature_count, feature_list_json, hyperparams_json, framework_version, "
-            "plugin_version, git_commit, file_path, is_active, created_at "
-            "FROM lub_lgb_models WHERE model_id = ?",
-            (model_id,),
-        )
+        return lgb_registry.get_model(db, model_id)
     except Exception:  # noqa: BLE001
         return None
 
 
-def _fetch_active_lgb_model(db: Database) -> tuple | None:
+def _safe_get_active(db: Database) -> ModelRecord | None:
     try:
-        return db.fetchone(
-            "SELECT model_id FROM lub_lgb_models WHERE is_active = TRUE "
-            "ORDER BY created_at DESC LIMIT 1"
+        return lgb_registry.get_active(db)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _git_short_commit() -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).resolve().parent),
+            stderr=subprocess.DEVNULL,
+            timeout=2,
         )
+        return out.decode("utf-8").strip() or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _plugin_version() -> str:
+    yaml_path = Path(__file__).resolve().parent.parent / "deeptrade_plugin.yaml"
+    if not yaml_path.is_file():
+        return "unknown"
+    try:
+        import yaml  # noqa: PLC0415
+
+        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+        return str(data.get("version", "unknown"))
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def _framework_version() -> str | None:
+    try:
+        import deeptrade  # noqa: PLC0415
+
+        return getattr(deeptrade, "__version__", None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _lightgbm_version() -> str | None:
+    try:
+        import lightgbm  # noqa: PLC0415
+
+        return getattr(lightgbm, "__version__", None)
     except Exception:  # noqa: BLE001
         return None
 
@@ -316,10 +353,10 @@ def cmd_lgb_list() -> None:
     """列出所有已注册的 LightGBM 模型。★ 标记当前 active 的那一行。"""
     db = Database(paths.db_path())
     try:
-        rows = _fetch_lgb_models(db)
+        records = _safe_list_models(db)
     finally:
         db.close()
-    if not rows:
+    if not records:
         typer.echo("(no models registered)")
         return
     console = Console()
@@ -334,26 +371,23 @@ def cmd_lgb_list() -> None:
     table.add_column("features", justify="right")
     table.add_column("plugin_ver")
     table.add_column("created_at")
-    for r in rows:
-        (
-            model_id, schema_v, t0, t1, n, n_pos,
-            auc_mean, auc_std, feat_count, plugin_v, _file, is_active, created,
-        ) = r
-        active_mark = "★" if is_active else ""
+    for r in records:
         auc_repr = (
-            f"{auc_mean:.3f}±{(auc_std or 0):.3f}" if auc_mean is not None else "—"
+            f"{r.cv_auc_mean:.3f}±{(r.cv_auc_std or 0):.3f}"
+            if r.cv_auc_mean is not None
+            else "—"
         )
         table.add_row(
-            active_mark,
-            str(model_id),
-            str(schema_v),
-            f"{t0}..{t1}",
-            str(n),
-            str(n_pos),
+            "★" if r.is_active else "",
+            r.model_id,
+            str(r.schema_version),
+            f"{r.train_start_date}..{r.train_end_date}",
+            str(r.n_samples),
+            str(r.n_positive),
             auc_repr,
-            str(feat_count),
-            str(plugin_v),
-            str(created),
+            str(r.feature_count),
+            r.plugin_version,
+            str(r.created_at) if r.created_at is not None else "—",
         )
     console.print(table)
 
@@ -370,44 +404,44 @@ def cmd_lgb_info(
     db = Database(paths.db_path())
     try:
         if model_id is None:
-            active = _fetch_active_lgb_model(db)
+            active = _safe_get_active(db)
             if active is None:
-                typer.echo("(no active model — 用 --model-id 指定查询目标，或先运行 lgb train)")
+                typer.echo(
+                    "(no active model — 用 --model-id 指定查询目标，或先运行 lgb train)"
+                )
                 raise typer.Exit(2)
-            model_id = str(active[0])
-        row = _fetch_lgb_model(db, model_id)
+            model_id = active.model_id
+        record = _safe_get_model(db, model_id)
     finally:
         db.close()
-    if row is None:
+    if record is None:
         typer.echo(f"✘ model_id not found: {model_id!r}")
         raise typer.Exit(2)
-    (
-        mid, schema_v, t0, t1, n, n_pos, auc_mean, auc_std, logloss_mean,
-        feat_count, feat_list_json, hp_json, fw_ver, plugin_v, git_commit,
-        file_path, is_active, created,
-    ) = row
     console = Console()
-    table = Table(title=f"lgb model: {mid}", show_header=False)
+    table = Table(title=f"lgb model: {record.model_id}", show_header=False)
     table.add_column("key", style="cyan")
     table.add_column("value", overflow="fold")
-    table.add_row("active", "★ yes" if is_active else "no")
-    table.add_row("schema_version", str(schema_v))
-    table.add_row("train window", f"{t0} .. {t1}")
-    table.add_row("n_samples / n_positive", f"{n} / {n_pos}")
-    if auc_mean is not None:
-        table.add_row("CV AUC (mean±std)", f"{auc_mean:.4f} ± {(auc_std or 0):.4f}")
-    if logloss_mean is not None:
-        table.add_row("CV logloss", f"{logloss_mean:.4f}")
-    table.add_row("feature_count", str(feat_count))
-    table.add_row("plugin_version", str(plugin_v))
-    if fw_ver:
-        table.add_row("framework_version", str(fw_ver))
-    if git_commit:
-        table.add_row("git_commit", str(git_commit))
-    table.add_row("file_path", str(file_path))
-    table.add_row("created_at", str(created))
-    table.add_row("feature_list_json (preview)", str(feat_list_json)[:120] + "...")
-    table.add_row("hyperparams_json", str(hp_json))
+    table.add_row("active", "★ yes" if record.is_active else "no")
+    table.add_row("schema_version", str(record.schema_version))
+    table.add_row("train window", f"{record.train_start_date} .. {record.train_end_date}")
+    table.add_row("n_samples / n_positive", f"{record.n_samples} / {record.n_positive}")
+    if record.cv_auc_mean is not None:
+        table.add_row(
+            "CV AUC (mean±std)",
+            f"{record.cv_auc_mean:.4f} ± {(record.cv_auc_std or 0):.4f}",
+        )
+    if record.cv_logloss_mean is not None:
+        table.add_row("CV logloss", f"{record.cv_logloss_mean:.4f}")
+    table.add_row("feature_count", str(record.feature_count))
+    table.add_row("plugin_version", record.plugin_version)
+    if record.framework_version:
+        table.add_row("framework_version", record.framework_version)
+    if record.git_commit:
+        table.add_row("git_commit", record.git_commit)
+    table.add_row("file_path", record.file_path)
+    table.add_row("created_at", str(record.created_at) if record.created_at else "—")
+    table.add_row("feature_list_json (preview)", record.feature_list_json[:120] + "...")
+    table.add_row("hyperparams_json", record.hyperparams_json)
     console.print(table)
 
 
@@ -415,16 +449,166 @@ def cmd_lgb_info(
 def cmd_lgb_train(
     start: str = typer.Option(..., "--start", help="训练窗口起始日期 YYYYMMDD"),
     end: str = typer.Option(..., "--end", help="训练窗口结束日期 YYYYMMDD"),
-    folds: int = typer.Option(5, "--folds", help="GroupKFold 折数"),
-    no_activate: bool = typer.Option(False, "--no-activate", help="训练完成后不切换 active 模型"),
+    folds: int = typer.Option(5, "--folds", help="GroupKFold 折数（≥2 才做 CV）"),
+    no_activate: bool = typer.Option(
+        False, "--no-activate", help="训练完成后不切换 active 模型"
+    ),
+    force_sync: bool = typer.Option(False, "--force-sync", help="强制刷新 tushare 缓存"),
 ) -> None:
-    """训练新的 LightGBM 模型并落库（后续 PR 实现）。"""
-    typer.echo(
-        f"Not yet implemented in this iteration: lgb train --start {start} --end {end} "
-        f"--folds {folds} --no-activate={no_activate}"
-    )
-    typer.echo(_LGB_PENDING_HINT)
-    raise typer.Exit(2)
+    """训练新的 LightGBM 模型并落库。"""
+    if start > end:
+        typer.echo("✘ --start 必须 ≤ --end")
+        raise typer.Exit(2)
+
+    db, rt = _open_runtime()
+    try:
+        cfg = load_config(db)
+        tushare = build_tushare_client(rt)
+        cal_df = tushare.call("trade_cal", force_sync=force_sync)
+        calendar = TradeCalendar(cal_df)
+
+        typer.echo(
+            f"📊 拉取训练数据 {start}..{end}  "
+            f"(max_float_mv<{cfg.max_float_mv_yi}亿, max_close<{cfg.max_close_yuan}元, "
+            f"label_threshold={cfg.lgb_label_threshold_pct}%)"
+        )
+
+        def _on_day(T: str, n: int, cum: int) -> None:
+            typer.echo(f"  [{T}] +{n} samples (cum. {cum})")
+
+        ds = collect_training_window(
+            tushare=tushare,
+            calendar=calendar,
+            start_date=start,
+            end_date=end,
+            max_float_mv_yi=cfg.max_float_mv_yi,
+            max_close_yuan=cfg.max_close_yuan,
+            label_threshold_pct=cfg.lgb_label_threshold_pct,
+            force_sync=force_sync,
+            on_day=_on_day,
+        )
+        ds = ds.filter_labeled()
+        if ds.n_samples < cfg.lgb_train_min_samples:
+            typer.echo(
+                f"✘ labeled samples = {ds.n_samples} < lgb_train_min_samples="
+                f"{cfg.lgb_train_min_samples}（窗口太短或缺 T+1 数据）"
+            )
+            raise typer.Exit(2)
+        if ds.n_positive == 0 or ds.n_positive == ds.n_samples:
+            typer.echo(
+                f"✘ 标签类别退化（n_positive={ds.n_positive}, n_samples={ds.n_samples}），"
+                "无法训练二分类"
+            )
+            raise typer.Exit(2)
+
+        typer.echo(
+            f"🚂 训练（folds={folds}, n_samples={ds.n_samples}, "
+            f"n_positive={ds.n_positive}）..."
+        )
+        result = train_lightgbm(ds, folds=folds)
+        if result.cv_auc_mean is not None and result.cv_auc_mean < 0.55:
+            typer.echo(f"⚠ CV AUC mean = {result.cv_auc_mean:.4f} < 0.55；质量较弱")
+
+        # ---- mint + paths ----
+        git_commit = _git_short_commit()
+        base_id = mint_model_id(
+            train_end_date=end, schema_version=SCHEMA_VERSION, git_commit=git_commit
+        )
+        model_id = ensure_unique_model_id(db, base_id)
+
+        lgb_paths.ensure_layout()
+        model_path = lgb_paths.models_dir() / lgb_paths.model_file_name(model_id)
+        meta_path = lgb_paths.models_dir() / lgb_paths.meta_file_name(model_id)
+        dataset_path = lgb_paths.datasets_dir() / lgb_paths.dataset_file_name(model_id)
+
+        # ---- save model + meta + dataset snapshot ----
+        result.model.save_model(str(model_path))
+
+        meta: dict[str, Any] = {
+            "model_id": model_id,
+            "schema_version": SCHEMA_VERSION,
+            "train_window": [start, end],
+            "n_samples": ds.n_samples,
+            "n_positive": ds.n_positive,
+            "cv_auc_mean": result.cv_auc_mean,
+            "cv_auc_std": result.cv_auc_std,
+            "cv_logloss_mean": result.cv_logloss_mean,
+            "feature_count": len(FEATURE_NAMES),
+            "feature_names": FEATURE_NAMES,
+            "feature_importance_top20": result.feature_importance,
+            "hyperparams": result.hyperparams,
+            "label_threshold_pct": cfg.lgb_label_threshold_pct,
+            "git_commit": git_commit,
+            "plugin_version": _plugin_version(),
+            "framework_version": _framework_version(),
+            "lightgbm_version": _lightgbm_version(),
+            "trade_dates_count": len(ds.trade_dates),
+        }
+        meta_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        try:
+            import pandas as pd  # noqa: PLC0415
+
+            full = pd.concat(
+                [
+                    ds.feature_matrix.reset_index(drop=True),
+                    ds.labels.reset_index(drop=True).rename("label"),
+                    ds.sample_index.reset_index(drop=True),
+                ],
+                axis=1,
+            )
+            full.to_parquet(dataset_path, index=False)
+        except Exception as e:  # noqa: BLE001 — parquet 缺 pyarrow/fastparquet 时降级
+            logging.warning("failed to write dataset parquet snapshot: %s", e)
+            dataset_path = None  # type: ignore[assignment]
+
+        # ---- registry row ----
+        rel_path = model_path.relative_to(lgb_paths.plugin_data_dir())
+        record = ModelRecord(
+            model_id=model_id,
+            schema_version=SCHEMA_VERSION,
+            train_start_date=start,
+            train_end_date=end,
+            n_samples=ds.n_samples,
+            n_positive=ds.n_positive,
+            cv_auc_mean=result.cv_auc_mean,
+            cv_auc_std=result.cv_auc_std,
+            cv_logloss_mean=result.cv_logloss_mean,
+            feature_count=len(FEATURE_NAMES),
+            feature_list_json=json.dumps(FEATURE_NAMES),
+            hyperparams_json=json.dumps(result.hyperparams),
+            framework_version=_framework_version(),
+            plugin_version=_plugin_version(),
+            git_commit=git_commit,
+            file_path=str(rel_path).replace("\\", "/"),
+        )
+        insert_model(db, record, activate=not no_activate)
+        if not no_activate:
+            lgb_paths.latest_pointer().write_text(
+                str(rel_path).replace("\\", "/"), encoding="utf-8"
+            )
+
+        # ---- summary ----
+        typer.echo(f"✔ Saved model: {model_id}")
+        if result.cv_auc_mean is not None:
+            typer.echo(
+                f"  CV AUC = {result.cv_auc_mean:.4f} ± {(result.cv_auc_std or 0):.4f}"
+            )
+        if result.cv_logloss_mean is not None:
+            typer.echo(f"  CV logloss = {result.cv_logloss_mean:.4f}")
+        typer.echo("  Top-10 feature importance:")
+        for name, score in result.top_features(10):
+            typer.echo(f"    {name:<40} {score:.0f}")
+        typer.echo(f"  file:    {model_path}")
+        typer.echo(f"  meta:    {meta_path}")
+        if dataset_path is not None:
+            typer.echo(f"  dataset: {dataset_path}")
+        typer.echo(f"  active:  {not no_activate}")
+    finally:
+        db.close()
 
 
 @lgb_app.command("evaluate")
@@ -434,7 +618,7 @@ def cmd_lgb_evaluate(
     model_id: str | None = typer.Option(None, "--model-id"),
     drift: bool = typer.Option(False, "--drift", help="顺便输出特征 drift 报表（PR-3.3）"),
 ) -> None:
-    """对指定窗口跑离线评估（后续 PR 实现）。"""
+    """对指定窗口跑离线评估（PR-3.1 实现）。"""
     typer.echo(
         f"Not yet implemented in this iteration: lgb evaluate --start {start} --end {end} "
         f"--model-id={model_id} --drift={drift}"
@@ -447,10 +631,22 @@ def cmd_lgb_evaluate(
 def cmd_lgb_activate(
     model_id: str = typer.Argument(..., help="要激活的模型 ID"),
 ) -> None:
-    """原子切换 active 模型（后续 PR 实现）。"""
-    typer.echo(f"Not yet implemented in this iteration: lgb activate {model_id}")
-    typer.echo(_LGB_PENDING_HINT)
-    raise typer.Exit(2)
+    """原子切换 active 模型。"""
+    db = Database(paths.db_path())
+    try:
+        try:
+            ok = lgb_registry.set_active(db, model_id)
+        except Exception:  # noqa: BLE001 — 兼容 lub_lgb_models 表尚未迁移的场景
+            ok = False
+        if not ok:
+            typer.echo(f"✘ model_id not found: {model_id!r}")
+            raise typer.Exit(2)
+        record = _safe_get_model(db, model_id)
+        if record is not None:
+            lgb_paths.latest_pointer().write_text(record.file_path, encoding="utf-8")
+        typer.echo(f"✔ activated: {model_id}")
+    finally:
+        db.close()
 
 
 @lgb_app.command("prune")
@@ -458,12 +654,40 @@ def cmd_lgb_prune(
     keep: int = typer.Option(5, "--keep", help="保留最近的 N 个模型（含 active）"),
     keep_rows: bool = typer.Option(False, "--keep-rows", help="仅删模型文件，保留 DB 行"),
 ) -> None:
-    """清理旧模型文件 / 行（后续 PR 实现）。"""
-    typer.echo(
-        f"Not yet implemented in this iteration: lgb prune --keep {keep} --keep-rows={keep_rows}"
-    )
-    typer.echo(_LGB_PENDING_HINT)
-    raise typer.Exit(2)
+    """清理旧模型文件 / 行；active 模型永远保留。"""
+    if keep < 1:
+        typer.echo("✘ --keep 必须 ≥ 1")
+        raise typer.Exit(2)
+    db = Database(paths.db_path())
+    try:
+        records = _safe_list_models(db)
+        # 保留：最近 keep 个（无论 is_active）+ 任何 is_active 行兜底
+        keep_ids: set[str] = set()
+        kept = 0
+        for r in records:
+            if r.is_active or kept < keep:
+                keep_ids.add(r.model_id)
+                if not r.is_active:
+                    kept += 1
+        removed = 0
+        for r in records:
+            if r.model_id in keep_ids:
+                continue
+            model_file = lgb_paths.plugin_data_dir() / r.file_path
+            meta_file = lgb_paths.models_dir() / lgb_paths.meta_file_name(r.model_id)
+            dataset_file = lgb_paths.datasets_dir() / lgb_paths.dataset_file_name(r.model_id)
+            for f in (model_file, meta_file, dataset_file):
+                if f.is_file():
+                    f.unlink()
+            if not keep_rows:
+                lgb_registry.delete_model(db, r.model_id)
+            removed += 1
+        typer.echo(
+            f"✔ pruned {removed} model(s); kept {len(keep_ids)} "
+            f"(active preserved; keep_rows={keep_rows})"
+        )
+    finally:
+        db.close()
 
 
 @lgb_app.command("refresh-features")
@@ -471,9 +695,10 @@ def cmd_lgb_refresh_features(
     start: str | None = typer.Option(None, "--start"),
     end: str | None = typer.Option(None, "--end"),
 ) -> None:
-    """仅拉历史数据 / 不训练（后续 PR 实现）。"""
+    """仅拉历史数据 / 不训练（PR-3.x 实现）。"""
     typer.echo(
-        f"Not yet implemented in this iteration: lgb refresh-features --start={start} --end={end}"
+        f"Not yet implemented in this iteration: lgb refresh-features "
+        f"--start={start} --end={end}"
     )
     typer.echo(_LGB_PENDING_HINT)
     raise typer.Exit(2)
