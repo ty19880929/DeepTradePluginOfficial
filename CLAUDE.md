@@ -77,11 +77,23 @@ The framework expects three things on the entrypoint class (`plugin.py`):
 
 ### CLI surface (current subcommands)
 
-- `limit-up-board`: `run`, `sync`, `history`, `report`, `settings show`
+- `limit-up-board`: `run`, `sync`, `history`, `report`, `settings show`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `refresh-features`. `run --no-lgb` is a one-shot opt-out.
 - `volume-anomaly`: `screen`, `analyze`, `prune`, `evaluate`, `stats`, `history`, `report`
 - `stdout-channel`: `test`, `log`
 
 These are exposed to users as `deeptrade <plugin-id> <subcommand>` once the framework dispatches into `cli.main(argv)`.
+
+#### `limit-up-board lgb` (v0.5+)
+
+The `lgb` group manages the LightGBM 连板概率 booster lifecycle (offline training → registered model file → R1/R2 prompt-side scoring). Highlights:
+
+- `lgb train --start --end` fits a new booster (GroupKFold by trade_date) and registers it in `lub_lgb_models`. Each model file lands under `~/.deeptrade/limit_up_board/models/`; the training matrix snapshot under `datasets/` (parquet) so `lgb evaluate --drift` can compare distributions later.
+- `lgb evaluate --start --end [--model-id]` reports AUC / logloss / Top-K hit-rate vs per-day baseline; JSON dump under `reports/`.
+- `lgb evaluate --drift --baseline <id>` adds per-feature PSI (10-bin) against the baseline model's training snapshot. Output is sorted by PSI desc with status labels (`stable` < 0.10, `moderate` < 0.25, `shift` ≥ 0.25).
+- `lgb info [--model-id] [--recent-N]` shows model metadata + how many runs / trade dates have used it, with an optional per-day score-distribution snapshot.
+- Inference (`run`) is wired through `LubRuntime.lgb_scorer`; failure paths (no active model / file missing / schema mismatch / predict raise / `lightgbm` not installed) all degrade to `lgb_score=None` without blocking the LLM stages. See `lgb/scorer.py` for the 5-branch contract and `lightgbm_design.md §7.3`.
+
+`lightgbm>=4.3` + `scikit-learn>=1.4` are soft dependencies, declared in `limit_up_board/requirements.txt` and probed by `LimitUpBoardPlugin.validate_static`.
 
 ### Per-plugin DB tables
 
