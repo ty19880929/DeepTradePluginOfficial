@@ -26,5 +26,15 @@ class LimitUpBoardPlugin:
         # No network. Light import-only sanity check.
         from . import schemas  # noqa: F401, PLC0415
 
+        # v0.5+: LightGBM 评分器作为推理依赖；缺包时抛友好提示，由框架退到 install
+        # failure 路径，让用户在 install 阶段就感知缺少 lightgbm，而不是在每日 run 时炸。
+        try:
+            import lightgbm  # noqa: F401, PLC0415
+        except ImportError as e:
+            raise RuntimeError(
+                "lightgbm 未安装：pip install 'lightgbm>=4.3'（用于打板策略 LightGBM "
+                "连板概率评分）。同时建议安装 scikit-learn>=1.4 以启用训练管线。"
+            ) from e
+
     def dispatch(self, argv: list[str]) -> int:
         return _cli.main(argv)

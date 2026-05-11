@@ -26,6 +26,24 @@ deeptrade plugin install stdout-channel
 
 框架会按 `registry/index.json` 中的 `repo` 与 `tag_prefix`，调用 GitHub Releases API 解析最新匹配的 tag，再从对应 `subdir` 拉取插件源码与迁移脚本。
 
+### 插件可选依赖
+
+| 插件 | 依赖 | 用途 |
+|------|------|------|
+| `limit-up-board` ≥ 0.5.0 | `lightgbm>=4.3`、`scikit-learn>=1.4` | LightGBM 连板概率评分（训练 + 推理）。缺包时 `validate_static` 会在 install 阶段给出友好提示。 |
+
+手动安装：
+
+```bash
+pipx inject deeptrade-quant lightgbm scikit-learn
+```
+
+或者使用 venv：
+
+```bash
+pip install -r limit_up_board/requirements.txt
+```
+
 ## 仓库结构
 
 ```

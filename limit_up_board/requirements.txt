@@ -1,0 +1,9 @@
+# limit-up-board 插件运行时依赖清单
+#
+# 该文件主要面向手动安装场景（pipx install lightgbm scikit-learn 等）。
+# 框架在 install 阶段不会自动消费此文件——validate_static 会在缺包时给出友好提示。
+#
+# 必需：
+lightgbm>=4.3
+# 推荐：训练管线在 lgb/dataset 与 trainer 使用 GroupKFold / TimeSeriesSplit。
+scikit-learn>=1.4
