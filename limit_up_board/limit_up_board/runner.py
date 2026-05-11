@@ -34,6 +34,8 @@ if TYPE_CHECKING:  # pragma: no cover
 from .calendar import TradeCalendar
 from .config import LubConfig, load_config
 from .data import Round1Bundle, collect_round1, resolve_trade_date
+from .lgb.audit import record_predictions as _record_lgb_predictions
+from .lgb.scorer import LgbScorer
 from .pipeline import (
     DebateRoundResult,
     RoundResult,
@@ -189,9 +191,38 @@ class LubRunner:
             self._rt, intraday=params.allow_intraday, event_cb=self._on_tushare_event
         )
 
+        # v0.5 — construct the LGB scorer once per run. Loading is lazy (first
+        # score_batch call), errors degrade to lgb_score=None on every candidate
+        # (lightgbm_design.md §7.3). When the user passed --no-lgb (or the
+        # config flag is off), we skip construction entirely to keep the run
+        # path identical to v0.4.
+        self._rt.lgb_scorer = self._maybe_build_scorer(params)
+
         if params.debate:
             return self._execute_debate(run_id, params)
         return self._execute_single(run_id, params)
+
+    def _maybe_build_scorer(self, params: RunParams) -> LgbScorer | None:
+        """Build the scorer iff the user hasn't disabled LGB for this run.
+
+        ``RunParams.lgb_enabled`` defaults to True; ``--no-lgb`` flips it.
+        ``LubConfig.lgb_enabled`` is the persistent default; either being
+        False short-circuits to ``None`` (zero-cost path).
+        """
+        if not params.lgb_enabled:
+            return None
+        try:
+            cfg = load_config(self._rt.db)
+        except Exception as e:  # noqa: BLE001 — config table missing → degrade silently
+            logger.warning("load_config failed during scorer construction: %s", e)
+            return None
+        if not cfg.lgb_enabled:
+            return None
+        try:
+            return LgbScorer(self._rt.db)
+        except Exception as e:  # noqa: BLE001 — defensive; constructor is trivial
+            logger.warning("LgbScorer construction failed: %s", e)
+            return None
 
     def _execute_single(self, run_id: str, params: RunParams) -> RunOutcome:
         from deeptrade.core import paths
@@ -294,6 +325,8 @@ class LubRunner:
         lub_cfg = load_config(rt.db)
         yield _settings_log_event(rt, lub_cfg)
         yield rt.emit(EventType.DATA_SYNC_STARTED, "Step 1: data assembly")
+        # sync_data path does NOT use the scorer — keeping data sync free of
+        # model inference matches the "data-only" contract.
         bundle = collect_round1(
             tushare=rt.tushare,  # type: ignore[arg-type]
             trade_date=T,
@@ -354,6 +387,7 @@ class LubRunner:
                 max_float_mv_yi=lub_cfg.max_float_mv_yi,
                 max_close_yuan=lub_cfg.max_close_yuan,
                 force_sync=params.force_sync,
+                lgb_scorer=rt.lgb_scorer,
             )
         except TushareUnauthorizedError as e:
             yield rt.emit(
@@ -361,6 +395,7 @@ class LubRunner:
             )
             raise
         yield from self._drain_pending()
+        self._persist_lgb_predictions(bundle)
         yield rt.emit(
             EventType.STEP_FINISHED,
             f"Step 1: {len(bundle.candidates)} candidates",
@@ -368,6 +403,8 @@ class LubRunner:
                 "candidates": len(bundle.candidates),
                 "data_unavailable": bundle.data_unavailable,
                 "sector_strength_source": bundle.sector_strength.source,
+                "lgb_model_id": bundle.lgb_model_id,
+                "lgb_scored": sum(1 for c in bundle.candidates if c.get("lgb_score") is not None),
             },
         )
 
@@ -784,6 +821,7 @@ class LubRunner:
                 max_float_mv_yi=lub_cfg.max_float_mv_yi,
                 max_close_yuan=lub_cfg.max_close_yuan,
                 force_sync=params.force_sync,
+                lgb_scorer=rt.lgb_scorer,
             )
         except TushareUnauthorizedError as e:
             emit(
@@ -796,6 +834,7 @@ class LubRunner:
             raise
         for ev in self._drain_pending():
             emit(ev)
+        self._persist_lgb_predictions(bundle)
         emit(
             rt.emit(
                 EventType.STEP_FINISHED,
@@ -804,6 +843,8 @@ class LubRunner:
                     "candidates": len(bundle.candidates),
                     "data_unavailable": bundle.data_unavailable,
                     "sector_strength_source": bundle.sector_strength.source,
+                    "lgb_model_id": bundle.lgb_model_id,
+                    "lgb_scored": sum(1 for c in bundle.candidates if c.get("lgb_score") is not None),
                 },
             )
         )
@@ -821,6 +862,27 @@ class LubRunner:
         return bundle
 
     # ----- helpers ------------------------------------------------------
+
+    def _persist_lgb_predictions(self, bundle: Round1Bundle) -> None:
+        """Insert this run's LGB scores into ``lub_lgb_predictions``.
+
+        ``bundle.lgb_predictions`` is the per-row payload list ``data._attach_lgb_scores``
+        prepared; ``bundle.lgb_model_id`` is the active model id. No model →
+        no rows; the audit helper itself swallows DB errors so a broken
+        audit insert never blocks the LLM stages.
+        """
+        if not bundle.lgb_predictions or not bundle.lgb_model_id or not self._rt.run_id:
+            return
+        try:
+            _record_lgb_predictions(
+                self._rt.db,
+                run_id=self._rt.run_id,
+                trade_date=bundle.trade_date,
+                model_id=bundle.lgb_model_id,
+                rows=bundle.lgb_predictions,
+            )
+        except Exception as e:  # noqa: BLE001 — audit must not block run
+            logger.warning("persist_lgb_predictions raised: %s", e)
 
     def _emit_empty_report(
         self, bundle: Round1Bundle, params: RunParams, *, reason: str = "zero candidates"

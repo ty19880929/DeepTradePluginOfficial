@@ -22,6 +22,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from deeptrade.core.llm_manager import LLMManager
     from deeptrade.core.tushare_client import TushareClient
 
+    from .lgb.scorer import LgbScorer
+
 PLUGIN_ID = "limit-up-board"
 
 
@@ -33,6 +35,11 @@ class LubRuntime:
     ``rt.llms.get_client(name, plugin_id=rt.plugin_id, run_id=rt.run_id, ...)``
     to obtain a per-provider client. The plugin may use multiple providers
     in the same run.
+
+    v0.5+ — ``lgb_scorer`` is constructed once by ``LubRunner.execute`` (lazy
+    booster load) and shared by every batch in the run, including debate-mode
+    worker threads (LightGBM ``Booster.predict`` is thread-safe; the scorer
+    holds no mutable state once loaded — see lightgbm_design.md §7.2).
     """
 
     db: Database
@@ -42,6 +49,7 @@ class LubRuntime:
     run_id: str | None = None
     is_intraday: bool = False
     tushare: TushareClient | None = None
+    lgb_scorer: LgbScorer | None = None
 
     def emit(
         self,
@@ -84,6 +92,7 @@ def open_worker_runtime(
     *,
     config: ConfigService,
     is_intraday: bool = False,
+    lgb_scorer: LgbScorer | None = None,
 ) -> tuple[Database, LubRuntime]:
     """Construct an isolated runtime for a debate-mode worker thread.
 
@@ -107,6 +116,11 @@ def open_worker_runtime(
     workers race on the connection's result set and trigger a native heap
     corruption (Windows 0xC0000374). See ``deeptrade.core.db``.
 
+    ``lgb_scorer`` is passed straight through (read-only reference share). The
+    main thread loads the booster once; debate workers see the same object and
+    rely on LightGBM's thread-safe ``Booster.predict``. See lightgbm_design.md
+    §7.2 for the concurrency contract.
+
     The worker MUST close ``db`` when done.
     """
     from deeptrade.core import paths
@@ -121,6 +135,7 @@ def open_worker_runtime(
         plugin_id=plugin_id,
         run_id=run_id,
         is_intraday=is_intraday,
+        lgb_scorer=lgb_scorer,
     )
     return db, rt
 

@@ -3,18 +3,24 @@
 DESIGN §12.2 (T-resolution) + §11.3 (sector_strength fallback chain) + S2 (close_after config) +
 S4 (zero candidates legal) + Q2 (main board only) + C5 (raw units in DB, normalized in prompt).
 
+v0.5+ (lightgbm_design.md §7.2): when a non-None ``lgb_scorer`` is passed to
+:func:`collect_round1`, each candidate dict gets ``lgb_score`` / ``lgb_decile`` /
+``lgb_feature_missing`` and the bundle captures the model id + per-row audit
+payloads for the runner to persist to ``lub_lgb_predictions``.
+
 Key public entry points:
     resolve_trade_date(...)            — Step 0
     collect_round1(...)                — Step 1 (returns candidates + market summary +
-                                          sector_strength + data_unavailable)
+                                          sector_strength + data_unavailable + LGB scores)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
 
@@ -24,6 +30,9 @@ from deeptrade.core.tushare_client import (
 )
 
 from .calendar import TradeCalendar
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .lgb.scorer import LgbScorer
 
 logger = logging.getLogger(__name__)
 
@@ -333,7 +342,15 @@ def round2(value: float | None) -> float | None:
 
 @dataclass
 class Round1Bundle:
-    """Everything the R1 LLM stage needs."""
+    """Everything the R1 LLM stage needs.
+
+    v0.5+ — ``lgb_model_id`` captures which LightGBM booster produced the
+    ``lgb_score`` values on each candidate dict; ``None`` 表示 LGB 未启用 /
+    未加载（report 会显示 ``lgb_model_id: disabled``)。
+    ``lgb_predictions`` 是 :mod:`limit_up_board.lgb.audit` 准备好的批量审计
+    payload 列表（每行一只候选股 × 一次 run），由 runner 在 Step 1 之后
+    INSERT 到 ``lub_lgb_predictions``。
+    """
 
     trade_date: str
     next_trade_date: str
@@ -343,6 +360,8 @@ class Round1Bundle:
         default_factory=lambda: SectorStrength(source="industry_fallback", data={"top_sectors": []})
     )
     data_unavailable: list[str] = field(default_factory=list)
+    lgb_model_id: str | None = None
+    lgb_predictions: list[dict[str, Any]] = field(default_factory=list)
 
 
 def collect_round1(
@@ -356,6 +375,7 @@ def collect_round1(
     max_float_mv_yi: float = 100.0,
     max_close_yuan: float = 15.0,
     force_sync: bool = False,
+    lgb_scorer: LgbScorer | None = None,
 ) -> Round1Bundle:
     """Assemble the R1 input bundle.
 
@@ -541,6 +561,21 @@ def collect_round1(
         moneyflow_lookback=moneyflow_lookback,
     )
     bundle.data_unavailable = data_unavailable
+
+    # 9. v0.5 LGB — annotate each candidate dict with lgb_score / lgb_decile /
+    # lgb_feature_missing (None when scorer disabled or model not loaded; never
+    # raises — see lightgbm_design.md §7.3 "core red line").
+    _attach_lgb_scores(
+        bundle,
+        candidates_df=candidates_df,
+        daily_df=daily_df,
+        daily_basic_df=daily_basic_df,
+        moneyflow_df=moneyflow_df,
+        top_list_df=top_list_df,
+        top_inst_df=top_inst_df,
+        cyq_perf_df=cyq_perf_df,
+        scorer=lgb_scorer,
+    )
 
     # B2.3 + F-M4 — Persist to business tables (DuckDB is the persistence layer
     # per DESIGN). Errors don't fail the run (cache_blob still holds the data),
@@ -1189,6 +1224,150 @@ def _opt_int(v: Any) -> int | None:
     if v is None or pd.isna(v):
         return None
     return int(v)
+
+
+# ---------------------------------------------------------------------------
+# v0.5 — LGB scoring attachment (PR-2.2; lightgbm_design.md §7.2)
+# ---------------------------------------------------------------------------
+
+
+def _attach_lgb_scores(
+    bundle: Round1Bundle,
+    *,
+    candidates_df: pd.DataFrame,
+    daily_df: pd.DataFrame | None,
+    daily_basic_df: pd.DataFrame | None,
+    moneyflow_df: pd.DataFrame | None,
+    top_list_df: pd.DataFrame | None,
+    top_inst_df: pd.DataFrame | None,
+    cyq_perf_df: pd.DataFrame | None,
+    scorer: LgbScorer | None,
+) -> None:
+    """Inject ``lgb_score`` / ``lgb_decile`` / ``lgb_feature_missing`` per candidate.
+
+    * Scorer ``None`` or ``loaded=False`` → every candidate gets ``lgb_score=None``,
+      ``lgb_decile=None``, ``lgb_feature_missing=[]``; ``bundle.lgb_model_id``
+      stays ``None`` and ``bundle.data_unavailable`` is annotated with the
+      ``lgb_model (…)`` reason from the scorer.
+    * Any exception inside this path is logged and degrades to the "未启用"
+      branch above—LGB must never block R1/R2 (设计 §7.3 红线)。
+
+    The actual booster math + per-row diagnostics live in :class:`LgbScorer`;
+    this function only marshals data between the strategy pipeline and the
+    scorer, and decides how the model output is exposed to the LLM.
+    """
+    # Helper: write the "disabled" / "failed" fallback values into every candidate.
+    def _fill_disabled(reason: str | None) -> None:
+        for rec in bundle.candidates:
+            rec.setdefault("lgb_score", None)
+            rec.setdefault("lgb_decile", None)
+            rec.setdefault("lgb_feature_missing", [])
+        if reason:
+            bundle.data_unavailable.append(f"lgb_model ({reason})")
+
+    if scorer is None:
+        _fill_disabled(None)  # user --no-lgb or framework opted out entirely
+        return
+    if not bundle.candidates:
+        return
+
+    # Lazy-load the booster on first call. The scorer swallows errors and
+    # exposes them via ``load_error`` — we surface that to data_unavailable.
+    try:
+        scorer.warmup()
+    except Exception as e:  # noqa: BLE001 — defensive, scorer should never raise
+        logger.warning("LgbScorer.warmup raised unexpectedly: %s", e)
+        _fill_disabled(f"warmup_raised: {type(e).__name__}")
+        return
+
+    if not scorer.loaded:
+        _fill_disabled(scorer.load_error or "unloaded")
+        return
+
+    # Build the feature matrix from the same intermediate frames _build_candidate_rows
+    # consumed. We re-derive the lookups (cheap groupby) so this stays a self-contained
+    # path with no extra arguments threaded through _build_candidate_rows.
+    try:
+        from .lgb.features import build_feature_frame  # noqa: PLC0415
+        from .lgb.scorer import attach_deciles  # noqa: PLC0415
+
+        daily_by_code = _index_by_code(daily_df)
+        daily_basic_by_code = _index_by_code(daily_basic_df)
+        moneyflow_by_code = _index_by_code(moneyflow_df)
+        lhb_rollup = _build_lhb_rollup(top_list_df, top_inst_df)
+        cyq_lookup = _build_cyq_lookup(cyq_perf_df)
+
+        feature_df = build_feature_frame(
+            candidates_df=candidates_df,
+            daily_by_code=daily_by_code,
+            daily_basic_by_code=daily_basic_by_code,
+            moneyflow_by_code=moneyflow_by_code,
+            cyq_by_code=cyq_lookup,
+            lhb_rollup=lhb_rollup,
+            sector_strength=bundle.sector_strength,
+            market_summary=bundle.market_summary,
+            trade_date=bundle.trade_date,
+        )
+    except Exception as e:  # noqa: BLE001 — feature build must not crash the run
+        logger.warning("build_feature_frame failed for LGB scoring: %s", e)
+        _fill_disabled(f"feature_build_failed: {type(e).__name__}")
+        return
+
+    try:
+        scored = scorer.score_batch(feature_df)
+    except Exception as e:  # noqa: BLE001 — score_batch should not raise but be defensive
+        logger.warning("score_batch raised unexpectedly: %s", e)
+        _fill_disabled(f"score_raised: {type(e).__name__}")
+        return
+
+    # 计算 decile（< 10 个候选 → 全 NaN）
+    deciles = attach_deciles(scored, n_buckets=10)
+
+    bundle.lgb_model_id = scorer.model_id
+    audit_rows: list[dict[str, Any]] = []
+    score_lookup: dict[str, dict[str, Any]] = {}
+    for ts_code in scored.index:
+        ts = str(ts_code)
+        row = scored.loc[ts_code]
+        raw_score = row["lgb_score"]
+        if pd.isna(raw_score):
+            score_lookup[ts] = {"lgb_score": None, "lgb_decile": None, "missing": []}
+            continue
+        decile = deciles.loc[ts_code] if ts_code in deciles.index else None
+        try:
+            missing = json.loads(row["feature_missing_json"]) if row["feature_missing_json"] else []
+        except (TypeError, ValueError):
+            missing = []
+        # Design §7.2: 报告 / candidate dict 展示 0–100 浮点（× 100 + round(_, 1)）
+        display_score = round(float(raw_score) * 100.0, 1)
+        score_lookup[ts] = {
+            "lgb_score": display_score,
+            "lgb_decile": (int(decile) if pd.notna(decile) else None),
+            "missing": missing,
+        }
+        audit_rows.append(
+            {
+                "ts_code": ts,
+                "lgb_score": float(raw_score),  # raw booster output ∈ [0,1] for audit
+                "lgb_decile": (int(decile) if pd.notna(decile) else None),
+                "feature_hash": str(row["feature_hash"]),
+                "feature_missing_json": str(row["feature_missing_json"]),
+            }
+        )
+
+    for rec in bundle.candidates:
+        ts = rec.get("ts_code")
+        info = score_lookup.get(ts) if ts else None
+        if info is None:
+            rec["lgb_score"] = None
+            rec["lgb_decile"] = None
+            rec["lgb_feature_missing"] = []
+        else:
+            rec["lgb_score"] = info["lgb_score"]
+            rec["lgb_decile"] = info["lgb_decile"]
+            rec["lgb_feature_missing"] = info["missing"]
+
+    bundle.lgb_predictions = audit_rows
 
 
 # ---------------------------------------------------------------------------
