@@ -74,10 +74,11 @@ def _settings_log_event(rt: LubRuntime, lub_cfg: LubConfig) -> StrategyEvent:
     return rt.emit(
         EventType.LOG,
         (
-            f"运行配置: 流通市值 < {lub_cfg.max_float_mv_yi}亿、"
-            f"股价 < {lub_cfg.max_close_yuan}元"
+            f"运行配置: {lub_cfg.min_float_mv_yi}亿 < 流通市值 < "
+            f"{lub_cfg.max_float_mv_yi}亿、股价 < {lub_cfg.max_close_yuan}元"
         ),
         payload={
+            "min_float_mv_yi": lub_cfg.min_float_mv_yi,
             "max_float_mv_yi": lub_cfg.max_float_mv_yi,
             "max_close_yuan": lub_cfg.max_close_yuan,
         },
@@ -336,6 +337,7 @@ class LubRunner:
             moneyflow_lookback=params.moneyflow_lookback,
             max_float_mv_yi=lub_cfg.max_float_mv_yi,
             max_close_yuan=lub_cfg.max_close_yuan,
+            min_float_mv_yi=lub_cfg.min_float_mv_yi,
             force_sync=params.force_sync,
         )
         yield from self._drain_pending()
@@ -386,6 +388,7 @@ class LubRunner:
                 moneyflow_lookback=params.moneyflow_lookback,
                 max_float_mv_yi=lub_cfg.max_float_mv_yi,
                 max_close_yuan=lub_cfg.max_close_yuan,
+                min_float_mv_yi=lub_cfg.min_float_mv_yi,
                 force_sync=params.force_sync,
                 lgb_scorer=rt.lgb_scorer,
             )
@@ -838,6 +841,7 @@ class LubRunner:
                 moneyflow_lookback=params.moneyflow_lookback,
                 max_float_mv_yi=lub_cfg.max_float_mv_yi,
                 max_close_yuan=lub_cfg.max_close_yuan,
+                min_float_mv_yi=lub_cfg.min_float_mv_yi,
                 force_sync=params.force_sync,
                 lgb_scorer=rt.lgb_scorer,
             )

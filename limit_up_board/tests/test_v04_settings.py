@@ -49,9 +49,31 @@ class TestApplyMarketFilter:
         assert summary == {
             "before": 5,
             "after": 2,
+            "min_float_mv_yi": 0.0,
             "max_float_mv_yi": 100.0,
             "max_close_yuan": 15.0,
         }
+
+    def test_min_float_mv_drops_too_small(self) -> None:
+        df = _df(
+            [
+                {"ts_code": "A", "float_mv": 25e8, "close": 10.0},   # drop (= 25亿 ≤ 30)
+                {"ts_code": "B", "float_mv": 30e8, "close": 10.0},   # drop (= 30亿 边界)
+                {"ts_code": "C", "float_mv": 35e8, "close": 10.0},   # keep
+                {"ts_code": "D", "float_mv": 99e8, "close": 10.0},   # keep
+                {"ts_code": "E", "float_mv": 120e8, "close": 10.0},  # drop (> 100亿)
+            ]
+        )
+        out, summary = _apply_market_filter(
+            df,
+            max_float_mv_yi=100.0,
+            max_close_yuan=15.0,
+            min_float_mv_yi=30.0,
+        )
+        assert list(out["ts_code"]) == ["C", "D"]
+        assert summary["min_float_mv_yi"] == 30.0
+        assert summary["before"] == 5
+        assert summary["after"] == 2
 
     def test_null_fields_filtered(self) -> None:
         df = _df(
@@ -93,6 +115,7 @@ class TestApplyMarketFilter:
         assert summary == {
             "before": 0,
             "after": 0,
+            "min_float_mv_yi": 0.0,
             "max_float_mv_yi": 100.0,
             "max_close_yuan": 15.0,
         }
@@ -118,6 +141,7 @@ def lub_db(tmp_path: Path) -> Database:
 class TestLubConfigPersistence:
     def test_load_returns_defaults_on_empty_table(self, lub_db: Database) -> None:
         cfg = load_config(lub_db)
+        assert cfg.min_float_mv_yi == 30.0
         assert cfg.max_float_mv_yi == 100.0
         assert cfg.max_close_yuan == 15.0
 
@@ -137,14 +161,22 @@ class TestLubConfigPersistence:
     def test_list_for_show_marks_default_vs_persisted(self, lub_db: Database) -> None:
         rows = list_for_show(lub_db)
         sources = {key: source for key, _, source in rows}
+        assert sources["lub.min_float_mv_yi"] == "default"
         assert sources["lub.max_float_mv_yi"] == "default"
         assert sources["lub.max_close_yuan"] == "default"
+        values = {key: value for key, value, _ in rows}
+        assert values["lub.min_float_mv_yi"] == 30.0
 
-        save_config(lub_db, LubConfig(max_float_mv_yi=70.0, max_close_yuan=12.0))
+        save_config(
+            lub_db,
+            LubConfig(min_float_mv_yi=20.0, max_float_mv_yi=70.0, max_close_yuan=12.0),
+        )
         rows = list_for_show(lub_db)
         sources = {key: source for key, _, source in rows}
+        assert sources["lub.min_float_mv_yi"] == "persisted"
         assert sources["lub.max_float_mv_yi"] == "persisted"
         assert sources["lub.max_close_yuan"] == "persisted"
         values = {key: value for key, value, _ in rows}
+        assert values["lub.min_float_mv_yi"] == 20.0
         assert values["lub.max_float_mv_yi"] == 70.0
         assert values["lub.max_close_yuan"] == 12.0

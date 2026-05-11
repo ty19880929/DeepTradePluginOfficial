@@ -149,6 +149,7 @@ def collect_day_samples(
     max_float_mv_yi: float,
     max_close_yuan: float,
     label_threshold_pct: float,
+    min_float_mv_yi: float = 0.0,
     daily_lookback: int = 30,
     moneyflow_lookback: int = 5,
     prev_trade_date: str | None = None,
@@ -191,6 +192,7 @@ def collect_day_samples(
         candidates_df,
         max_float_mv_yi=max_float_mv_yi,
         max_close_yuan=max_close_yuan,
+        min_float_mv_yi=min_float_mv_yi,
     )
     if candidates_df.empty:
         return _empty_day(trade_date)
@@ -395,6 +397,7 @@ def collect_training_window(
     end_date: str,
     max_float_mv_yi: float = 100.0,
     max_close_yuan: float = 15.0,
+    min_float_mv_yi: float = 0.0,
     label_threshold_pct: float = DEFAULT_LABEL_THRESHOLD_PCT,
     main_board_pool: pd.DataFrame | None = None,
     daily_lookback: int = 30,
@@ -449,6 +452,7 @@ def collect_training_window(
             main_pool=main_pool,
             max_float_mv_yi=max_float_mv_yi,
             max_close_yuan=max_close_yuan,
+            min_float_mv_yi=min_float_mv_yi,
             label_threshold_pct=label_threshold_pct,
             daily_lookback=daily_lookback,
             moneyflow_lookback=moneyflow_lookback,

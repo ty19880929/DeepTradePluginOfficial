@@ -4,6 +4,7 @@ Persisted in the ``lub_config`` table. Defaults live on :class:`LubConfig` and
 are re-applied automatically when a row is missing — DB rows only override.
 
 v0.4 字段（已沿用）：
+    * ``min_float_mv_yi``  — 流通市值下限（亿）
     * ``max_float_mv_yi``  — 流通市值上限（亿）
     * ``max_close_yuan``   — 当前股价上限（元）
 
@@ -31,6 +32,7 @@ if TYPE_CHECKING:  # pragma: no cover
 class LubConfig:
     """User-tunable run filters + LGB knobs. Defaults reflect a typical 打板 watchlist."""
 
+    min_float_mv_yi: float = 30.0
     max_float_mv_yi: float = 100.0
     max_close_yuan: float = 15.0
 

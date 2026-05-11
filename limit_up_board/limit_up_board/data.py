@@ -118,10 +118,12 @@ def _apply_market_filter(
     *,
     max_float_mv_yi: float,
     max_close_yuan: float,
+    min_float_mv_yi: float = 0.0,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """v0.4 — keep only rows whose 流通市值 < ``max_float_mv_yi`` (亿) AND
-    close < ``max_close_yuan`` (元). Null in either field → dropped (conservative;
-    we cannot validate "small cap / low price" claims without the data).
+    """v0.4 — keep only rows whose ``min_float_mv_yi`` < 流通市值 < ``max_float_mv_yi``
+    (亿) AND close < ``max_close_yuan`` (元). Null in either field → dropped
+    (conservative; we cannot validate "small cap / low price" claims without the
+    data).
 
     Returns ``(filtered_df, summary)`` where summary is the candidate_filter_summary
     payload that gets stored in ``bundle.market_summary``.
@@ -130,6 +132,7 @@ def _apply_market_filter(
     summary: dict[str, Any] = {
         "before": n_before,
         "after": n_before,
+        "min_float_mv_yi": min_float_mv_yi,
         "max_float_mv_yi": max_float_mv_yi,
         "max_close_yuan": max_close_yuan,
     }
@@ -140,6 +143,7 @@ def _apply_market_filter(
     mask = (
         fm_yi.notna()
         & cl.notna()
+        & (fm_yi > min_float_mv_yi)
         & (fm_yi < max_float_mv_yi)
         & (cl < max_close_yuan)
     )
@@ -374,6 +378,7 @@ def collect_round1(
     moneyflow_lookback: int = 5,
     max_float_mv_yi: float = 100.0,
     max_close_yuan: float = 15.0,
+    min_float_mv_yi: float = 0.0,
     force_sync: bool = False,
     lgb_scorer: LgbScorer | None = None,
 ) -> Round1Bundle:
@@ -383,9 +388,10 @@ def collect_round1(
         1. stock_basic (static) → main_board_filter()
         2. limit_list_d(T, limit='U') → join main_board → DROP if 0 candidates
            (zero candidates is a LEGAL outcome — S4)
-        2b. v0.4 — drop candidates whose 流通市值 ≥ ``max_float_mv_yi``
-            or 当前股价 ≥ ``max_close_yuan``; null in either field → drop
-            (conservative; thresholds owned by ``LubConfig``).
+        2b. v0.4 — drop candidates whose 流通市值 ≤ ``min_float_mv_yi``
+            or ≥ ``max_float_mv_yi``, or 当前股价 ≥ ``max_close_yuan``;
+            null in either field → drop (conservative; thresholds owned by
+            ``LubConfig``).
         3. stock_st(T) (REQUIRED) / suspend_d(T) (optional) → drop codes
         4. limit_list_ths(T) (optional) → bring in lu_desc, tag, suc_rate
         5. limit_cpt_list(T) (optional) → sector strength tier 1
@@ -432,6 +438,7 @@ def collect_round1(
         candidates_df,
         max_float_mv_yi=max_float_mv_yi,
         max_close_yuan=max_close_yuan,
+        min_float_mv_yi=min_float_mv_yi,
     )
     bundle.market_summary["candidate_filter_summary"] = market_filter_summary
     if candidates_df.empty:

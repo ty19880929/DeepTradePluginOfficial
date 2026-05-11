@@ -244,13 +244,25 @@ def cmd_settings(ctx: typer.Context) -> None:
     db = Database(paths.db_path())
     try:
         cur = load_config(db)
+        new_min_mv = _prompt_positive_float("流通市值下限（亿）", cur.min_float_mv_yi)
         new_mv = _prompt_positive_float("流通市值上限（亿）", cur.max_float_mv_yi)
         new_close = _prompt_positive_float("当前股价上限（元）", cur.max_close_yuan)
+        if new_min_mv >= new_mv:
+            typer.echo(
+                f"✘ 流通市值下限（{new_min_mv}亿）必须小于上限（{new_mv}亿）"
+            )
+            raise typer.Exit(2)
         # 用 dataclasses.replace 保留所有未交互的字段（如 v0.5 的 lgb_* 配置）。
-        new_cfg = replace(cur, max_float_mv_yi=new_mv, max_close_yuan=new_close)
+        new_cfg = replace(
+            cur,
+            min_float_mv_yi=new_min_mv,
+            max_float_mv_yi=new_mv,
+            max_close_yuan=new_close,
+        )
         save_config(db, new_cfg)
         typer.echo(
-            f"✔ Saved: 流通市值 < {new_cfg.max_float_mv_yi}亿、股价 < {new_cfg.max_close_yuan}元"
+            f"✔ Saved: {new_cfg.min_float_mv_yi}亿 < 流通市值 < "
+            f"{new_cfg.max_float_mv_yi}亿、股价 < {new_cfg.max_close_yuan}元"
         )
     finally:
         db.close()
@@ -584,7 +596,8 @@ def cmd_lgb_train(
 
         typer.echo(
             f"📊 拉取训练数据 {start}..{end}  "
-            f"(max_float_mv<{cfg.max_float_mv_yi}亿, max_close<{cfg.max_close_yuan}元, "
+            f"({cfg.min_float_mv_yi}亿<float_mv<{cfg.max_float_mv_yi}亿, "
+            f"max_close<{cfg.max_close_yuan}元, "
             f"label_threshold={cfg.lgb_label_threshold_pct}%)"
         )
 
@@ -598,6 +611,7 @@ def cmd_lgb_train(
             end_date=end,
             max_float_mv_yi=cfg.max_float_mv_yi,
             max_close_yuan=cfg.max_close_yuan,
+            min_float_mv_yi=cfg.min_float_mv_yi,
             label_threshold_pct=cfg.lgb_label_threshold_pct,
             force_sync=force_sync,
             on_day=_on_day,
@@ -808,6 +822,7 @@ def cmd_lgb_evaluate(
             label_threshold_pct=cfg.lgb_label_threshold_pct,
             max_float_mv_yi=cfg.max_float_mv_yi,
             max_close_yuan=cfg.max_close_yuan,
+            min_float_mv_yi=cfg.min_float_mv_yi,
             force_sync=force_sync,
             on_day=_on_day,
         )
@@ -853,6 +868,7 @@ def cmd_lgb_evaluate(
                         end_date=end,
                         max_float_mv_yi=cfg.max_float_mv_yi,
                         max_close_yuan=cfg.max_close_yuan,
+                        min_float_mv_yi=cfg.min_float_mv_yi,
                         label_threshold_pct=cfg.lgb_label_threshold_pct,
                         force_sync=force_sync,
                     )

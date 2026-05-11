@@ -1,6 +1,6 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.5.1
+version: 0.5.2
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
@@ -82,7 +82,7 @@ tables:
     description: 筹码每日指标（cyq_perf）
     purge_on_uninstall: true
   - name: lub_config
-    description: 本插件用户可调设置（流通市值 / 股价上限）
+    description: 本插件用户可调设置（流通市值 下限/上限 + 股价上限）
     purge_on_uninstall: true
   - name: lub_lgb_models
     description: LightGBM 模型版本登记（v0.5+）

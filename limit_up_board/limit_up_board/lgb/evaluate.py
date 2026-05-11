@@ -107,6 +107,7 @@ def evaluate_model(
     label_threshold_pct: float = DEFAULT_LABEL_THRESHOLD_PCT,
     max_float_mv_yi: float = 100.0,
     max_close_yuan: float = 15.0,
+    min_float_mv_yi: float = 0.0,
     force_sync: bool = False,
     on_day: Callable[[str, int, int], None] | None = None,
 ) -> EvaluateResult:
@@ -139,6 +140,7 @@ def evaluate_model(
         end_date=end_date,
         max_float_mv_yi=max_float_mv_yi,
         max_close_yuan=max_close_yuan,
+        min_float_mv_yi=min_float_mv_yi,
         label_threshold_pct=label_threshold_pct,
         force_sync=force_sync,
         on_day=on_day,
