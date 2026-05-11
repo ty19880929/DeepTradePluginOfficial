@@ -949,6 +949,114 @@ def cmd_lgb_prune(
         db.close()
 
 
+@lgb_app.command("purge")
+def cmd_lgb_purge(
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过交互确认"),
+    datasets: bool = typer.Option(
+        False, "--datasets", help="清空 datasets/*.parquet 训练矩阵快照"
+    ),
+    models: bool = typer.Option(
+        False,
+        "--models",
+        help="清空 models/ 落盘文件 + lub_lgb_models 注册行（active 模型也会被删）",
+    ),
+    predictions: bool = typer.Option(
+        False, "--predictions", help="清空 lub_lgb_predictions 评分审计表"
+    ),
+    all_flag: bool = typer.Option(False, "--all", help="等价于 --datasets --models --predictions"),
+) -> None:
+    """清空 LightGBM 训练数据 / 模型 / 审计行（destructive）。
+
+    与 ``lgb prune`` 的区别：``prune`` 是日常维护（按 --keep N 保留最近若干 +
+    active），``purge`` 是按范围彻底清空——常用于"重训前重置"或"磁盘回收"。
+
+    至少指定一个范围标志（--datasets / --models / --predictions / --all）；
+    交互模式下会列出将要删除的数量并要求确认。
+
+    Examples:
+
+      lgb purge --datasets             # 只删训练矩阵快照（最大件磁盘）
+      lgb purge --models --yes         # 删除所有模型 + 注册行，跳过确认
+      lgb purge --all                  # 彻底清空（交互确认）
+    """
+    from .lgb.cleanup import count_artifacts, purge_lgb_artifacts  # noqa: PLC0415
+
+    if all_flag:
+        datasets = True
+        models = True
+        predictions = True
+    if not (datasets or models or predictions):
+        typer.echo(
+            "✘ 必须指定 --datasets / --models / --predictions / --all 之一"
+        )
+        raise typer.Exit(2)
+
+    db = Database(paths.db_path())
+    try:
+        preview = count_artifacts(db)
+        typer.echo("将清空以下范围：")
+        if models:
+            typer.echo(
+                f"  • models/ 文件: {preview.n_model_files} model + "
+                f"{preview.n_meta_files} meta"
+                + ("  + latest.txt" if preview.latest_pointer_removed else "")
+            )
+            typer.echo(f"  • lub_lgb_models 行: {preview.n_model_rows}")
+        if datasets:
+            typer.echo(
+                f"  • datasets/*.parquet: {preview.n_dataset_files}"
+            )
+        if predictions:
+            typer.echo(
+                f"  • lub_lgb_predictions 行: {preview.n_prediction_rows}"
+            )
+        total_files = (
+            (preview.n_model_files + preview.n_meta_files if models else 0)
+            + (preview.n_dataset_files if datasets else 0)
+            + (1 if models and preview.latest_pointer_removed else 0)
+        )
+        total_rows = (
+            (preview.n_model_rows if models else 0)
+            + (preview.n_prediction_rows if predictions else 0)
+        )
+        if total_files == 0 and total_rows == 0:
+            typer.echo("(nothing to clean — 已是干净状态)")
+            return
+
+        if not yes:
+            confirm = questionary.confirm(
+                "确认清空？此操作不可恢复",
+                default=False,
+            ).ask()
+            if not confirm:
+                typer.echo("✘ 已取消")
+                raise typer.Exit(1)
+
+        report = purge_lgb_artifacts(
+            db,
+            datasets=datasets,
+            models=models,
+            predictions=predictions,
+        )
+        typer.echo(
+            f"✔ 已清空：files={report.total_files_removed}  "
+            f"rows={report.n_model_rows + report.n_prediction_rows}"
+        )
+        if report.errors:
+            typer.echo(f"⚠ {len(report.errors)} 个非致命错误：")
+            for e in report.errors[:10]:
+                typer.echo(f"  · {e}")
+            if len(report.errors) > 10:
+                typer.echo(f"  · …({len(report.errors) - 10} more)")
+        if models:
+            typer.echo(
+                "提示：active 模型已删，lgb_score 现在会显示为 None；"
+                "运行 `lgb train` 重新训练。"
+            )
+    finally:
+        db.close()
+
+
 @lgb_app.command("refresh-features")
 def cmd_lgb_refresh_features(
     start: str | None = typer.Option(None, "--start"),

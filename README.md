@@ -8,7 +8,7 @@
 
 | 插件 ID | 类型 | 当前版本 | 简介 | 子目录 |
 |---------|------|---------|------|--------|
-| `limit-up-board` | strategy | 0.5.0 | 打板策略：双轮 LLM 漏斗 + LightGBM 连板概率评分（量化锚点 ⊕ LLM 决策） | [limit_up_board/](./limit_up_board) |
+| `limit-up-board` | strategy | 0.5.1 | 打板策略：双轮 LLM 漏斗 + LightGBM 连板概率评分（量化锚点 ⊕ LLM 决策） | [limit_up_board/](./limit_up_board) |
 | `volume-anomaly` | strategy | 0.6.0 | 成交量异动策略：主板放量筛选 + LLM 主升浪启动预测（screen / analyze / prune 三模式） | [volume_anomaly/](./volume_anomaly) |
 | `stdout-channel` | channel | 0.1.0 | 参考通知通道：完整消费 payload，仅向标准输出打印 `✔ push success` | [stdout/](./stdout) |
 
