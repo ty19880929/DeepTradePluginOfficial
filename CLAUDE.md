@@ -6,11 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A monorepo of **official plugins** for the [DeepTrade](https://github.com/ty19880929/deeptrade) framework — an LLM-driven A-share stock-screening CLI. Plugins are not imported here directly; the framework's `deeptrade plugin install <short-name>` resolves them by reading `registry/index.json`, calling the GitHub Releases API for the matching `tag_prefix`, and pulling the plugin source from the resolved tag's `subdir`.
 
-Three plugins live here today:
+Two plugins live here today:
 
 - `limit_up_board/` — strategy `limit-up-board` (打板策略, dual-round LLM funnel)
 - `volume_anomaly/` — strategy `volume-anomaly` (主板放量筛选 + LLM 主升浪启动预测)
-- `stdout/` — channel `stdout-channel` (reference notification channel)
 
 The framework itself lives in another repo and is **not vendored**. Imports like `from deeptrade.core.db import Database` resolve at install time inside the user's `pipx install deeptrade-quant` environment; running anything in this repo locally requires `deeptrade-quant` to be importable.
 
@@ -38,8 +37,6 @@ cd limit_up_board ; pytest tests/test_phase_a_factors.py::TestName::test_case  #
 
 # volume-anomaly (same shape)
 cd volume_anomaly ; pytest
-
-# stdout has no tests/ directory — skipped intentionally
 ```
 
 Tests import the plugin under its own package name (e.g. `from limit_up_board.config import ...`), and they import `deeptrade.*` from the installed framework. If `pytest` errors with `ModuleNotFoundError: deeptrade`, the framework is missing from the active interpreter — install it (`pipx install deeptrade-quant` or pip in a venv).
@@ -79,7 +76,6 @@ The framework expects three things on the entrypoint class (`plugin.py`):
 
 - `limit-up-board`: `run`, `sync`, `history`, `report`, `settings show`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `run --no-lgb` is a one-shot opt-out.
 - `volume-anomaly`: `screen`, `analyze`, `prune`, `evaluate`, `stats`, `history`, `report`, `settings show|reset`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `analyze --no-lgb` is a one-shot opt-out; `stats --by lgb_score_bin` aggregates `va_lgb_predictions` ⋈ `va_realized_returns`.
-- `stdout-channel`: `test`, `log`
 
 These are exposed to users as `deeptrade <plugin-id> <subcommand>` once the framework dispatches into `cli.main(argv)`.
 
@@ -109,7 +105,7 @@ Third-party runtime deps are declared in `deeptrade_plugin.yaml::dependencies` (
 
 ### Per-plugin DB tables
 
-Every plugin owns its tables and prefixes them (e.g. `lub_*`, `va_*`, `stdout_channel_*`). Each table is declared in the yaml's `tables:` block with `purge_on_uninstall: true` so the framework can clean up. Plugins replace the framework's shared `strategy_runs` / `strategy_events` with their own `*_runs` / `*_events` tables (this is the post-v0.4 plugin-owned-history pattern).
+Every plugin owns its tables and prefixes them (e.g. `lub_*`, `va_*`). Each table is declared in the yaml's `tables:` block with `purge_on_uninstall: true` so the framework can clean up. Plugins replace the framework's shared `strategy_runs` / `strategy_events` with their own `*_runs` / `*_events` tables (this is the post-v0.4 plugin-owned-history pattern).
 
 ## Release flow (matters for any change touching a plugin)
 
@@ -131,4 +127,4 @@ The framework's installer only resolves **published Releases**, so a tag without
 
 - **Plugin id** uses kebab-case (`limit-up-board`); **inner Python package** uses snake_case (`limit_up_board`). Both must match the values in `index.json` and `deeptrade_plugin.yaml` — `check_registry.py` enforces it.
 - **Migration filename**: `<YYYYMMDD>_<NNN>_<name>.sql`, with the version string in the yaml as `<YYYYMMDD>_<NNN>` (no `.sql`). The yaml's `file:` field is the path relative to the plugin subdir.
-- **Table naming**: every table is prefixed by a short plugin tag (`lub_`, `va_`, `stdout_channel_`). When adding a table, both create it in the migration AND list it under `tables:` in the yaml — the framework relies on the yaml list for `purge_on_uninstall`.
+- **Table naming**: every table is prefixed by a short plugin tag (`lub_`, `va_`). When adding a table, both create it in the migration AND list it under `tables:` in the yaml — the framework relies on the yaml list for `purge_on_uninstall`.

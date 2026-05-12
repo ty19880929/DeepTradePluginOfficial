@@ -10,7 +10,6 @@
 |---------|------|---------|------|--------|
 | `limit-up-board` | strategy | 0.5.1 | 打板策略：双轮 LLM 漏斗 + LightGBM 连板概率评分（量化锚点 ⊕ LLM 决策） | [limit_up_board/](./limit_up_board) |
 | `volume-anomaly` | strategy | 0.7.0 | 成交量异动策略：主板放量筛选 + LLM 主升浪启动预测 + LightGBM 启动概率评分 | [volume_anomaly/](./volume_anomaly) |
-| `stdout-channel` | channel | 0.1.0 | 参考通知通道：完整消费 payload，仅向标准输出打印 `✔ push success` | [stdout/](./stdout) |
 
 各插件版本号以其 `deeptrade_plugin.yaml` 中的 `version` 字段为准。
 
@@ -23,7 +22,6 @@ pipx install deeptrade-quant
 # 通过短名安装插件（框架会自动查询本仓库的 registry/index.json）
 deeptrade plugin install limit-up-board
 deeptrade plugin install volume-anomaly
-deeptrade plugin install stdout-channel
 ```
 
 框架会按 `registry/index.json` 中的 `repo` 与 `tag_prefix`，调用 GitHub Releases API 解析最新匹配的 tag，再从对应 `subdir` 拉取插件源码与迁移脚本。
@@ -65,11 +63,7 @@ DeepTradePluginOfficial/
 │   ├── limit_up_board/         # 内层 Python 包（plugin / pipeline / runner / data ...）
 │   ├── tests/
 │   └── pytest.ini
-├── volume_anomaly/             # 结构同上
-└── stdout/                     # 通道插件（无 tests/）
-    ├── deeptrade_plugin.yaml
-    ├── migrations/
-    └── stdout_channel/
+└── volume_anomaly/             # 结构同上
 ```
 
 ## 版本管理
@@ -78,7 +72,6 @@ DeepTradePluginOfficial/
 
 - `limit-up-board/v0.4.0`
 - `volume-anomaly/v0.6.0`
-- `stdout-channel/v0.1.0`
 
 发布流程：
 

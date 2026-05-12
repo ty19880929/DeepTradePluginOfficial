@@ -18,15 +18,6 @@
       "subdir": "volume_anomaly",
       "tag_prefix": "volume-anomaly/",
       "min_framework_version": "0.4.2"
-    },
-    "stdout-channel": {
-      "name": "Stdout Channel",
-      "type": "channel",
-      "description": "Reference notification channel — fully consumes the payload but only prints '✔ push success' to stdout.",
-      "repo": "ty19880929/DeepTradePluginOfficial",
-      "subdir": "stdout",
-      "tag_prefix": "stdout-channel/",
-      "min_framework_version": "0.4.2"
     }
   }
 }
