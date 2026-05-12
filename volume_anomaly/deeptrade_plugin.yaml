@@ -1,6 +1,6 @@
 plugin_id: volume-anomaly
 name: 成交量异动策略
-version: 0.6.1
+version: 0.6.2
 type: strategy
 api_version: "1"
 entrypoint: volume_anomaly.plugin:VolumeAnomalyPlugin

@@ -19,6 +19,7 @@ from deeptrade.core import paths
 from deeptrade.core.config import ConfigService
 from deeptrade.core.db import Database
 from deeptrade.core.llm_manager import LLMManager
+from deeptrade.plugins_api import render_exception
 
 from .runner import (
     DEFAULT_PRUNE_DAYS,
@@ -243,5 +244,7 @@ def main(argv: list[str]) -> int:
         sys.stderr.write("\n✘ cancelled by user\n")
         return 130
     except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"✘ {type(e).__name__}: {e}\n")
+        # DEEPTRADE_DEBUG=1 makes render_exception emit the full traceback;
+        # otherwise it returns "✘ {ExcType}: {msg}".
+        sys.stderr.write(render_exception(e) + "\n")
         return 1

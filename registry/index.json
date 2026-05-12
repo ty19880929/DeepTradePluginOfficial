@@ -8,7 +8,7 @@
       "repo": "ty19880929/DeepTradePluginOfficial",
       "subdir": "limit_up_board",
       "tag_prefix": "limit-up-board/",
-      "min_framework_version": "0.1.0"
+      "min_framework_version": "0.4.2"
     },
     "volume-anomaly": {
       "name": "成交量异动策略",
@@ -17,7 +17,7 @@
       "repo": "ty19880929/DeepTradePluginOfficial",
       "subdir": "volume_anomaly",
       "tag_prefix": "volume-anomaly/",
-      "min_framework_version": "0.1.0"
+      "min_framework_version": "0.4.2"
     },
     "stdout-channel": {
       "name": "Stdout Channel",
@@ -26,7 +26,7 @@
       "repo": "ty19880929/DeepTradePluginOfficial",
       "subdir": "stdout",
       "tag_prefix": "stdout-channel/",
-      "min_framework_version": "0.1.0"
+      "min_framework_version": "0.4.2"
     }
   }
 }

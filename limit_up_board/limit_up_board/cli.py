@@ -31,6 +31,7 @@ from deeptrade.core import paths
 from deeptrade.core.config import ConfigService
 from deeptrade.core.db import Database
 from deeptrade.core.llm_manager import LLMManager
+from deeptrade.plugins_api import render_exception
 
 from .calendar import TradeCalendar
 from .config import LubConfig, list_for_show, load_config, save_config
@@ -1205,5 +1206,7 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"✘ {e}\n")
         return 2
     except Exception as e:  # noqa: BLE001 — reflect to framework as exit 1
-        sys.stderr.write(f"✘ {type(e).__name__}: {e}\n")
+        # DEEPTRADE_DEBUG=1 makes render_exception emit the full traceback;
+        # otherwise it returns "✘ {ExcType}: {msg}".
+        sys.stderr.write(render_exception(e) + "\n")
         return 1
