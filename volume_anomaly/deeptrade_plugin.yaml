@@ -1,11 +1,18 @@
 plugin_id: volume-anomaly
 name: 成交量异动策略
-version: 0.6.0
+version: 0.6.1
 type: strategy
 api_version: "1"
 entrypoint: volume_anomaly.plugin:VolumeAnomalyPlugin
 description: 主板成交量异动筛选 + LLM 主升浪启动预测（screen / analyze / prune 三模式）
 author: DeepTrade
+
+# v0.4.0 框架起：插件自行声明非框架自带的运行时依赖（PEP 508）。
+# 框架在 install / upgrade 阶段会先 `uv pip install` 这里列出的包再进入
+# migrations / validate_static。见 plugin_required_dependencies.md。
+dependencies:
+  - "tushare>=1.4"
+  - "pandas>=2.2,<3"
 
 permissions:
   tushare_apis:

@@ -94,7 +94,7 @@ The `lgb` group manages the LightGBM 连板概率 booster lifecycle (offline tra
 - `lgb prune --keep N` is the maintenance broom (keeps active + N most-recent; deletes the rest). `lgb purge --datasets / --models / --predictions / --all` is the scorched-earth alternative for "I want to reset / reclaim disk"; both require explicit scope flags and the latter prompts for confirmation unless `--yes`.
 - Inference (`run`) is wired through `LubRuntime.lgb_scorer`; failure paths (no active model / file missing / schema mismatch / predict raise / `lightgbm` not installed) all degrade to `lgb_score=None` without blocking the LLM stages. See `lgb/scorer.py` for the 5-branch contract and `lightgbm_design.md §7.3`.
 
-`lightgbm>=4.3` + `scikit-learn>=1.4` are soft dependencies, declared in `limit_up_board/requirements.txt` and probed by `LimitUpBoardPlugin.validate_static`.
+Third-party runtime deps are declared in `deeptrade_plugin.yaml::dependencies` (PEP 508). The framework `uv pip install`s them before `validate_static` runs (v0.4.0+; see `plugin_required_dependencies.md`). For `limit-up-board` this includes `tushare`, `pandas`, `numpy`, `lightgbm`, and `scikit-learn`; for `volume-anomaly`, `tushare` + `pandas`.
 
 ### Per-plugin DB tables
 

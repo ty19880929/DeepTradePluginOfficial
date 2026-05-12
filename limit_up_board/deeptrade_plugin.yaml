@@ -1,11 +1,21 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.5.2
+version: 0.5.3
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
 description: A 股打板策略：双轮 LLM 漏斗（强势标的分析 → 连板预测）
 author: DeepTrade
+
+# v0.4.0 框架起：插件自行声明非框架自带的运行时依赖（PEP 508）。
+# 框架在 install / upgrade 阶段会先 `uv pip install` 这里列出的包再进入
+# migrations / validate_static。见 plugin_required_dependencies.md。
+dependencies:
+  - "tushare>=1.4"
+  - "pandas>=2.2,<3"
+  - "numpy>=1.26,<3"
+  - "lightgbm>=4.3,<5"
+  - "scikit-learn>=1.4,<2"
 
 permissions:
   tushare_apis:
