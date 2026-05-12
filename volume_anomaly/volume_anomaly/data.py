@@ -1426,6 +1426,9 @@ class AnalyzeBundle:
     sector_strength_source: str = "industry_fallback"
     sector_strength_data: dict[str, Any] = field(default_factory=dict)
     data_unavailable: list[str] = field(default_factory=list)
+    # v0.7 (PR-2.2) — populated by _attach_lgb_scores when LGB is enabled
+    # and the active model loaded; None signals "LGB disabled / unavailable".
+    lgb_model_id: str | None = None
 
 
 # v0.5.0 P1-1 — RPS / 大盘相对 alpha 配置
@@ -1445,6 +1448,7 @@ def collect_analyze_bundle(
     moneyflow_lookback: int = 5,
     baseline_index_code: str = DEFAULT_BASELINE_INDEX_CODE,
     force_sync: bool = False,
+    lgb_scorer: Any = None,
 ) -> AnalyzeBundle:
     """Read watchlist + pull historical windows + assemble compact LLM context.
 
@@ -1624,7 +1628,85 @@ def collect_analyze_bundle(
     }
     bundle.candidates = candidates
     bundle.data_unavailable = data_unavailable
+
+    # -------- LightGBM scoring (v0.7, PR-2.2) ------------------------------
+    _attach_lgb_scores(bundle, scorer=lgb_scorer)
     return bundle
+
+
+def _attach_lgb_scores(bundle: AnalyzeBundle, *, scorer: Any) -> None:
+    """Mutate ``bundle.candidates`` in place to add lgb_score / lgb_decile /
+    lgb_feature_missing fields. Resilient to every failure mode:
+
+    * ``scorer`` is None → all three fields = None; ``data_unavailable``
+      gets ``lgb_model (disabled)``.
+    * scorer present but not loaded → fields = None; ``data_unavailable``
+      gets ``lgb_model (<load_error>)``.
+    * scorer loaded → real scores via ``scorer.score_batch``; decile via
+      ``attach_deciles``; ``bundle.lgb_model_id`` set.
+
+    The bundle is never raised out of; design §7.3 red line.
+    """
+    from .lgb.features import build_feature_frame  # noqa: PLC0415
+
+    # Default fields on every candidate so downstream prompt / report code
+    # can assume the keys exist (None when LGB is absent).
+    for row in bundle.candidates:
+        row.setdefault("lgb_score", None)
+        row.setdefault("lgb_decile", None)
+        row.setdefault("lgb_feature_missing", [])
+
+    if scorer is None:
+        bundle.data_unavailable.append("lgb_model (disabled)")
+        return
+    if not getattr(scorer, "loaded", False):
+        bundle.data_unavailable.append(
+            f"lgb_model ({getattr(scorer, 'load_error', 'unloaded')})"
+        )
+        return
+    if not bundle.candidates:
+        return
+
+    # The scorer expects a feature frame keyed on ts_code.
+    feature_df = build_feature_frame(
+        candidate_rows=bundle.candidates,
+        market_summary=bundle.market_summary,
+        sector_strength_data=bundle.sector_strength_data,
+        sector_strength_source=bundle.sector_strength_source,
+    )
+    try:
+        scored = scorer.score_batch(feature_df)
+    except Exception as e:  # noqa: BLE001 — defence in depth
+        bundle.data_unavailable.append(f"lgb_predict_failed ({e})")
+        return
+
+    from .lgb.scorer import attach_deciles  # noqa: PLC0415
+
+    deciles = attach_deciles(scored)
+    bundle.lgb_model_id = scorer.model_id
+
+    for row in bundle.candidates:
+        ts_code = row.get("ts_code")
+        if ts_code not in scored.index:
+            continue
+        raw = scored.at[ts_code, "lgb_score"]
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            row["lgb_score"] = None
+        else:
+            # design §7: 0-1 probability → 0-100 score
+            row["lgb_score"] = round(float(raw) * 100.0, 2)
+        dec = deciles.get(ts_code) if ts_code in deciles.index else None
+        if dec is None or pd.isna(dec):
+            row["lgb_decile"] = None
+        else:
+            row["lgb_decile"] = int(dec)
+        missing_json = scored.at[ts_code, "feature_missing_json"]
+        try:
+            row["lgb_feature_missing"] = (
+                json.loads(missing_json) if missing_json else []
+            )
+        except Exception:  # noqa: BLE001
+            row["lgb_feature_missing"] = []
 
 
 def _index_daily_by_code(df: pd.DataFrame | None) -> dict[str, list[dict[str, Any]]]:
@@ -1693,38 +1775,50 @@ def _classify_rel_strength(alpha_20d: float | None) -> str | None:
     return "in_line"
 
 
-def _build_candidate_row(
+def build_candidate_features(
     *,
-    watchlist_row: dict[str, Any],
+    ts_code: str,
     trade_date: str,
     history: list[dict[str, Any]],
     daily_basic: dict[str, Any],
     moneyflow_5d: list[dict[str, Any]],
     limit_up_dates: list[str],
+    name: str | None = None,
+    industry: str | None = None,
+    tracked_since: str | None = None,
+    last_screened: str | None = None,
+    anomaly_pct_chg: float | None = None,
+    anomaly_body_ratio: float | None = None,
+    anomaly_turnover_rate: float | None = None,
+    anomaly_vol_ratio_5d: float | None = None,
     baseline_index_code: str = DEFAULT_BASELINE_INDEX_CODE,
     baseline_close_by_date: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Compress (up to) 250-day history → moving averages + base/washout +
-    VCP / resistance features.
+    """Pure-function variant of :func:`_build_candidate_row` (v0.7+).
 
-    Reduces token usage by emitting compact scalars; the recent 5 OHLCV rows
-    are still passed verbatim for form reference. v0.3.0 (PR-2):
-        * input window widened from 60 → 250 trading days (E2-A) and sliced
-          internally — 60d for MAs / aggregates, full window for VCP and
-          120d / 250d resistance.
-        * new fields: atr_10d_pct / atr_10d_quantile_in_60d / bbw_20d /
-          bbw_compression_ratio (P0-3) and high_120d / high_250d / low_120d /
-          dist_to_120d_high_pct / dist_to_250d_high_pct / is_above_120d_high /
-          is_above_250d_high / pos_in_120d_range (P0-4).
+    Compresses (up to) 250-day history → moving averages + base/washout +
+    VCP / resistance features. Same dictionary shape as the original; the
+    refactor only makes the "watchlist-dependent" parameters explicit so
+    callers in the LGB training pipeline can synthesize history rows without
+    constructing a fake ``watchlist_row``.
+
+    Parameters mirror what the watchlist row used to carry:
+        * ``tracked_since`` / ``last_screened``: caller-supplied; defaults to
+          ``trade_date`` so historical replay produces ``tracked_days = 0``.
+        * ``anomaly_*``: the four T-day snapshot fields previously copied
+          from ``watchlist_row['last_*']``. Pass ``None`` to leave NaN.
     """
+    tracked_since = tracked_since or trade_date
+    last_screened = last_screened or trade_date
+
     closes = [float(r["close"]) for r in history if r.get("close") is not None]
     if not closes:
         return {
-            "candidate_id": watchlist_row["ts_code"],
-            "ts_code": watchlist_row["ts_code"],
-            "name": watchlist_row.get("name"),
-            "tracked_since": watchlist_row["tracked_since"],
-            "tracked_days": _calendar_days_between(watchlist_row["tracked_since"], trade_date),
+            "candidate_id": ts_code,
+            "ts_code": ts_code,
+            "name": name,
+            "tracked_since": tracked_since,
+            "tracked_days": _calendar_days_between(tracked_since, trade_date),
             "_missing_history": True,
         }
 
@@ -1912,20 +2006,20 @@ def _build_candidate_row(
     else:
         mf_summary = {"rows_used": 0}
 
-    tracked_days = _calendar_days_between(watchlist_row["tracked_since"], trade_date)
+    tracked_days = _calendar_days_between(tracked_since, trade_date)
     return {
-        "candidate_id": watchlist_row["ts_code"],
-        "ts_code": watchlist_row["ts_code"],
-        "name": watchlist_row.get("name"),
-        "industry": watchlist_row.get("industry"),
-        "tracked_since": watchlist_row["tracked_since"],
+        "candidate_id": ts_code,
+        "ts_code": ts_code,
+        "name": name,
+        "industry": industry,
+        "tracked_since": tracked_since,
         "tracked_days": tracked_days,
-        # T-day snapshot (from watchlist row — the异动 day metrics)
-        "anomaly_day": watchlist_row.get("last_screened"),
-        "anomaly_pct_chg": watchlist_row.get("last_pct_chg"),
-        "anomaly_body_ratio": watchlist_row.get("last_body_ratio"),
-        "anomaly_turnover_rate": watchlist_row.get("last_turnover_rate"),
-        "anomaly_vol_ratio_5d": watchlist_row.get("last_vol_ratio_5d"),
+        # T-day snapshot (the异动 day metrics)
+        "anomaly_day": last_screened,
+        "anomaly_pct_chg": anomaly_pct_chg,
+        "anomaly_body_ratio": anomaly_body_ratio,
+        "anomaly_turnover_rate": anomaly_turnover_rate,
+        "anomaly_vol_ratio_5d": anomaly_vol_ratio_5d,
         # Latest market data
         "last_close": round2(last_close),
         "ma5": ma5,
@@ -1978,6 +2072,45 @@ def _build_candidate_row(
         # Moneyflow摘要 (5d)
         "moneyflow_5d_summary": mf_summary,
     }
+
+
+def _build_candidate_row(
+    *,
+    watchlist_row: dict[str, Any],
+    trade_date: str,
+    history: list[dict[str, Any]],
+    daily_basic: dict[str, Any],
+    moneyflow_5d: list[dict[str, Any]],
+    limit_up_dates: list[str],
+    baseline_index_code: str = DEFAULT_BASELINE_INDEX_CODE,
+    baseline_close_by_date: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Thin compatibility wrapper around :func:`build_candidate_features`.
+
+    Pre-v0.7 callers (the analyze pipeline) pass a ``watchlist_row`` dict;
+    this shim translates it to the explicit-parameter shape so the pure
+    function is the single place where logic lives. LGB training callers go
+    straight to :func:`build_candidate_features` with synthesized history-row
+    inputs (no fake watchlist needed).
+    """
+    return build_candidate_features(
+        ts_code=watchlist_row["ts_code"],
+        trade_date=trade_date,
+        history=history,
+        daily_basic=daily_basic,
+        moneyflow_5d=moneyflow_5d,
+        limit_up_dates=limit_up_dates,
+        name=watchlist_row.get("name"),
+        industry=watchlist_row.get("industry"),
+        tracked_since=watchlist_row["tracked_since"],
+        last_screened=watchlist_row.get("last_screened"),
+        anomaly_pct_chg=watchlist_row.get("last_pct_chg"),
+        anomaly_body_ratio=watchlist_row.get("last_body_ratio"),
+        anomaly_turnover_rate=watchlist_row.get("last_turnover_rate"),
+        anomaly_vol_ratio_5d=watchlist_row.get("last_vol_ratio_5d"),
+        baseline_index_code=baseline_index_code,
+        baseline_close_by_date=baseline_close_by_date,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -214,6 +214,13 @@ def write_analyze_report(
         for c in bundle.candidates
         if isinstance(c, dict)
     }
+    # v0.7 (PR-2.3) — lgb_score lookup so we can surface it in the report
+    # tables. Keyed by candidate_id; missing → None (rendered as "—").
+    lgb_score_lookup: dict[str, float | None] = {
+        c["candidate_id"]: c.get("lgb_score")
+        for c in bundle.candidates
+        if isinstance(c, dict)
+    }
 
     md = [render_banners(status=status, is_intraday=is_intraday, failed_batch_ids=failed_batch_ids)]
     md.append("# 成交量异动策略 — 走势分析\n")
@@ -225,6 +232,7 @@ def write_analyze_report(
         f"- intraday: `{is_intraday}`\n"
         f"- 待追踪池规模: **{len(bundle.candidates)}**\n"
         f"- LLM 输出预测数: **{len(predictions)}**\n"
+        f"- lgb_model_id: `{bundle.lgb_model_id or 'disabled'}`\n"
     )
     md.append(
         f"\n*sector_strength_source*: `{bundle.sector_strength_source}`  "
@@ -247,13 +255,14 @@ def write_analyze_report(
 
     md.append(f"\n## 即将启动 · imminent_launch ({len(by_pred['imminent_launch'])} 只)\n")
     if by_pred["imminent_launch"]:
-        md.append("| # | Code | Name | 已追踪 | Score | W/P/C/S/H/R | Pattern | 洗盘 | Conf | Rationale |\n")
-        md.append("|---|------|------|-------|-------|-------------|---------|------|------|-----------|\n")
+        md.append("| # | Code | Name | 已追踪 | Score | LGB | W/P/C/S/H/R | Pattern | 洗盘 | Conf | Rationale |\n")
+        md.append("|---|------|------|-------|-------|-----|-------------|---------|------|------|-----------|\n")
         for c in by_pred["imminent_launch"]:
             td = tracked_days_lookup.get(c.candidate_id, 0)
             md.append(
                 f"| {c.rank} | `{c.ts_code}` | {c.name} | {td}日 | "
-                f"{c.launch_score:.1f} | {_dim_compact(c)} | {c.pattern} | {c.washout_quality} | "
+                f"{c.launch_score:.1f} | {_fmt_lgb(lgb_score_lookup.get(c.candidate_id))} | "
+                f"{_dim_compact(c)} | {c.pattern} | {c.washout_quality} | "
                 f"{c.confidence} | {c.rationale} |\n"
             )
     else:
@@ -261,13 +270,14 @@ def write_analyze_report(
 
     md.append(f"\n## 持续观察 · watching ({len(by_pred['watching'])} 只)\n")
     if by_pred["watching"]:
-        md.append("| # | Code | Name | 已追踪 | Score | W/P/C/S/H/R | Pattern | 洗盘 | Conf |\n")
-        md.append("|---|------|------|-------|-------|-------------|---------|------|------|\n")
+        md.append("| # | Code | Name | 已追踪 | Score | LGB | W/P/C/S/H/R | Pattern | 洗盘 | Conf |\n")
+        md.append("|---|------|------|-------|-------|-----|-------------|---------|------|------|\n")
         for c in by_pred["watching"]:
             td = tracked_days_lookup.get(c.candidate_id, 0)
             md.append(
                 f"| {c.rank} | `{c.ts_code}` | {c.name} | {td}日 | "
-                f"{c.launch_score:.1f} | {_dim_compact(c)} | {c.pattern} | {c.washout_quality} | "
+                f"{c.launch_score:.1f} | {_fmt_lgb(lgb_score_lookup.get(c.candidate_id))} | "
+                f"{_dim_compact(c)} | {c.pattern} | {c.washout_quality} | "
                 f"{c.confidence} |\n"
             )
     else:
@@ -584,6 +594,7 @@ def _render_analyze_terminal(root: Path, console: Any, Table: Any, _Panel: Any) 
         t.add_column("名称", no_wrap=True, max_width=10)
         t.add_column("追踪", justify="right", width=5)
         t.add_column("分", justify="right", width=4)
+        t.add_column("LGB", justify="right", width=4)
         t.add_column("形态", width=10)
         t.add_column("洗盘", width=8)
         t.add_column("信", width=4)
@@ -595,6 +606,7 @@ def _render_analyze_terminal(root: Path, console: Any, Table: Any, _Panel: Any) 
                 p.get("name", "?"),
                 f"{p.get('tracked_days', 0)}日",
                 f"{p.get('launch_score', 0):.0f}",
+                _fmt_lgb(p.get("lgb_score")),
                 p.get("pattern", "?"),
                 p.get("washout_quality", "?"),
                 _conf_short(p.get("confidence", "")),
@@ -618,6 +630,7 @@ def _render_analyze_terminal(root: Path, console: Any, Table: Any, _Panel: Any) 
         t.add_column("名称", no_wrap=True, max_width=10)
         t.add_column("追踪", justify="right", width=5)
         t.add_column("分", justify="right", width=4)
+        t.add_column("LGB", justify="right", width=4)
         t.add_column("形态", width=10)
         t.add_column("洗盘", width=8)
         t.add_column("信", width=4)
@@ -628,6 +641,7 @@ def _render_analyze_terminal(root: Path, console: Any, Table: Any, _Panel: Any) 
                 p.get("name", "?"),
                 f"{p.get('tracked_days', 0)}日",
                 f"{p.get('launch_score', 0):.0f}",
+                _fmt_lgb(p.get("lgb_score")),
                 p.get("pattern", "?"),
                 p.get("washout_quality", "?"),
                 _conf_short(p.get("confidence", "")),
@@ -871,6 +885,20 @@ def _dim_compact(c: VATrendCandidate) -> str:
     sector / historical / risk). v0.6.0 P1-2."""
     d = c.dimension_scores
     return f"{d.washout}/{d.pattern}/{d.capital}/{d.sector}/{d.historical}/{d.risk}"
+
+
+def _fmt_lgb(score: float | None) -> str:
+    """Render a candidate's lgb_score (0-100 float or None) for table cells.
+
+    None / missing → '—'; numeric → 1-decimal string. Width-friendly so
+    terminal & markdown tables stay aligned without further padding.
+    """
+    if score is None:
+        return "—"
+    try:
+        return f"{float(score):.0f}"
+    except (TypeError, ValueError):
+        return "—"
 
 
 def export_llm_calls(run_id: str, db: Any, *, reports_root: Path | None = None) -> int:

@@ -52,6 +52,19 @@ E. **历史强度**：近 60 日是否已有过涨停 / 是否已经处于二浪
    → 对应 `dimension_scores.historical`
 F. **风险**：是否高位放量出货 / 流通盘过大 / 题材孤立 / 超买连阳 / 缺数据
    → 对应 `dimension_scores.risk`（**反向打分：分越高代表风险越大**）
+G. **量化锚点 (LightGBM)** —— 离线训练的主升浪启动概率模型，结合现有量价 / 动量 /
+   VCP / 资金流 / alpha 特征给出 0-100 的概率分。该分数仅作为统计学补充，**不是硬决策**。
+   - 字段：`lgb_score`（0-100；越大越倾向 1-3 日内启动主升浪）；`lgb_decile`
+     （1=本批最弱，10=本批最强；本批 < 10 只时可能为 null）。
+   - lgb_score < 25（默认阈值；可经 settings show 调整 va.lgb_min_score_floor）的标的，除非有极强的突发题材 /
+     行业反转 / 教科书级 VCP，否则倾向下调 launch_score 或标 `not_yet`。
+   - lgb_score ≥ 70 的标的可适度上调 confidence；但若同时存在高位放量 /
+     触及 250d 高点 / 大盘明显走弱等风险信号，仍需谨慎。
+   - lgb_score 缺失（null）时按其他证据判断，**不要因为缺失就标 `not_yet`**。
+   - 在 evidence 中引用时，field=`lgb_score`，unit="无"，interpretation 写入
+     "分位 X / 模型分 Y"。
+   - 该维度**不单独占 dimension_scores 槽位**——它的影响应已反映在
+     washout / pattern / capital 等子分的"统计验证 cross-check"中。
 
 【evidence 要求】
 每只 1-5 条 key_evidence；每条必须引用真实出现在输入中的字段名 (`field`)，并填上对应数值 (`value`)、单位 (`unit`) 和你的解读 (`interpretation`)。

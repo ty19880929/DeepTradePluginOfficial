@@ -78,7 +78,7 @@ The framework expects three things on the entrypoint class (`plugin.py`):
 ### CLI surface (current subcommands)
 
 - `limit-up-board`: `run`, `sync`, `history`, `report`, `settings show`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `run --no-lgb` is a one-shot opt-out.
-- `volume-anomaly`: `screen`, `analyze`, `prune`, `evaluate`, `stats`, `history`, `report`
+- `volume-anomaly`: `screen`, `analyze`, `prune`, `evaluate`, `stats`, `history`, `report`, `settings show|reset`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `analyze --no-lgb` is a one-shot opt-out; `stats --by lgb_score_bin` aggregates `va_lgb_predictions` ⋈ `va_realized_returns`.
 - `stdout-channel`: `test`, `log`
 
 These are exposed to users as `deeptrade <plugin-id> <subcommand>` once the framework dispatches into `cli.main(argv)`.
@@ -94,7 +94,18 @@ The `lgb` group manages the LightGBM 连板概率 booster lifecycle (offline tra
 - `lgb prune --keep N` is the maintenance broom (keeps active + N most-recent; deletes the rest). `lgb purge --datasets / --models / --predictions / --checkpoints / --all` is the scorched-earth alternative for "I want to reset / reclaim disk"; both require explicit scope flags and the latter prompts for confirmation unless `--yes`. `--checkpoints` wipes all in-flight Phase-1 training shards.
 - Inference (`run`) is wired through `LubRuntime.lgb_scorer`; failure paths (no active model / file missing / schema mismatch / predict raise / `lightgbm` not installed) all degrade to `lgb_score=None` without blocking the LLM stages. See `lgb/scorer.py` for the 5-branch contract and `lightgbm_design.md §7.3`.
 
-Third-party runtime deps are declared in `deeptrade_plugin.yaml::dependencies` (PEP 508). The framework `uv pip install`s them before `validate_static` runs (v0.4.0+; see `plugin_required_dependencies.md`). For `limit-up-board` this includes `tushare`, `pandas`, `numpy`, `lightgbm`, and `scikit-learn`; for `volume-anomaly`, `tushare` + `pandas`.
+#### `volume-anomaly lgb` (v0.7+)
+
+Mirrors the `limit-up-board lgb` design with VA-specific twists:
+
+- **Labels come from `va_realized_returns`** — `va_lgb_models` records both `label_threshold_pct` (default 5.0) and `label_source` (`max_ret_5d` / `ret_t3` / `max_ret_10d`) so different label semantics never get mixed. Training does **zero** extra Tushare calls.
+- `lgb train --start --end [--label-threshold] [--label-source] [--folds] [--no-activate] [--fresh] [--keep-checkpoint]` fits a new booster (GroupKFold by anomaly_date). Phase-1 collection is checkpointed by BLAKE2b-64 fingerprint of (window + label config + `SCHEMA_VERSION` + lookbacks + `main_board_only` + `baseline_index_code`); shards land under `~/.deeptrade/volume_anomaly/checkpoints/<digest>/days/<YYYYMMDD>.parquet`. Train success deletes the dir; failures keep shards for resume.
+- `lgb evaluate --start --end [--model-id] [--k] [--drift --baseline <id>]` runs AUC / logloss / Top-K hit-rate vs per-day baseline; label config auto-read from `va_lgb_models`. `--drift` adds 10-bin PSI vs the baseline model's `dataset.parquet` snapshot, sorted by PSI desc with `stable` / `moderate` / `shift` status. JSON dumps under `reports/lgb_evaluate_*.json` and `reports/lgb_drift_*.json`.
+- `lgb info [--model-id] [--recent-N N]` shows registry row + usage count (`runs / trade_dates / rows`) from `va_lgb_predictions` + optional per-day score-distribution snapshot.
+- `lgb list` (★ = active), `lgb activate <id>`, `lgb prune --keep N`, `lgb purge --datasets / --models / --predictions / --checkpoints / --all [--yes]`.
+- Inference (`analyze`) is wired through `VaRuntime.lgb_scorer`; failure paths (no active / file missing / schema mismatch / predict raise / `lightgbm` not installed) all degrade to `lgb_score=None` without blocking LLM. `analyze --no-lgb` is one-shot; `VaLgbConfig.lgb_enabled=false` is persistent (settable via `settings`).
+
+Third-party runtime deps are declared in `deeptrade_plugin.yaml::dependencies` (PEP 508). The framework `uv pip install`s them before `validate_static` runs (v0.4.0+; see `plugin_required_dependencies.md`). For `limit-up-board` this includes `tushare`, `pandas`, `numpy`, `lightgbm`, and `scikit-learn`; for `volume-anomaly` (v0.7+), `tushare`, `pandas`, `lightgbm`, `scikit-learn`, and `pyarrow`.
 
 ### Per-plugin DB tables
 

@@ -71,6 +71,11 @@ class AnalyzeParams:
     trade_date: str | None = None
     allow_intraday: bool = False
     force_sync: bool = False
+    # v0.7 (PR-0.3): one-shot LGB disable. Persistent default lives in
+    # VaLgbConfig.lgb_enabled (va_config table). PR-0.3 carries the flag
+    # through params without affecting the pipeline; PR-2.2 wires it into
+    # the scorer construction in _iter_analyze.
+    lgb_enabled: bool = True
 
 
 @dataclass
@@ -261,6 +266,28 @@ class VaRunner:
         )
         cfg = rt.config.get_app_config()
 
+        # v0.7 (PR-2.2) — Build LightGBM scorer when both the persistent
+        # VaLgbConfig.lgb_enabled and the per-run --no-lgb override allow it.
+        from .lgb.config import load_config as _load_lgb_config  # noqa: PLC0415
+        from .lgb.scorer import LgbScorer  # noqa: PLC0415
+
+        lgb_cfg = _load_lgb_config(rt.db)
+        if params.lgb_enabled and lgb_cfg.lgb_enabled:
+            rt.lgb_scorer = LgbScorer(rt.db)
+            try:
+                rt.lgb_scorer.warmup()
+            except Exception as e:  # noqa: BLE001 — defence in depth; scorer
+                # already swallows internally but be paranoid.
+                logger.warning("LgbScorer warmup raised: %s", e)
+            if rt.lgb_scorer.load_error and not rt.lgb_scorer.loaded:
+                yield rt.emit(
+                    EventType.LOG,
+                    f"lgb_model unavailable: {rt.lgb_scorer.load_error}",
+                    level=EventLevel.WARN,
+                )
+        else:
+            rt.lgb_scorer = None
+
         yield rt.emit(EventType.STEP_STARTED, "Step 0: resolve trade date")
         cal_df = rt.tushare.call("trade_cal")
         cal = TradeCalendar(cal_df)
@@ -286,6 +313,7 @@ class VaRunner:
                 trade_date=T,
                 next_trade_date=T1,
                 force_sync=params.force_sync,
+                lgb_scorer=rt.lgb_scorer,
             )
         except TushareUnauthorizedError as e:
             yield rt.emit(
@@ -312,6 +340,11 @@ class VaRunner:
                 "sector_strength_source": bundle.sector_strength_source,
             },
         )
+
+        # v0.7 (PR-2.2) — Audit LGB predictions before the LLM call so that
+        # va_lgb_predictions reflects what was fed into the prompt regardless
+        # of LLM success/failure.
+        _persist_lgb_predictions(rt, bundle)
 
         if not bundle.candidates:
             yield from self._emit_empty_analyze_report(bundle, params, reason="empty watchlist")
@@ -715,6 +748,73 @@ class VaRunner:
                 json.dumps(ev.payload, ensure_ascii=False, default=str),
             ),
         )
+
+
+def _persist_lgb_predictions(rt: VaRuntime, bundle: AnalyzeBundle) -> None:
+    """Insert one row per candidate into ``va_lgb_predictions``.
+
+    Skipped silently when:
+        * No active model loaded (``bundle.lgb_model_id is None``).
+        * Table missing (legacy DB pre-migration) — single try / except
+          covers the entire batch.
+        * No candidates carry a non-None ``lgb_score``.
+    """
+    if bundle.lgb_model_id is None or not bundle.candidates:
+        return
+    rows: list[tuple[Any, ...]] = []
+    for c in bundle.candidates:
+        if not isinstance(c, dict):
+            continue
+        if c.get("lgb_score") is None:
+            continue
+        rows.append(
+            (
+                rt.run_id,
+                bundle.trade_date,
+                c.get("ts_code"),
+                bundle.lgb_model_id,
+                float(c["lgb_score"]),
+                c.get("lgb_decile"),
+                _hash_candidate_for_audit(c),
+                json.dumps(
+                    c.get("lgb_feature_missing") or [], ensure_ascii=False
+                ),
+            )
+        )
+    if not rows:
+        return
+    try:
+        for row in rows:
+            rt.db.execute(
+                "INSERT INTO va_lgb_predictions("
+                "run_id, trade_date, ts_code, model_id, lgb_score, lgb_decile, "
+                "feature_hash, feature_missing_json"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                row,
+            )
+    except Exception as e:  # noqa: BLE001 — pre-migration DB / disk issue
+        logger.warning("va_lgb_predictions insert failed: %s", e)
+
+
+def _hash_candidate_for_audit(candidate: dict[str, Any]) -> str:
+    """Best-effort short digest of the candidate fields that fed LGB.
+
+    Falls back to an empty string when the candidate is missing data; the
+    audit table treats this as informational only — uniqueness is enforced
+    by (run_id, ts_code).
+    """
+    import hashlib  # noqa: PLC0415
+    payload = json.dumps(
+        {
+            "ts_code": candidate.get("ts_code"),
+            "lgb_score": candidate.get("lgb_score"),
+            "lgb_decile": candidate.get("lgb_decile"),
+            "anomaly_pct_chg": candidate.get("anomaly_pct_chg"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.blake2b(payload, digest_size=8).hexdigest()
 
 
 def _write_stage_results(

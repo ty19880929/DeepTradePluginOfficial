@@ -18,6 +18,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from deeptrade.core.llm_manager import LLMManager
     from deeptrade.core.tushare_client import TushareClient
 
+    from .lgb.scorer import LgbScorer
+
 PLUGIN_ID = "volume-anomaly"
 
 
@@ -30,6 +32,10 @@ class VaRuntime:
     run_id: str | None = None
     is_intraday: bool = False
     tushare: TushareClient | None = None
+    # v0.7 (PR-2.2) — optional LightGBM scorer. Constructed lazily in the
+    # analyze runner; None when LGB is disabled via VaLgbConfig.lgb_enabled
+    # = false or the `--no-lgb` one-shot flag.
+    lgb_scorer: LgbScorer | None = None
 
     def emit(
         self,

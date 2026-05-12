@@ -1,6 +1,6 @@
 plugin_id: volume-anomaly
 name: 成交量异动策略
-version: 0.6.2
+version: 0.7.0
 type: strategy
 api_version: "1"
 entrypoint: volume_anomaly.plugin:VolumeAnomalyPlugin
@@ -13,6 +13,9 @@ author: DeepTrade
 dependencies:
   - "tushare>=1.4"
   - "pandas>=2.2,<3"
+  - "lightgbm>=4.3,<5"
+  - "scikit-learn>=1.4,<2"
+  - "pyarrow>=14"
 
 permissions:
   tushare_apis:
@@ -38,6 +41,12 @@ migrations:
   - version: "20260509_001"
     file: migrations/20260509_001_init.sql
     checksum: "sha256:2294b40337e3ac1695456dbbc51c5f6aaaf7b7d373202c099ec81b65755c44d0"
+  - version: "20260601_001"
+    file: migrations/20260601_001_lgb_tables.sql
+    checksum: "sha256:6e338f369a8dca1f1ff8bffd6bc5e7f84c7345c33e87eb2e363b6f7d30355a33"
+  - version: "20260601_002"
+    file: migrations/20260601_002_va_config.sql
+    checksum: "sha256:856d7ac3508510e3376b7f15a1be413edcc1714446b00e9c19e010e6d1666ca2"
 
 tables:
   - name: va_watchlist
@@ -57,4 +66,13 @@ tables:
     purge_on_uninstall: true
   - name: va_realized_returns
     description: T+N 事后实际收益指标（PK=anomaly_date+ts_code）
+    purge_on_uninstall: true
+  - name: va_lgb_models
+    description: LightGBM 模型版本登记（v0.7+）
+    purge_on_uninstall: true
+  - name: va_lgb_predictions
+    description: 每次 analyze run 的 LGB 推理结果审计（含特征摘要，便于复盘）
+    purge_on_uninstall: true
+  - name: va_config
+    description: 本插件用户可调设置（LGB 评分开关 / 标签阈值 / 标签源 等）
     purge_on_uninstall: true

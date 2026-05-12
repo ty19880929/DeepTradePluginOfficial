@@ -9,7 +9,7 @@
 | 插件 ID | 类型 | 当前版本 | 简介 | 子目录 |
 |---------|------|---------|------|--------|
 | `limit-up-board` | strategy | 0.5.1 | 打板策略：双轮 LLM 漏斗 + LightGBM 连板概率评分（量化锚点 ⊕ LLM 决策） | [limit_up_board/](./limit_up_board) |
-| `volume-anomaly` | strategy | 0.6.0 | 成交量异动策略：主板放量筛选 + LLM 主升浪启动预测（screen / analyze / prune 三模式） | [volume_anomaly/](./volume_anomaly) |
+| `volume-anomaly` | strategy | 0.7.0 | 成交量异动策略：主板放量筛选 + LLM 主升浪启动预测 + LightGBM 启动概率评分 | [volume_anomaly/](./volume_anomaly) |
 | `stdout-channel` | channel | 0.1.0 | 参考通知通道：完整消费 payload，仅向标准输出打印 `✔ push success` | [stdout/](./stdout) |
 
 各插件版本号以其 `deeptrade_plugin.yaml` 中的 `version` 字段为准。
@@ -33,6 +33,7 @@ deeptrade plugin install stdout-channel
 | 插件 | 依赖 | 用途 |
 |------|------|------|
 | `limit-up-board` ≥ 0.5.0 | `lightgbm>=4.3`、`scikit-learn>=1.4` | LightGBM 连板概率评分（训练 + 推理）。缺包时 `validate_static` 会在 install 阶段给出友好提示。 |
+| `volume-anomaly` ≥ 0.7.0 | `lightgbm>=4.3`、`scikit-learn>=1.4`、`pyarrow>=14` | LightGBM 主升浪启动概率评分（训练 + 推理 + checkpoint snapshot）。框架在 install / upgrade 阶段自动 `uv pip install`。 |
 
 手动安装：
 
