@@ -482,7 +482,11 @@ def cmd_lgb_info(
     recent_n: int = typer.Option(
         0,
         "--recent-N",
-        help="额外列出最近 N 天每天的 candidate × score 分布快照（来自 lub_lgb_predictions）",
+        help=(
+            "额外列出最近 N 天每天的 candidate × score 分布快照"
+            "（数据来源：lub_lgb_predictions；由 `run` 命令在线上推理时写入，"
+            "不含训练 / evaluate 的 in-sample 分数。刚训练完未跑过 run 时为空属正常现象）"
+        ),
     ),
 ) -> None:
     """展示单个模型的详细信息（CV 指标 / 特征数 / 超参 / 文件路径 + 使用统计）。"""
@@ -541,14 +545,20 @@ def cmd_lgb_info(
                 f"runs={usage['n_runs']}  trade_dates={usage['n_trade_dates']}  "
                 f"rows={usage['n_rows']}"
                 if usage["n_rows"]
-                else "(no predictions yet)"
+                else (
+                    "(尚无推理记录 — 此表由 `deeptrade limit-up-board run` 在线上推理时"
+                    "写入；跑一次 run 后即可看到当日 candidate 的 LGB 分数分布)"
+                )
             ),
         )
     console.print(table)
 
     if recent_n > 0:
         recent_table = Table(
-            title=f"recent {recent_n} trade dates · score distribution",
+            title=(
+                f"recent {recent_n} trade dates · run-time score distribution "
+                f"(from lub_lgb_predictions)"
+            ),
             show_header=True,
             header_style="cyan",
         )
@@ -573,6 +583,11 @@ def cmd_lgb_info(
                     f"{row['max'] * 100:.1f}",
                 )
         console.print(recent_table)
+        if not recent:
+            typer.echo(
+                "提示：此表数据由 `deeptrade limit-up-board run` 在线上推理时写入；"
+                "刚训练完未跑过 run 时为空属正常现象。"
+            )
 
 
 @lgb_app.command("train")
@@ -805,6 +820,17 @@ def cmd_lgb_train(
         if dataset_path is not None:
             typer.echo(f"  dataset: {dataset_path}")
         typer.echo(f"  active:  {not no_activate}")
+        if not no_activate:
+            typer.echo(
+                "\n👉 下一步：`deeptrade limit-up-board run` "
+                "（跑一轮策略以触发 LGB 评分；分数会落 lub_lgb_predictions，"
+                "之后可用 `lgb info --recent-N 5` 查看分布）"
+            )
+        else:
+            typer.echo(
+                "\n👉 模型未激活；用 `lgb activate "
+                f"{model_id}` 切换为 active 后再跑 `run` 才会用上它。"
+            )
 
         # 训练全程成功 → 清理 checkpoint 目录（失败时 shard 留盘，下次自动续）
         lgb_checkpoint.delete_checkpoint(digest)
