@@ -40,6 +40,8 @@ class PurgeReport:
     n_model_rows: int = 0
     n_prediction_rows: int = 0
     latest_pointer_removed: bool = False
+    n_checkpoint_dirs: int = 0
+    n_checkpoint_shards: int = 0
     errors: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -52,6 +54,7 @@ class PurgeReport:
             self.n_model_files
             + self.n_meta_files
             + self.n_dataset_files
+            + self.n_checkpoint_shards
             + (1 if self.latest_pointer_removed else 0)
         )
 
@@ -85,6 +88,8 @@ def _safe_count(db: Database, sql: str) -> int:
 
 def count_artifacts(db: Database) -> PurgeReport:
     """Inspect what *would* be removed by a full purge. Side-effect free."""
+    from . import checkpoint as lgb_checkpoint  # noqa: PLC0415
+
     report = PurgeReport()
     models_dir = lgb_paths.models_dir()
     datasets_dir = lgb_paths.datasets_dir()
@@ -100,6 +105,9 @@ def count_artifacts(db: Database) -> PurgeReport:
         report.n_dataset_files = sum(
             1 for _ in datasets_dir.glob("lgb_dataset_*.parquet") if _.is_file()
         )
+    n_ck, n_shards = lgb_checkpoint.count_checkpoints()
+    report.n_checkpoint_dirs = n_ck
+    report.n_checkpoint_shards = n_shards
     report.n_model_rows = _safe_count(db, "SELECT COUNT(*) FROM lub_lgb_models")
     report.n_prediction_rows = _safe_count(
         db, "SELECT COUNT(*) FROM lub_lgb_predictions"
@@ -113,6 +121,7 @@ def purge_lgb_artifacts(
     datasets: bool = False,
     models: bool = False,
     predictions: bool = False,
+    checkpoints: bool = False,
 ) -> PurgeReport:
     """Erase the requested LGB artifact sets.
 
@@ -126,6 +135,10 @@ def purge_lgb_artifacts(
         "no_active_model" branch on the next run.
     predictions
         Truncate ``lub_lgb_predictions`` (per-run scoring audit history).
+    checkpoints
+        Delete all in-progress training checkpoints under ``checkpoints/``.
+        典型用于 "上次 train 崩了，磁盘上留了 shard，但我想重训"——本旗标
+        把 ``checkpoints/<digest>/`` 全部目录一并清掉。
 
     At least one flag must be True; otherwise the call is a no-op and the
     returned report has all-zero counts.
@@ -136,8 +149,10 @@ def purge_lgb_artifacts(
         Counts of files removed / DB rows truncated, plus a non-fatal
         ``errors`` list (per-file IO failures, etc.).
     """
+    from . import checkpoint as lgb_checkpoint  # noqa: PLC0415
+
     report = PurgeReport()
-    if not (datasets or models or predictions):
+    if not (datasets or models or predictions or checkpoints):
         return report
 
     # DB side first (single transaction so a half-state can't survive).
@@ -178,6 +193,14 @@ def purge_lgb_artifacts(
             lgb_paths.datasets_dir(), "lgb_dataset_*.parquet"
         )
         report.n_dataset_files = n_ds
+        report.errors.extend(errs)
+
+    if checkpoints:
+        # 在删除前快照一下要被清掉的 shard 数（删除后无法再数）
+        _, n_shards = lgb_checkpoint.count_checkpoints()
+        n_ck, errs = lgb_checkpoint.purge_all_checkpoints()
+        report.n_checkpoint_dirs = n_ck
+        report.n_checkpoint_shards = n_shards
         report.errors.extend(errs)
 
     return report

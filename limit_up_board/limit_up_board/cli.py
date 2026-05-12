@@ -34,9 +34,11 @@ from deeptrade.core.llm_manager import LLMManager
 
 from .calendar import TradeCalendar
 from .config import LubConfig, list_for_show, load_config, save_config
+from .lgb import checkpoint as lgb_checkpoint
 from .lgb import paths as lgb_paths
 from .lgb import registry as lgb_registry
-from .lgb.dataset import collect_training_window
+from .lgb.checkpoint import CheckpointFingerprint, CheckpointMismatch
+from .lgb.dataset import _enumerate_trade_dates, collect_training_window
 from .lgb.features import FEATURE_NAMES, SCHEMA_VERSION
 from .lgb.registry import ModelRecord, ensure_unique_model_id, insert_model, mint_model_id
 from .lgb.trainer import train_lightgbm
@@ -581,8 +583,20 @@ def cmd_lgb_train(
         False, "--no-activate", help="训练完成后不切换 active 模型"
     ),
     force_sync: bool = typer.Option(False, "--force-sync", help="强制刷新 tushare 缓存"),
+    fresh: bool = typer.Option(
+        False,
+        "--fresh",
+        help="忽略已有 checkpoint，重新抓取所有交易日（默认遇到同窗口/同配置的"
+        " checkpoint 会自动续训）",
+    ),
 ) -> None:
-    """训练新的 LightGBM 模型并落库。"""
+    """训练新的 LightGBM 模型并落库。
+
+    默认开启 Phase-1 checkpoint：按日把训练样本落到
+    ``~/.deeptrade/limit_up_board/checkpoints/<digest>/days/<YYYYMMDD>.parquet``，
+    崩溃/中断后再次以同窗口 + 同筛选参数运行将自动跳过已完成日；训练成功后
+    checkpoint 自动清理。用 ``--fresh`` 丢弃现有 shard 重新抓取。
+    """
     if start > end:
         typer.echo("✘ --start 必须 ≤ --end")
         raise typer.Exit(2)
@@ -594,17 +608,61 @@ def cmd_lgb_train(
         cal_df = tushare.call("trade_cal", force_sync=force_sync)
         calendar = TradeCalendar(cal_df)
 
+        # ---- checkpoint setup ----
+        fingerprint = CheckpointFingerprint(
+            start_date=start,
+            end_date=end,
+            schema_version=SCHEMA_VERSION,
+            label_threshold_pct=cfg.lgb_label_threshold_pct,
+            daily_lookback=30,
+            moneyflow_lookback=5,
+            min_float_mv_yi=cfg.min_float_mv_yi,
+            max_float_mv_yi=cfg.max_float_mv_yi,
+            max_close_yuan=cfg.max_close_yuan,
+        )
+        digest = fingerprint.digest()
+        if fresh:
+            lgb_checkpoint.delete_checkpoint(digest)
+        try:
+            state = lgb_checkpoint.open_or_create(
+                fingerprint, plugin_version=_plugin_version()
+            )
+        except CheckpointMismatch as e:
+            typer.echo(f"✘ checkpoint 状态损坏：{e}")
+            raise typer.Exit(2) from e
+        already_done = lgb_checkpoint.completed_dates(digest)
+        # state 与磁盘自我修复：磁盘有但 state 没记的 → 补进 state
+        if already_done - set(state.completed_dates):
+            state.completed_dates = sorted(
+                set(state.completed_dates) | already_done
+            )
+            lgb_checkpoint.save_state(state)
+
         typer.echo(
             f"📊 拉取训练数据 {start}..{end}  "
             f"({cfg.min_float_mv_yi}亿<float_mv<{cfg.max_float_mv_yi}亿, "
             f"max_close<{cfg.max_close_yuan}元, "
             f"label_threshold={cfg.lgb_label_threshold_pct}%)"
         )
+        if already_done:
+            typer.echo(
+                f"  ↻ 续训：已落盘 {len(already_done)} 天 shard (digest={digest})，"
+                f"本次仅补漏 (--fresh 可重抓)"
+            )
+        else:
+            typer.echo(f"  📦 checkpoint digest={digest}")
 
         def _on_day(T: str, n: int, cum: int) -> None:
-            typer.echo(f"  [{T}] +{n} samples (cum. {cum})")
+            if n < 0:
+                typer.echo(f"  [{T}] (resumed)")
+            else:
+                typer.echo(f"  [{T}] +{n} samples (cum. {cum})")
 
-        ds = collect_training_window(
+        def _sink(T: str, shard_df: Any) -> None:
+            lgb_checkpoint.save_day_shard(digest, T, shard_df)
+            lgb_checkpoint.record_day_done(digest, T)
+
+        collect_training_window(
             tushare=tushare,
             calendar=calendar,
             start_date=start,
@@ -615,6 +673,16 @@ def cmd_lgb_train(
             label_threshold_pct=cfg.lgb_label_threshold_pct,
             force_sync=force_sync,
             on_day=_on_day,
+            skip_dates=already_done,
+            day_sink=_sink,
+        )
+        full_trade_dates = _enumerate_trade_dates(calendar, start, end)
+        ds = lgb_checkpoint.assemble_full_dataset(
+            digest,
+            label_threshold_pct=cfg.lgb_label_threshold_pct,
+            daily_lookback=30,
+            moneyflow_lookback=5,
+            trade_dates=full_trade_dates,
         )
         ds = ds.filter_labeled()
         if ds.n_samples < cfg.lgb_train_min_samples:
@@ -736,6 +804,9 @@ def cmd_lgb_train(
         if dataset_path is not None:
             typer.echo(f"  dataset: {dataset_path}")
         typer.echo(f"  active:  {not no_activate}")
+
+        # 训练全程成功 → 清理 checkpoint 目录（失败时 shard 留盘，下次自动续）
+        lgb_checkpoint.delete_checkpoint(digest)
     finally:
         db.close()
 
@@ -979,19 +1050,30 @@ def cmd_lgb_purge(
     predictions: bool = typer.Option(
         False, "--predictions", help="清空 lub_lgb_predictions 评分审计表"
     ),
-    all_flag: bool = typer.Option(False, "--all", help="等价于 --datasets --models --predictions"),
+    checkpoints: bool = typer.Option(
+        False,
+        "--checkpoints",
+        help="清空 checkpoints/ 目录下所有 Phase-1 续训 shard"
+        "（典型于上次训练崩在抓数阶段、想从头再来时）",
+    ),
+    all_flag: bool = typer.Option(
+        False,
+        "--all",
+        help="等价于 --datasets --models --predictions --checkpoints",
+    ),
 ) -> None:
-    """清空 LightGBM 训练数据 / 模型 / 审计行（destructive）。
+    """清空 LightGBM 训练数据 / 模型 / 审计行 / checkpoint（destructive）。
 
     与 ``lgb prune`` 的区别：``prune`` 是日常维护（按 --keep N 保留最近若干 +
     active），``purge`` 是按范围彻底清空——常用于"重训前重置"或"磁盘回收"。
 
-    至少指定一个范围标志（--datasets / --models / --predictions / --all）；
-    交互模式下会列出将要删除的数量并要求确认。
+    至少指定一个范围标志（--datasets / --models / --predictions /
+    --checkpoints / --all）；交互模式下会列出将要删除的数量并要求确认。
 
     Examples:
 
       lgb purge --datasets             # 只删训练矩阵快照（最大件磁盘）
+      lgb purge --checkpoints --yes    # 删所有未完成训练的 shard，跳过确认
       lgb purge --models --yes         # 删除所有模型 + 注册行，跳过确认
       lgb purge --all                  # 彻底清空（交互确认）
     """
@@ -1001,9 +1083,10 @@ def cmd_lgb_purge(
         datasets = True
         models = True
         predictions = True
-    if not (datasets or models or predictions):
+        checkpoints = True
+    if not (datasets or models or predictions or checkpoints):
         typer.echo(
-            "✘ 必须指定 --datasets / --models / --predictions / --all 之一"
+            "✘ 必须指定 --datasets / --models / --predictions / --checkpoints / --all 之一"
         )
         raise typer.Exit(2)
 
@@ -1026,16 +1109,26 @@ def cmd_lgb_purge(
             typer.echo(
                 f"  • lub_lgb_predictions 行: {preview.n_prediction_rows}"
             )
+        if checkpoints:
+            typer.echo(
+                f"  • checkpoints/: {preview.n_checkpoint_dirs} dir, "
+                f"{preview.n_checkpoint_shards} shard"
+            )
         total_files = (
             (preview.n_model_files + preview.n_meta_files if models else 0)
             + (preview.n_dataset_files if datasets else 0)
+            + (preview.n_checkpoint_shards if checkpoints else 0)
             + (1 if models and preview.latest_pointer_removed else 0)
         )
         total_rows = (
             (preview.n_model_rows if models else 0)
             + (preview.n_prediction_rows if predictions else 0)
         )
-        if total_files == 0 and total_rows == 0:
+        if (
+            total_files == 0
+            and total_rows == 0
+            and not (checkpoints and preview.n_checkpoint_dirs > 0)
+        ):
             typer.echo("(nothing to clean — 已是干净状态)")
             return
 
@@ -1053,6 +1146,7 @@ def cmd_lgb_purge(
             datasets=datasets,
             models=models,
             predictions=predictions,
+            checkpoints=checkpoints,
         )
         typer.echo(
             f"✔ 已清空：files={report.total_files_removed}  "

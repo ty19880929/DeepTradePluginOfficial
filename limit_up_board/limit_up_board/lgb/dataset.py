@@ -404,6 +404,8 @@ def collect_training_window(
     moneyflow_lookback: int = 5,
     force_sync: bool = False,
     on_day: Callable[[str, int, int], None] | None = None,
+    skip_dates: set[str] | None = None,
+    day_sink: Callable[[str, pd.DataFrame], None] | None = None,
 ) -> LgbDataset:
     """对 ``[start_date, end_date]`` 内的每个交易日 T 收集训练样本。
 
@@ -411,14 +413,26 @@ def collect_training_window(
     ----------
     on_day
         进度回调 ``(trade_date, day_n_samples, cum_n_samples)``——
-        train CLI 用它打印 ``[YYYYMMDD] +N samples (cum. K)``。
+        train CLI 用它打印 ``[YYYYMMDD] +N samples (cum. K)``。``cum`` 仅
+        累计**本次调用**中实际处理过的样本数；被 ``skip_dates`` 跳过的日期
+        以 ``day_n_samples=-1`` 标记（约定值，调用方可据此打印"resumed"）。
+    skip_dates
+        交易日子集；命中的日期完全跳过（不进行 Tushare 调用，不进入返回值）。
+        典型用法：续训时把已经落盘的 shard 日期传进来。
+    day_sink
+        每完成一天就调用一次 ``day_sink(trade_date, shard_df)``，``shard_df``
+        的列顺序固定为 :data:`checkpoint.SHARD_COLUMNS`。用于把当日结果落盘
+        到 checkpoint shard。空 frame（0 样本）也会推一次，便于调用方据此
+        标记"已处理"。
 
     Returns
     -------
     LgbDataset
         :data:`feature_matrix` 用 0..n-1 整型 index，``ts_code`` 移到
         ``sample_index['ts_code']``。``labels`` 保留 ``<NA>``（T+1 数据
-        缺失），训练前调用 :meth:`LgbDataset.filter_labeled` 过滤。
+        缺失），训练前调用 :meth:`LgbDataset.filter_labeled` 过滤。当传入
+        ``skip_dates`` 时返回值**只覆盖本次新处理的天**——调用方若需全量
+        请使用 ``checkpoint.assemble_full_dataset``。
     """
     if start_date > end_date:
         raise ValueError(f"start_date {start_date!r} > end_date {end_date!r}")
@@ -430,12 +444,19 @@ def collect_training_window(
         main_pool = main_board_pool
 
     trade_dates = _enumerate_trade_dates(calendar, start_date, end_date)
+    skip = skip_dates or set()
 
     feature_frames: list[pd.DataFrame] = []
     label_series_list: list[pd.Series] = []
     sample_meta_frames: list[pd.DataFrame] = []
     cum = 0
     for T in trade_dates:
+        if T in skip:
+            if on_day is not None:
+                on_day(T, -1, cum)
+            else:
+                logger.info("[%s] (resumed from checkpoint)", T)
+            continue
         try:
             next_open = calendar.next_open(T)
         except ValueError:
@@ -460,6 +481,16 @@ def collect_training_window(
             force_sync=force_sync,
         )
         n_today = int(len(day_bundle.feature_matrix))
+        if day_sink is not None:
+            # 局部 import 避免 dataset ↔ checkpoint 循环
+            from .checkpoint import day_bundle_to_shard  # noqa: PLC0415
+
+            shard_df = day_bundle_to_shard(
+                feature_matrix=day_bundle.feature_matrix,
+                labels=day_bundle.labels,
+                sample_meta=day_bundle.sample_meta,
+            )
+            day_sink(T, shard_df)
         if n_today > 0:
             # ts_code from index → 列；为 concat 重置 index
             feature_frames.append(day_bundle.feature_matrix.reset_index(drop=True))
