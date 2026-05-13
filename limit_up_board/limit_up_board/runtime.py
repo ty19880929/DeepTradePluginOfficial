@@ -57,9 +57,18 @@ class LubRuntime:
         message: str,
         *,
         level: EventLevel = EventLevel.INFO,
-        **payload: object,
+        payload: dict[str, object] | None = None,
+        **extra: object,
     ) -> StrategyEvent:
-        return StrategyEvent(type=event_type, level=level, message=message, payload=dict(payload))
+        # Accept both styles: ``payload={...}`` (explicit dict) and ad-hoc
+        # kwargs (``providers=[...]``). Without the explicit ``payload=`` slot
+        # the kwargs path would bury the caller's dict under a literal
+        # ``"payload"`` key, breaking every dashboard handler that reads
+        # ``ev.payload.get("min_float_mv_yi")`` etc.
+        full: dict[str, object] = dict(payload or {})
+        if extra:
+            full.update(extra)
+        return StrategyEvent(type=event_type, level=level, message=message, payload=full)
 
 
 def build_tushare_client(
