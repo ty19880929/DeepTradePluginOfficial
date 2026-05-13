@@ -45,6 +45,7 @@ from .lgb.registry import ModelRecord, ensure_unique_model_id, insert_model, min
 from .lgb.trainer import train_lightgbm
 from .runner import LubRunner, PreconditionError, RunParams, render_finished_run
 from .runtime import LubRuntime, build_tushare_client
+from .ui import choose_renderer
 
 app = typer.Typer(
     name="limit-up-board",
@@ -106,6 +107,14 @@ def cmd_run(
             "R1/R2 prompt 仍能跑通。等价于 LubConfig.lgb_enabled=false 的一次性覆盖。"
         ),
     ),
+    no_dashboard: bool = typer.Option(
+        False,
+        "--no-dashboard",
+        help=(
+            "禁用动态仪表盘，使用与 v0.5.x 兼容的流式日志输出。"
+            "也可通过环境变量 DEEPTRADE_NO_DASHBOARD=1 全局禁用。"
+        ),
+    ),
 ) -> None:
     """Run the full打板策略 pipeline."""
     debate_llms_list: list[str] | None = None
@@ -130,7 +139,13 @@ def cmd_run(
             debate_llms=debate_llms_list,
             lgb_enabled=not no_lgb,
         )
-        runner = LubRunner(rt)
+        # v0.6 — pick a renderer. ``choose_renderer`` returns the rich
+        # dashboard only when stdout is an interactive terminal and none of
+        # the opt-outs (--no-dashboard / CI / DEEPTRADE_NO_DASHBOARD /
+        # TERM=dumb) are in play; everywhere else it returns the
+        # byte-compatible legacy renderer (Plan §3.5).
+        renderer = choose_renderer(no_dashboard=no_dashboard)
+        runner = LubRunner(rt, renderer=renderer)
         outcome = runner.execute(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.error:
@@ -161,7 +176,8 @@ def cmd_sync(
             daily_lookback=daily_lookback,
             moneyflow_lookback=moneyflow_lookback,
         )
-        runner = LubRunner(rt)
+        renderer = choose_renderer(no_dashboard=False)
+        runner = LubRunner(rt, renderer=renderer)
         outcome = runner.execute_sync_only(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.error:

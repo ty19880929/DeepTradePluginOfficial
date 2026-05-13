@@ -58,6 +58,7 @@ from .schemas import (
     FinalRankingResponse,
     RevisedContinuationCandidate,
 )
+from .ui import EventRenderer, LegacyStreamRenderer, NullRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,9 @@ class PreconditionError(RuntimeError):
 class LubRunner:
     """Drives the pipeline generator and persists run / events."""
 
-    def __init__(self, rt: LubRuntime) -> None:
+    def __init__(
+        self, rt: LubRuntime, *, renderer: EventRenderer | None = None
+    ) -> None:
         self._rt = rt
         # Buffer for events emitted by sub-systems (currently TushareClient)
         # and drained between yields in the pipeline.
@@ -181,6 +184,12 @@ class LubRunner:
         self._llm: LLMClient | None = None
         # Sequence counter used by both single-LLM and debate paths.
         self._seq = 0
+        # UI: stays NullRenderer when callers don't inject one (defensive —
+        # cli.py always passes a renderer via choose_renderer). The runner is
+        # responsible for the EventRenderer lifecycle (on_run_start /
+        # on_event / on_run_finish / close); see _dispatch_to_renderer for
+        # the contract-isolation wrapper.
+        self._renderer: EventRenderer = renderer or NullRenderer()
 
     # ----- public --------------------------------------------------------
 
@@ -199,9 +208,34 @@ class LubRunner:
         # path identical to v0.4.
         self._rt.lgb_scorer = self._maybe_build_scorer(params)
 
-        if params.debate:
-            return self._execute_debate(run_id, params)
-        return self._execute_single(run_id, params)
+        # v0.6 — renderer lifecycle. on_run_start is called once before any
+        # event; the finally block guarantees on_run_finish + close even on
+        # KeyboardInterrupt or unhandled exception (Plan §3.1, §3.6).
+        self._renderer.on_run_start(
+            run_id=run_id, params=params, debate=params.debate
+        )
+        try:
+            if params.debate:
+                outcome = self._execute_debate(run_id, params)
+            else:
+                outcome = self._execute_single(run_id, params)
+        finally:
+            try:
+                # Pass the best outcome we have; if the runner crashed before
+                # building one, hand back a synthetic FAILED outcome so the
+                # renderer can finalise its UI cleanly. The runner re-raises
+                # below — outcome assembly does not swallow user-visible
+                # errors.
+                outcome_for_render = locals().get("outcome") or RunOutcome(
+                    run_id=run_id,
+                    status=RunStatus.FAILED,
+                    error="runner aborted before outcome",
+                    seen_events=[],
+                )
+                self._renderer.on_run_finish(outcome_for_render)
+            finally:
+                self._renderer.close()
+        return outcome
 
     def _maybe_build_scorer(self, params: RunParams) -> LgbScorer | None:
         """Build the scorer iff the user hasn't disabled LGB for this run.
@@ -248,7 +282,7 @@ class LubRunner:
                 self._seq += 1
                 self._persist_event(run_id, self._seq, ev)
                 events.append(ev)
-                self._render_event(ev)
+                self._dispatch_to_renderer(ev)
                 if ev.type == EventType.VALIDATION_FAILED:
                     seen_validation_failed = True
         except KeyboardInterrupt:
@@ -276,6 +310,7 @@ class LubRunner:
             self._rt, intraday=params.allow_intraday, event_cb=self._on_tushare_event
         )
 
+        self._renderer.on_run_start(run_id=run_id, params=params, debate=False)
         self._record_run_start(run_id, params)
         events: list[StrategyEvent] = []
         terminal_status = RunStatus.SUCCESS
@@ -286,7 +321,7 @@ class LubRunner:
                 self._seq += 1
                 self._persist_event(run_id, self._seq, ev)
                 events.append(ev)
-                self._render_event(ev)
+                self._dispatch_to_renderer(ev)
         except KeyboardInterrupt:
             terminal_status = RunStatus.CANCELLED
             terminal_error = "KeyboardInterrupt"
@@ -296,9 +331,14 @@ class LubRunner:
             logger.exception("limit-up-board sync %s raised", run_id)
 
         self._record_run_finish(run_id, terminal_status, terminal_error, events)
-        return RunOutcome(
+        outcome = RunOutcome(
             run_id=run_id, status=terminal_status, error=terminal_error, seen_events=events
         )
+        try:
+            self._renderer.on_run_finish(outcome)
+        finally:
+            self._renderer.close()
+        return outcome
 
     # ----- pipeline iteration -------------------------------------------
 
@@ -549,7 +589,7 @@ class LubRunner:
             self._seq += 1
             self._persist_event(run_id, self._seq, ev)
             events.append(ev)
-            self._render_event(ev)
+            self._dispatch_to_renderer(ev)
 
         seen_validation_failed = False
         try:
@@ -940,10 +980,34 @@ class LubRunner:
         while self._pending:
             yield self._pending.pop(0)
 
-    def _render_event(self, ev: StrategyEvent) -> None:
-        """Print events to stdout as they happen (replacement for the deleted TUI)."""
-        glyph = "✔" if ev.level == EventLevel.INFO else ("⚠" if ev.level == EventLevel.WARN else "✘")
-        print(f"  {glyph} [{ev.type.value}] {ev.message}", flush=True)
+    def _dispatch_to_renderer(self, ev: StrategyEvent) -> None:
+        """Hand ``ev`` to the active renderer, with contract isolation.
+
+        Plan §3.6.1 — *UI failure ≠ run failure*: the renderer is contractually
+        forbidden from raising out of ``on_event``, but we install a safety
+        net here anyway. If a renderer does raise, we log a WARN, close it,
+        and **swap to** :class:`LegacyStreamRenderer` for the rest of the
+        run. Already-emitted events are not replayed; legacy resumes from
+        the current event onward (matches the design's "don't backfill"
+        rule — backfilling would risk further crashes).
+        """
+        try:
+            self._renderer.on_event(ev)
+        except Exception as e:  # noqa: BLE001 — renderer must never crash a run
+            logger.warning(
+                "renderer.on_event raised; degrading to legacy: %s", e
+            )
+            try:
+                self._renderer.close()
+            except Exception:  # noqa: BLE001 — close() is best-effort
+                pass
+            self._renderer = LegacyStreamRenderer()
+            try:
+                self._renderer.on_event(ev)
+            except Exception:  # noqa: BLE001 — legacy print failed → give up silently
+                logger.warning(
+                    "legacy renderer also raised after fallback; suppressing"
+                )
 
     # ----- DB helpers ---------------------------------------------------
 

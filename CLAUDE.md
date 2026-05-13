@@ -74,7 +74,7 @@ The framework expects three things on the entrypoint class (`plugin.py`):
 
 ### CLI surface (current subcommands)
 
-- `limit-up-board`: `run`, `sync`, `history`, `report`, `settings show`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `run --no-lgb` is a one-shot opt-out.
+- `limit-up-board`: `run`, `sync`, `history`, `report`, `settings show`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `run --no-lgb` is a one-shot opt-out. `run --no-dashboard` (v0.6+) disables the rich animated dashboard and falls back to the v0.5.x-compatible line-per-event stream.
 - `volume-anomaly`: `screen`, `analyze`, `prune`, `evaluate`, `stats`, `history`, `report`, `settings show|reset`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `analyze --no-lgb` is a one-shot opt-out; `stats --by lgb_score_bin` aggregates `va_lgb_predictions` ⋈ `va_realized_returns`.
 
 These are exposed to users as `deeptrade <plugin-id> <subcommand>` once the framework dispatches into `cli.main(argv)`.
@@ -89,6 +89,15 @@ The `lgb` group manages the LightGBM 连板概率 booster lifecycle (offline tra
 - `lgb info [--model-id] [--recent-N]` shows model metadata + how many runs / trade dates have used it, with an optional per-day score-distribution snapshot.
 - `lgb prune --keep N` is the maintenance broom (keeps active + N most-recent; deletes the rest). `lgb purge --datasets / --models / --predictions / --checkpoints / --all` is the scorched-earth alternative for "I want to reset / reclaim disk"; both require explicit scope flags and the latter prompts for confirmation unless `--yes`. `--checkpoints` wipes all in-flight Phase-1 training shards.
 - Inference (`run`) is wired through `LubRuntime.lgb_scorer`; failure paths (no active model / file missing / schema mismatch / predict raise / `lightgbm` not installed) all degrade to `lgb_score=None` without blocking the LLM stages. See `lgb/scorer.py` for the 5-branch contract and `lightgbm_design.md §7.3`.
+
+#### `limit-up-board run` dashboard (v0.6+)
+
+`run` (and `sync`) drive output through an `EventRenderer` protocol (`limit_up_board/ui/protocol.py`). The factory `limit_up_board.ui.choose_renderer(no_dashboard=False)` picks between two implementations:
+
+- **`RichDashboardRenderer`** — rich `Live` region with header / config / stages / (debate grid) / log panels (Plan §4.1, §4.2). Single-LLM mode uses an event-driven `StageStack` (Step 0/1/2/4/4.5/5); debate mode adds a Provider × {Phase A, R3 修订, 备注} summary grid on top of Step 0/1.
+- **`LegacyStreamRenderer`** — one stdout line per event (`  {glyph} [{event_type}] {message}`), byte-identical to v0.5.x.
+
+Fallback to legacy whenever any of: caller passed `--no-dashboard`; `sys.stdout` not a TTY (pipes, redirects, pytest capture); `CI` truthy; `DEEPTRADE_NO_DASHBOARD` truthy; `TERM=dumb`. `NO_COLOR=1` keeps the dashboard but disables Console colour. UI failures never crash a run — `LubRunner._dispatch_to_renderer` catches and degrades to legacy mid-stream (Plan §3.6.1). Pipeline / data / lgb / report subsystems are renderer-unaware: the dashboard only consumes `StrategyEvent` instances, never mutates them, never writes to DB. See `docs/limit-up-board/CLI_UI_Redesign_Plan.md` for the full design.
 
 #### `volume-anomaly lgb` (v0.7+)
 
