@@ -29,7 +29,7 @@ class EvidenceItem(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     field: str = Field(..., min_length=1, max_length=64)
-    value: str | int | float | None
+    value: str | int | float | list[str] | None
     unit: str = Field(..., min_length=1, max_length=16)
     interpretation: str = Field(..., min_length=1, max_length=120)
 
