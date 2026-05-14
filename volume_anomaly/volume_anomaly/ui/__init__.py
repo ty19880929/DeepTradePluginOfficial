@@ -10,17 +10,11 @@ Implementations (Plan §3.1.2):
 * :class:`LegacyStreamRenderer` — byte-identical to v0.7.x; the safe default
   and fallback for non-TTY / CI / ``--no-dashboard``.
 * :class:`RichDashboardRenderer` — animated dashboard for ``screen`` /
-  ``analyze`` modes (Plan §4.1, §4.2). **Introduced in PR-2** — PR-1 only
-  ships the protocol.
+  ``analyze`` modes (Plan §4.1, §4.2).
 * :class:`NullRenderer` — silent; testing only.
 
 :func:`choose_renderer` is the single factory CLI callers use. Fallback
 rules per Plan §3.5.
-
-PR-1 scope (no dashboard yet): :func:`choose_renderer` always returns a
-``LegacyStreamRenderer`` so stdout stays byte-identical to v0.7.x. PR-2
-extends it to apply the full §3.5 fallback matrix and instantiate
-``RichDashboardRenderer`` when the environment supports it.
 """
 
 from __future__ import annotations
@@ -30,6 +24,9 @@ import sys
 
 from .legacy import LegacyStreamRenderer
 from .protocol import EventRenderer, NullRenderer
+
+# Lazy import — RichDashboardRenderer pulls in rich / theme; tests that
+# don't need it should not pay the cost. We import inside the factory.
 
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -44,20 +41,23 @@ def _truthy(value: str | None) -> bool:
 def choose_renderer(*, no_dashboard: bool = False) -> EventRenderer:
     """Return the renderer best suited for the current environment.
 
-    PR-1 always returns :class:`LegacyStreamRenderer` to keep stdout
-    byte-identical to v0.7.x while the protocol scaffolding lands. PR-2
-    extends this factory to apply the full Plan §3.5 fallback matrix:
+    Fallback to :class:`LegacyStreamRenderer` if *any* of these hold
+    (Plan §3.5):
 
     * caller passed ``no_dashboard=True``,
     * ``sys.stdout`` is not a TTY (pipe / redirect / pytest capture),
     * ``CI`` env var is truthy,
     * ``DEEPTRADE_NO_DASHBOARD`` env var is truthy,
-    * ``TERM == "dumb"``,
+    * ``TERM == "dumb"``.
 
-    → otherwise ``RichDashboardRenderer`` (with ``NO_COLOR`` honoured).
+    Otherwise return :class:`RichDashboardRenderer`. ``NO_COLOR`` is
+    respected by toggling the Console's ``no_color`` flag — the dashboard
+    still runs (structured layout helps even mono users), it just renders
+    without ANSI colour (Plan §3.5.1, https://no-color.org).
 
-    The eager TTY / env probing is already wired here so PR-2 only adds the
-    final dashboard branch; behaviour-equivalent today.
+    Callers may further restrict the dashboard to specific subcommands by
+    bypassing this factory and constructing :class:`LegacyStreamRenderer`
+    directly (Plan §3.4.2: ``cmd_prune`` / ``cmd_evaluate`` do this).
     """
     if no_dashboard:
         return LegacyStreamRenderer()
@@ -72,9 +72,15 @@ def choose_renderer(*, no_dashboard: bool = False) -> EventRenderer:
         return LegacyStreamRenderer()
     if os.environ.get("TERM", "").strip().lower() == "dumb":
         return LegacyStreamRenderer()
-    # PR-2 wires the dashboard here; until then we stay on legacy so stdout
-    # is unchanged from v0.7.x.
-    return LegacyStreamRenderer()
+
+    no_color = bool(os.environ.get("NO_COLOR", "").strip())
+
+    from .dashboard import RichDashboardRenderer  # noqa: PLC0415
+
+    try:
+        return RichDashboardRenderer(no_color=no_color)
+    except Exception:  # noqa: BLE001 — final safety net: never block a run
+        return LegacyStreamRenderer()
 
 
 __all__ = [

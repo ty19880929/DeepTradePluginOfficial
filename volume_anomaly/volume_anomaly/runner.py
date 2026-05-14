@@ -167,6 +167,23 @@ class VaRunner:
         try:
             try:
                 seq = 0
+                # Settings LOG — emit once before any pipeline event so the
+                # dashboard's ConfigSummary is populated by the time stages
+                # start arriving. Restricted to screen / analyze modes (Plan
+                # §3.4.2: prune / evaluate are forced-legacy) AND only when
+                # the active renderer isn't legacy. Skipping for legacy keeps
+                # the stdout byte stream identical to v0.7.x and prevents an
+                # extra row from leaking into va_events for users on
+                # --no-dashboard / CI / non-TTY paths.
+                if not isinstance(self._renderer, LegacyStreamRenderer):
+                    settings_ev = _va_settings_log_event(
+                        self._rt, mode, params
+                    )
+                    if settings_ev is not None:
+                        seq += 1
+                        self._persist_event(run_id, seq, settings_ev)
+                        events.append(settings_ev)
+                        self._dispatch_to_renderer(settings_ev)
                 for ev in iterator:
                     seq += 1
                     self._persist_event(run_id, seq, ev)
@@ -803,6 +820,65 @@ class VaRunner:
                 json.dumps(ev.payload, ensure_ascii=False, default=str),
             ),
         )
+
+
+def _va_settings_log_event(
+    rt: VaRuntime, mode: str, params: Any
+) -> StrategyEvent | None:
+    """Build a one-shot LOG event summarising the run configuration.
+
+    Plan §4.1.3 / §6.3 — fired by ``_drive`` *before* any pipeline event so
+    the dashboard's :class:`ConfigSummary` is populated by the time stages
+    arrive. The payload carries every key listed in ``dashboard._CONFIG_KEYS``
+    (snake-cased to match the :class:`ConfigSummary` attribute names) so
+    the dashboard can ``setattr`` them in without per-field plumbing.
+
+    Restricted to ``screen`` / ``analyze`` — prune / evaluate are forced
+    legacy (Plan §3.4.2) and we don't want this extra LOG line to leak into
+    their byte-identical-to-v0.7.x stdout. Returning ``None`` skips the
+    emit; the runner deals with that branch.
+    """
+    if mode not in ("screen", "analyze"):
+        return None
+    rules = ScreenRules.from_dict(getattr(params, "screen_rules", None) or None)
+    try:
+        app_cfg = rt.config.get_app_config()
+    except Exception:  # noqa: BLE001 — config table might be missing on first install
+        app_cfg = None
+    profile = getattr(app_cfg, "app_profile", None) if app_cfg else None
+    payload: dict[str, object] = {
+        "profile": str(profile) if profile else None,
+        # Screen always runs main-board-only at the data layer (data.py:
+        # screen_anomalies filters non-main-board codes). Surface it so
+        # users can sanity-check.
+        "main_board_only": True,
+        "pct_chg_min": float(rules.pct_chg_min),
+        "pct_chg_max": float(rules.pct_chg_max),
+        "turnover_min": float(rules.turnover_min),
+        "turnover_max": float(rules.turnover_max),
+        "vol_ratio_5d_min": float(rules.vol_ratio_5d_min),
+    }
+    if mode == "analyze":
+        payload["lgb_enabled"] = bool(getattr(params, "lgb_enabled", True))
+    # Build a human-readable message for the legacy path. The dashboard
+    # mines payload keys, not message text, so the wording is free to
+    # change without breaking the UI.
+    parts: list[str] = []
+    if payload.get("profile"):
+        parts.append(f"profile={payload['profile']}")
+    parts.append(
+        f"涨幅 {rules.pct_chg_min}~{rules.pct_chg_max}%"
+    )
+    parts.append(
+        f"换手 {rules.turnover_min}~{rules.turnover_max}%"
+    )
+    parts.append(f"量比 ≥ {rules.vol_ratio_5d_min}")
+    if mode == "analyze":
+        parts.append(
+            f"LGB {'on' if payload['lgb_enabled'] else 'off'}"
+        )
+    message = "运行配置: " + " | ".join(parts)
+    return rt.emit(EventType.LOG, message, payload=payload)
 
 
 def _persist_lgb_predictions(rt: VaRuntime, bundle: AnalyzeBundle) -> None:

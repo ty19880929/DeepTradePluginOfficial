@@ -72,13 +72,11 @@ class TestChooseRenderer:
         r = choose_renderer(no_dashboard=True)
         assert isinstance(r, LegacyStreamRenderer)
 
-    def test_pr1_default_returns_legacy_even_in_tty(
+    def test_tty_no_fallbacks_returns_dashboard(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """PR-1 has no RichDashboardRenderer branch yet; even on a fake TTY
-        with no env-var fallbacks, choose_renderer stays on legacy. PR-2
-        replaces the assertion with ``isinstance(r, RichDashboardRenderer)``.
-        """
+        """PR-2: a fake TTY with no env-var fallbacks → dashboard branch."""
+        from volume_anomaly.ui.dashboard import RichDashboardRenderer
 
         class _FakeTtyStdout:
             def isatty(self) -> bool:
@@ -95,7 +93,10 @@ class TestChooseRenderer:
         monkeypatch.delenv("DEEPTRADE_NO_DASHBOARD", raising=False)
         monkeypatch.delenv("TERM", raising=False)
         r = choose_renderer(no_dashboard=False)
-        assert isinstance(r, LegacyStreamRenderer)
+        try:
+            assert isinstance(r, RichDashboardRenderer)
+        finally:
+            r.close()
 
     def test_non_tty_returns_legacy(
         self, monkeypatch: pytest.MonkeyPatch

@@ -78,6 +78,14 @@ def cmd_screen(
     trade_date: Optional[str] = typer.Option(None, "--trade-date", help="YYYYMMDD"),
     allow_intraday: bool = typer.Option(False, "--allow-intraday"),
     force_sync: bool = typer.Option(False, "--force-sync"),
+    no_dashboard: bool = typer.Option(
+        False,
+        "--no-dashboard",
+        help=(
+            "禁用动态仪表盘，使用与 v0.7.x 兼容的流式日志输出。"
+            "也可通过环境变量 DEEPTRADE_NO_DASHBOARD=1 全局禁用。"
+        ),
+    ),
 ) -> None:
     """Apply local screening rules → upsert va_watchlist (no LLM)."""
     db, rt = _open_runtime()
@@ -85,7 +93,7 @@ def cmd_screen(
         params = ScreenParams(
             trade_date=trade_date, allow_intraday=allow_intraday, force_sync=force_sync
         )
-        renderer = choose_renderer(no_dashboard=False)
+        renderer = choose_renderer(no_dashboard=no_dashboard)
         outcome = VaRunner(rt, renderer=renderer).execute_screen(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.error:
@@ -110,6 +118,14 @@ def cmd_analyze(
             "LLM 走势分析仍能跑通。等价于 VaLgbConfig.lgb_enabled=false 的一次性覆盖。"
         ),
     ),
+    no_dashboard: bool = typer.Option(
+        False,
+        "--no-dashboard",
+        help=(
+            "禁用动态仪表盘，使用与 v0.7.x 兼容的流式日志输出。"
+            "也可通过环境变量 DEEPTRADE_NO_DASHBOARD=1 全局禁用。"
+        ),
+    ),
 ) -> None:
     """LLM-driven trend analysis on the current watchlist."""
     db, rt = _open_runtime()
@@ -120,7 +136,7 @@ def cmd_analyze(
             force_sync=force_sync,
             lgb_enabled=not no_lgb,
         )
-        renderer = choose_renderer(no_dashboard=False)
+        renderer = choose_renderer(no_dashboard=no_dashboard)
         outcome = VaRunner(rt, renderer=renderer).execute_analyze(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.error:
