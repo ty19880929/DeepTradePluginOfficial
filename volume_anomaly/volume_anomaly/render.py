@@ -255,14 +255,14 @@ def write_analyze_report(
 
     md.append(f"\n## 即将启动 · imminent_launch ({len(by_pred['imminent_launch'])} 只)\n")
     if by_pred["imminent_launch"]:
-        md.append("| # | Code | Name | 已追踪 | Score | LGB | W/P/C/S/H/R | Pattern | 洗盘 | Conf | Rationale |\n")
-        md.append("|---|------|------|-------|-------|-----|-------------|---------|------|------|-----------|\n")
+        md.append("| # | Code | Name | 已追踪 | Score | LGB | W/P/C/S/H/R | 形态 | 洗盘 | Conf | 理由 |\n")
+        md.append("|---|------|------|-------|-------|-----|-------------|------|------|------|------|\n")
         for c in by_pred["imminent_launch"]:
             td = tracked_days_lookup.get(c.candidate_id, 0)
             md.append(
                 f"| {c.rank} | `{c.ts_code}` | {c.name} | {td}日 | "
                 f"{c.launch_score:.1f} | {_fmt_lgb(lgb_score_lookup.get(c.candidate_id))} | "
-                f"{_dim_compact(c)} | {c.pattern} | {c.washout_quality} | "
+                f"{_dim_compact(c)} | {_pattern_cn(c.pattern)} | {_washout_cn(c.washout_quality)} | "
                 f"{c.confidence} | {c.rationale} |\n"
             )
     else:
@@ -270,15 +270,15 @@ def write_analyze_report(
 
     md.append(f"\n## 持续观察 · watching ({len(by_pred['watching'])} 只)\n")
     if by_pred["watching"]:
-        md.append("| # | Code | Name | 已追踪 | Score | LGB | W/P/C/S/H/R | Pattern | 洗盘 | Conf |\n")
-        md.append("|---|------|------|-------|-------|-----|-------------|---------|------|------|\n")
+        md.append("| # | Code | Name | 已追踪 | Score | LGB | W/P/C/S/H/R | 形态 | 洗盘 | Conf | 理由 |\n")
+        md.append("|---|------|------|-------|-------|-----|-------------|------|------|------|------|\n")
         for c in by_pred["watching"]:
             td = tracked_days_lookup.get(c.candidate_id, 0)
             md.append(
                 f"| {c.rank} | `{c.ts_code}` | {c.name} | {td}日 | "
                 f"{c.launch_score:.1f} | {_fmt_lgb(lgb_score_lookup.get(c.candidate_id))} | "
-                f"{_dim_compact(c)} | {c.pattern} | {c.washout_quality} | "
-                f"{c.confidence} |\n"
+                f"{_dim_compact(c)} | {_pattern_cn(c.pattern)} | {_washout_cn(c.washout_quality)} | "
+                f"{c.confidence} | {c.rationale} |\n"
             )
     else:
         md.append("_(本轮无持续观察标的)_\n")
@@ -607,8 +607,8 @@ def _render_analyze_terminal(root: Path, console: Any, Table: Any, _Panel: Any) 
                 f"{p.get('tracked_days', 0)}日",
                 f"{p.get('launch_score', 0):.0f}",
                 _fmt_lgb(p.get("lgb_score")),
-                p.get("pattern", "?"),
-                p.get("washout_quality", "?"),
+                _pattern_cn(p.get("pattern")),
+                _washout_cn(p.get("washout_quality")),
                 _conf_short(p.get("confidence", "")),
                 p.get("rationale", ""),
             )
@@ -624,6 +624,7 @@ def _render_analyze_terminal(root: Path, console: Any, Table: Any, _Panel: Any) 
             title_style="subtitle",
             border_style="panel.border.primary",
             header_style="k.label",
+            expand=True,
         )
         t.add_column("#", justify="right", width=3)
         t.add_column("代码", style="k.value", no_wrap=True, width=11)
@@ -634,6 +635,7 @@ def _render_analyze_terminal(root: Path, console: Any, Table: Any, _Panel: Any) 
         t.add_column("形态", width=10)
         t.add_column("洗盘", width=8)
         t.add_column("信", width=4)
+        t.add_column("理由", overflow="fold")
         for p in watching:
             t.add_row(
                 str(p.get("rank", "?")),
@@ -642,9 +644,10 @@ def _render_analyze_terminal(root: Path, console: Any, Table: Any, _Panel: Any) 
                 f"{p.get('tracked_days', 0)}日",
                 f"{p.get('launch_score', 0):.0f}",
                 _fmt_lgb(p.get("lgb_score")),
-                p.get("pattern", "?"),
-                p.get("washout_quality", "?"),
+                _pattern_cn(p.get("pattern")),
+                _washout_cn(p.get("washout_quality")),
                 _conf_short(p.get("confidence", "")),
+                p.get("rationale", ""),
             )
         console.print(t)
 
@@ -885,6 +888,30 @@ def _dim_compact(c: VATrendCandidate) -> str:
     sector / historical / risk). v0.6.0 P1-2."""
     d = c.dimension_scores
     return f"{d.washout}/{d.pattern}/{d.capital}/{d.sector}/{d.historical}/{d.risk}"
+
+
+_PATTERN_CN = {
+    "breakout": "突破平台",
+    "consolidation_break": "整理启动",
+    "first_wave": "一浪初动",
+    "second_leg": "二浪起涨",
+    "unclear": "不清晰",
+}
+
+_WASHOUT_CN = {
+    "sufficient": "充分",
+    "partial": "部分",
+    "insufficient": "不足",
+    "unclear": "不清晰",
+}
+
+
+def _pattern_cn(p: str | None) -> str:
+    return _PATTERN_CN.get(p or "", p or "?")
+
+
+def _washout_cn(w: str | None) -> str:
+    return _WASHOUT_CN.get(w or "", w or "?")
 
 
 def _fmt_lgb(score: float | None) -> str:
