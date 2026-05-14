@@ -75,7 +75,7 @@ The framework expects three things on the entrypoint class (`plugin.py`):
 ### CLI surface (current subcommands)
 
 - `limit-up-board`: `run`, `sync`, `history`, `report`, `settings show`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `run --no-lgb` is a one-shot opt-out. `run --no-dashboard` (v0.6+) disables the rich animated dashboard and falls back to the v0.5.x-compatible line-per-event stream.
-- `volume-anomaly`: `screen`, `analyze`, `prune`, `evaluate`, `stats`, `history`, `report`, `settings show|reset`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `analyze --no-lgb` is a one-shot opt-out; `stats --by lgb_score_bin` aggregates `va_lgb_predictions` ⋈ `va_realized_returns`.
+- `volume-anomaly`: `screen`, `analyze`, `prune`, `evaluate`, `stats`, `history`, `report`, `settings show|reset`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `analyze --no-lgb` is a one-shot opt-out; `stats --by lgb_score_bin` aggregates `va_lgb_predictions` ⋈ `va_realized_returns`. `screen / analyze --no-dashboard` (v0.8+) disables the rich animated dashboard and falls back to the v0.7.x-compatible line-per-event stream; `prune` / `evaluate` always run in legacy mode (no dashboard ever).
 
 These are exposed to users as `deeptrade <plugin-id> <subcommand>` once the framework dispatches into `cli.main(argv)`.
 
@@ -98,6 +98,15 @@ The `lgb` group manages the LightGBM 连板概率 booster lifecycle (offline tra
 - **`LegacyStreamRenderer`** — one stdout line per event (`  {glyph} [{event_type}] {message}`), byte-identical to v0.5.x.
 
 Fallback to legacy whenever any of: caller passed `--no-dashboard`; `sys.stdout` not a TTY (pipes, redirects, pytest capture); `CI` truthy; `DEEPTRADE_NO_DASHBOARD` truthy; `TERM=dumb`. `NO_COLOR=1` keeps the dashboard but disables Console colour. UI failures never crash a run — `LubRunner._dispatch_to_renderer` catches and degrades to legacy mid-stream (Plan §3.6.1). Pipeline / data / lgb / report subsystems are renderer-unaware: the dashboard only consumes `StrategyEvent` instances, never mutates them, never writes to DB. See `docs/limit-up-board/CLI_UI_Redesign_Plan.md` for the full design.
+
+#### `volume-anomaly screen / analyze` dashboard (v0.8+)
+
+Same `EventRenderer` protocol shape as LUB v0.6 (`volume_anomaly/ui/protocol.py`), but tailored to VA's four-mode CLI:
+
+- **`RichDashboardRenderer`** — rich `Live` region with header / config / stages / (screen funnel card) / log panels (Plan §4.1, §4.2). `mode="analyze"` shows the StageStack only (Step 0/1/2/5, no R2/4.5 because VA has no global re-rank); `mode="screen"` adds a 5-row horizontal-bar **funnel card** between the StageStack and the log panel, fed from `DATA_SYNC_FINISHED.payload` (`n_main_board` → `n_after_st_susp` → `n_after_t_day_rules` → `n_after_turnover` → `n_after_vol_rules`).
+- **`LegacyStreamRenderer`** — one stdout line per event (`  {glyph} [{event_type}] {message}`), byte-identical to v0.7.x apart from the PR-1 message tweak adding `Step 2: ` prefix to the `走势分析` STEP_STARTED/FINISHED events. `prune` / `evaluate` are **forced legacy** (`cli.py` injects `LegacyStreamRenderer()` directly, no `--no-dashboard` flag exposed) — those modes never get the dashboard regardless of TTY.
+
+Fallback to legacy whenever any of: caller passed `--no-dashboard`; `sys.stdout` not a TTY (pipes, redirects, pytest capture); `CI` truthy; `DEEPTRADE_NO_DASHBOARD` truthy; `TERM=dumb`. `NO_COLOR=1` keeps the dashboard but disables Console colour. UI failures never crash a run — `VaRunner._dispatch_to_renderer` catches and degrades to legacy mid-stream. The runner emits a one-shot `_va_settings_log_event` (LOG with `ScreenRules` / profile / lgb in payload) **only when the active renderer isn't legacy**, so dashboard runs get a populated config panel while `--no-dashboard` / CI runs keep their stdout + `va_events` row count identical to v0.7.x. See `docs/volume-anomaly/CLI_UI_Redesign_QA.md` for the QA matrix and snapshot scope.
 
 #### `volume-anomaly lgb` (v0.7+)
 
