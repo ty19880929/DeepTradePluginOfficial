@@ -192,7 +192,7 @@ def run_analyze(
     yield (
         StrategyEvent(
             type=EventType.STEP_STARTED,
-            message="走势分析（主升浪启动预测）",
+            message="Step 2: 走势分析（主升浪启动预测）",
             payload={"n_candidates": len(candidates), "n_batches": plan.n_batches},
         ),
         None,
@@ -203,7 +203,7 @@ def run_analyze(
         yield (
             StrategyEvent(
                 type=EventType.STEP_FINISHED,
-                message="走势分析（主升浪启动预测）",
+                message="Step 2: 走势分析（主升浪启动预测）",
                 payload={"predictions": 0},
             ),
             result,
@@ -316,7 +316,7 @@ def run_analyze(
     yield (
         StrategyEvent(
             type=EventType.STEP_FINISHED,
-            message="走势分析（主升浪启动预测）",
+            message="Step 2: 走势分析（主升浪启动预测）",
             payload={
                 "success_batches": result.success_batches,
                 "failed_batches": result.failed_batches,

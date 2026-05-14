@@ -41,6 +41,8 @@ from .runner import (
     render_finished_run,
 )
 from .runtime import VaRuntime
+from .ui import choose_renderer
+from .ui.legacy import LegacyStreamRenderer
 
 app = typer.Typer(
     name="volume-anomaly",
@@ -83,7 +85,8 @@ def cmd_screen(
         params = ScreenParams(
             trade_date=trade_date, allow_intraday=allow_intraday, force_sync=force_sync
         )
-        outcome = VaRunner(rt).execute_screen(params)
+        renderer = choose_renderer(no_dashboard=False)
+        outcome = VaRunner(rt, renderer=renderer).execute_screen(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
@@ -117,7 +120,8 @@ def cmd_analyze(
             force_sync=force_sync,
             lgb_enabled=not no_lgb,
         )
-        outcome = VaRunner(rt).execute_analyze(params)
+        renderer = choose_renderer(no_dashboard=False)
+        outcome = VaRunner(rt, renderer=renderer).execute_analyze(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
@@ -140,7 +144,9 @@ def cmd_prune(
     db, rt = _open_runtime()
     try:
         params = PruneParams(trade_date=trade_date, allow_intraday=allow_intraday, days=days)
-        outcome = VaRunner(rt).execute_prune(params)
+        # Plan §3.4.2 / §7 P-7 — prune is intentionally a legacy-only path;
+        # no --no-dashboard flag is exposed and choose_renderer() is bypassed.
+        outcome = VaRunner(rt, renderer=LegacyStreamRenderer()).execute_prune(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
@@ -179,7 +185,9 @@ def cmd_evaluate(
             force_recompute=force_recompute,
             force_sync=force_sync,
         )
-        outcome = VaRunner(rt).execute_evaluate(params)
+        # Plan §3.4.2 / §7 P-7 — evaluate is intentionally a legacy-only path;
+        # no --no-dashboard flag is exposed and choose_renderer() is bypassed.
+        outcome = VaRunner(rt, renderer=LegacyStreamRenderer()).execute_evaluate(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.error:
             typer.echo(f"error: {outcome.error}")

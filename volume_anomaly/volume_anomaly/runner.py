@@ -52,6 +52,8 @@ from .render import (
 )
 from .runtime import VaRuntime, build_tushare_client, pick_llm_provider
 from .schemas import VATrendCandidate
+from .ui.legacy import LegacyStreamRenderer
+from .ui.protocol import EventRenderer, NullRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +107,18 @@ class RunOutcome:
 
 
 class VaRunner:
-    def __init__(self, rt: VaRuntime) -> None:
+    def __init__(
+        self, rt: VaRuntime, *, renderer: EventRenderer | None = None
+    ) -> None:
         self._rt = rt
         self._pending: list[StrategyEvent] = []
+        # UI: stays NullRenderer when callers don't inject one (defensive —
+        # cli.py always passes a renderer via choose_renderer or
+        # LegacyStreamRenderer()). The runner is responsible for the
+        # EventRenderer lifecycle (on_run_start / on_event / on_run_finish /
+        # close); see _dispatch_to_renderer for the contract-isolation
+        # wrapper (Plan §3.6.1).
+        self._renderer: EventRenderer = renderer or NullRenderer()
 
     # ----- entry points --------------------------------------------------
 
@@ -140,30 +151,49 @@ class VaRunner:
         terminal_status = RunStatus.SUCCESS
         terminal_error: str | None = None
 
-        try:
-            seq = 0
-            for ev in iterator:
-                seq += 1
-                self._persist_event(run_id, seq, ev)
-                events.append(ev)
-                self._render_event(ev)
-                if ev.type == EventType.VALIDATION_FAILED:
-                    seen_validation_failed = True
-        except KeyboardInterrupt:
-            terminal_status = RunStatus.CANCELLED
-            terminal_error = "KeyboardInterrupt"
-        except Exception as e:  # noqa: BLE001
-            terminal_status = RunStatus.FAILED
-            terminal_error = f"{type(e).__name__}: {e}"
-            logger.exception("volume-anomaly %s run %s raised", mode, run_id)
-
-        if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
-            terminal_status = RunStatus.PARTIAL_FAILED
-
-        self._record_run_finish(run_id, terminal_status, terminal_error, events)
-        return RunOutcome(
-            run_id=run_id, status=terminal_status, error=terminal_error, seen_events=events
+        # v0.8 — renderer lifecycle. on_run_start is called once before any
+        # event; the finally block guarantees on_run_finish + close even on
+        # KeyboardInterrupt or unhandled exception (Plan §3.1, §3.6). The
+        # outcome dataclass is built upfront and mutated as we learn the
+        # terminal status, so the finally branch always has a real outcome
+        # to hand to on_run_finish (no synthetic ``None`` placeholder needed).
+        self._renderer.on_run_start(run_id=run_id, mode=mode, params=params)
+        outcome = RunOutcome(
+            run_id=run_id,
+            status=RunStatus.RUNNING,
+            error=None,
+            seen_events=events,
         )
+        try:
+            try:
+                seq = 0
+                for ev in iterator:
+                    seq += 1
+                    self._persist_event(run_id, seq, ev)
+                    events.append(ev)
+                    self._dispatch_to_renderer(ev)
+                    if ev.type == EventType.VALIDATION_FAILED:
+                        seen_validation_failed = True
+            except KeyboardInterrupt:
+                terminal_status = RunStatus.CANCELLED
+                terminal_error = "KeyboardInterrupt"
+            except Exception as e:  # noqa: BLE001
+                terminal_status = RunStatus.FAILED
+                terminal_error = f"{type(e).__name__}: {e}"
+                logger.exception("volume-anomaly %s run %s raised", mode, run_id)
+
+            if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
+                terminal_status = RunStatus.PARTIAL_FAILED
+
+            outcome.status = terminal_status
+            outcome.error = terminal_error
+            self._record_run_finish(run_id, terminal_status, terminal_error, events)
+        finally:
+            try:
+                self._renderer.on_run_finish(outcome)
+            finally:
+                self._renderer.close()
+        return outcome
 
     # ----- screen --------------------------------------------------------
 
@@ -696,9 +726,34 @@ class VaRunner:
         while self._pending:
             yield self._pending.pop(0)
 
-    def _render_event(self, ev: StrategyEvent) -> None:
-        glyph = "✔" if ev.level == EventLevel.INFO else ("⚠" if ev.level == EventLevel.WARN else "✘")
-        print(f"  {glyph} [{ev.type.value}] {ev.message}", flush=True)
+    def _dispatch_to_renderer(self, ev: StrategyEvent) -> None:
+        """Hand ``ev`` to the active renderer, with contract isolation.
+
+        Plan §3.6.1 — *UI failure ≠ run failure*: the renderer is contractually
+        forbidden from raising out of ``on_event``, but we install a safety
+        net here anyway. If a renderer does raise, we log a WARN, close it,
+        and **swap to** :class:`LegacyStreamRenderer` for the rest of the
+        run. The crashing event is re-emitted by legacy so the user sees it;
+        already-emitted events are not replayed (matches the design's
+        "don't backfill" rule — backfilling would risk further crashes).
+        """
+        try:
+            self._renderer.on_event(ev)
+        except Exception as e:  # noqa: BLE001 — renderer must never crash a run
+            logger.warning(
+                "renderer.on_event raised; degrading to legacy: %s", e
+            )
+            try:
+                self._renderer.close()
+            except Exception:  # noqa: BLE001 — close() is best-effort
+                pass
+            self._renderer = LegacyStreamRenderer()
+            try:
+                self._renderer.on_event(ev)
+            except Exception:  # noqa: BLE001 — legacy print failed → give up silently
+                logger.warning(
+                    "legacy renderer also raised after fallback; suppressing"
+                )
 
     # ----- DB helpers ----------------------------------------------------
 
