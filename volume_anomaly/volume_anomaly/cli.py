@@ -822,6 +822,67 @@ def cmd_lgb_purge(
         db.close()
 
 
+def _emit_under_threshold_diagnostics(
+    db: Database,
+    *,
+    start: str,
+    end: str,
+    label_source: str,
+    n_labeled: int,
+    min_samples: int,
+) -> None:
+    """Print branch-specific guidance when `lgb train` falls under the sample
+    threshold. Three states are distinguished so the user gets one unambiguous
+    next step instead of guessing between `evaluate` (strategy backfill) and
+    `lgb evaluate` (model AUC report)."""
+    n_anomaly_dates = db.fetchone(
+        "SELECT COUNT(DISTINCT trade_date) FROM va_anomaly_history "
+        "WHERE trade_date BETWEEN ? AND ?",
+        (start, end),
+    )[0]
+    rr_row = db.fetchone(
+        f"SELECT COUNT(*), "  # noqa: S608  -- label_source whitelisted upstream
+        f"  SUM(CASE WHEN data_status IN ('complete','partial') "
+        f"           AND {label_source} IS NOT NULL THEN 1 ELSE 0 END) "
+        f"FROM va_realized_returns WHERE anomaly_date BETWEEN ? AND ?",
+        (start, end),
+    )
+    n_rr_total = int(rr_row[0] or 0)
+    n_rr_usable = int(rr_row[1] or 0)
+
+    typer.echo(
+        f"✘ labeled samples = {n_labeled} < "
+        f"lgb_train_min_samples={min_samples}"
+    )
+    typer.echo(
+        f"  诊断: anomaly_dates={n_anomaly_dates}, "
+        f"realized_rows={n_rr_total} (其中可用={n_rr_usable})"
+    )
+    if n_anomaly_dates == 0:
+        typer.echo(
+            "  → 窗口内 va_anomaly_history 无异动记录。先用 "
+            "`deeptrade volume-anomaly screen` / `analyze` 累积样本。"
+        )
+    elif n_rr_usable == 0:
+        typer.echo(
+            "  → va_realized_returns 缺 T+N 实现收益。运行策略层回填："
+        )
+        typer.echo(
+            "     deeptrade volume-anomaly evaluate "
+            "--backfill-all --force-recompute"
+        )
+        typer.echo(
+            "    （注意：是 `volume-anomaly evaluate`，不是 `lgb evaluate`；"
+            "后者是模型 AUC 评估。）"
+        )
+    else:
+        typer.echo(
+            "  → 实现收益已部分回填但仍少于阈值；可能 T+N 数据未就绪 "
+            "或窗口太短，等几个交易日后再 `volume-anomaly evaluate` 一次，"
+            "或扩大 --start..--end 区间。"
+        )
+
+
 @lgb_app.command("train")
 def cmd_lgb_train(
     start: str = typer.Option(..., "--start", help="训练窗口起始日期 YYYYMMDD"),
@@ -920,10 +981,13 @@ def cmd_lgb_train(
         ds = ds.filter_labeled()
 
         if ds.n_samples < cfg.lgb_train_min_samples:
-            typer.echo(
-                f"✘ labeled samples = {ds.n_samples} < "
-                f"lgb_train_min_samples={cfg.lgb_train_min_samples}（窗口太短 "
-                f"或缺 T+N 数据；先运行 evaluate 回填）"
+            _emit_under_threshold_diagnostics(
+                db,
+                start=start,
+                end=end,
+                label_source=source,
+                n_labeled=ds.n_samples,
+                min_samples=cfg.lgb_train_min_samples,
             )
             raise typer.Exit(2)
         if ds.n_positive == 0 or ds.n_positive == ds.n_samples:
@@ -1124,7 +1188,12 @@ def cmd_lgb_evaluate(
             active = _safe_get_active(db)
             if active is None:
                 typer.echo(
-                    "✘ no active model — 用 --model-id 指定，或先运行 lgb train"
+                    "✘ no active model — 用 --model-id 指定，或先运行 `lgb train`。"
+                )
+                typer.echo(
+                    "  注意：本命令是「模型 AUC/Top-K 评估」；"
+                    "如果你想回填 T+N 实现收益（训练标签来源），"
+                    "请用 `deeptrade volume-anomaly evaluate`。"
                 )
                 raise typer.Exit(2)
             target_id = active.model_id
