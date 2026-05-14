@@ -832,9 +832,10 @@ def _emit_under_threshold_diagnostics(
     min_samples: int,
 ) -> None:
     """Print branch-specific guidance when `lgb train` falls under the sample
-    threshold. Three states are distinguished so the user gets one unambiguous
-    next step instead of guessing between `evaluate` (strategy backfill) and
-    `lgb evaluate` (model AUC report)."""
+    threshold. Four states are distinguished so the user never gets sent into
+    a self-defeating loop (the v0.8.2 message recommended `evaluate` even when
+    rows were already there but all 'pending' — re-running evaluate cannot
+    flip pending→complete unless real T+N trade days have elapsed)."""
     n_anomaly_dates = db.fetchone(
         "SELECT COUNT(DISTINCT trade_date) FROM va_anomaly_history "
         "WHERE trade_date BETWEEN ? AND ?",
@@ -842,13 +843,20 @@ def _emit_under_threshold_diagnostics(
     )[0]
     rr_row = db.fetchone(
         f"SELECT COUNT(*), "  # noqa: S608  -- label_source whitelisted upstream
+        f"  SUM(CASE WHEN data_status = 'pending' THEN 1 ELSE 0 END), "
         f"  SUM(CASE WHEN data_status IN ('complete','partial') "
-        f"           AND {label_source} IS NOT NULL THEN 1 ELSE 0 END) "
+        f"           AND {label_source} IS NOT NULL THEN 1 ELSE 0 END), "
+        f"  MAX(anomaly_date) "
         f"FROM va_realized_returns WHERE anomaly_date BETWEEN ? AND ?",
         (start, end),
     )
     n_rr_total = int(rr_row[0] or 0)
-    n_rr_usable = int(rr_row[1] or 0)
+    n_rr_pending = int(rr_row[1] or 0)
+    n_rr_usable = int(rr_row[2] or 0)
+    max_anomaly_date = rr_row[3]
+    # status='complete'/'partial' but label column is NULL → data gap
+    # (suspension/delisting) or wrong label_source for what evaluate filled.
+    n_rr_gap = max(n_rr_total - n_rr_pending - n_rr_usable, 0)
 
     typer.echo(
         f"✘ labeled samples = {n_labeled} < "
@@ -858,14 +866,17 @@ def _emit_under_threshold_diagnostics(
         f"  诊断: anomaly_dates={n_anomaly_dates}, "
         f"realized_rows={n_rr_total} (其中可用={n_rr_usable})"
     )
+
     if n_anomaly_dates == 0:
         typer.echo(
             "  → 窗口内 va_anomaly_history 无异动记录。先用 "
             "`deeptrade volume-anomaly screen` / `analyze` 累积样本。"
         )
-    elif n_rr_usable == 0:
+        return
+
+    if n_rr_total == 0:
         typer.echo(
-            "  → va_realized_returns 缺 T+N 实现收益。运行策略层回填："
+            "  → va_realized_returns 在窗口内无任何行。运行策略层回填："
         )
         typer.echo(
             "     deeptrade volume-anomaly evaluate "
@@ -875,12 +886,41 @@ def _emit_under_threshold_diagnostics(
             "    （注意：是 `volume-anomaly evaluate`，不是 `lgb evaluate`；"
             "后者是模型 AUC 评估。）"
         )
-    else:
+        return
+
+    if n_rr_pending > 0:
+        # B2 — T+N not yet elapsed; re-running evaluate cannot help. Avoid
+        # the loop the v0.8.2 message put users into.
+        max_str = str(max_anomaly_date) if max_anomaly_date else "<未知>"
         typer.echo(
-            "  → 实现收益已部分回填但仍少于阈值；可能 T+N 数据未就绪 "
-            "或窗口太短，等几个交易日后再 `volume-anomaly evaluate` 一次，"
-            "或扩大 --start..--end 区间。"
+            f"  → 有 {n_rr_pending}/{n_rr_total} 行 data_status='pending' "
+            f"(窗口内最近异动日={max_str}, T+10 需 ~14 自然日才能就绪)。"
+            "再跑 evaluate 不会让 pending 翻成 complete。"
         )
+        typer.echo(
+            f"    建议: (a) 当前窗口只有 {n_anomaly_dates} 个异动日, "
+            f"与 min_samples={min_samples} 差距大 —— 用 `screen` 累积更多"
+            "历史异动日 (扩 --start 向更早回溯, 在那些日期跑 screen);"
+        )
+        typer.echo(
+            "    (b) 等 T+10 全部就绪后再次 evaluate; "
+            "(c) 临时改用 `--label-source ret_t3` 缩短等待窗口 "
+            "(语义不同, 仅当你能接受)。"
+        )
+        return
+
+    if n_rr_usable == 0:
+        typer.echo(
+            f"  → 全部 {n_rr_gap} 行 status 已完成但 {label_source} 为 NULL。"
+            "可能数据缺口 (停牌/退市) 或 label_source 与 evaluate 落库的列不"
+            "匹配; 尝试 `--label-source max_ret_5d` (默认)。"
+        )
+        return
+
+    typer.echo(
+        "  → 实现收益已就绪但样本数仍少于阈值; 扩大 --start..--end 区间 "
+        "或运行更多 `screen` 累积异动日。"
+    )
 
 
 @lgb_app.command("train")
