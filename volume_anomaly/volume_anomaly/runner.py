@@ -99,6 +99,25 @@ class EvaluateParams:
 
 
 @dataclass
+class BackfillHistoryParams:
+    """v0.9.0 — replay the LLM-free screen rules over a historical date range
+    to populate ``va_anomaly_history`` without running LLM stages.
+
+    Used by new users to bootstrap the training corpus that ``lgb train``
+    depends on. Does NOT touch ``va_watchlist`` — backfilled samples are
+    training data, not live tracking targets.
+    """
+    start_date: str
+    end_date: str
+    force_sync: bool = False
+    # When False (default), skip trade_dates that already have any row in
+    # va_anomaly_history (acts as resume). When True, delete existing rows
+    # for the date and re-screen with current rules.
+    overwrite: bool = False
+    screen_rules: dict[str, Any] | None = None
+
+
+@dataclass
 class RunOutcome:
     run_id: str
     status: RunStatus
@@ -135,6 +154,15 @@ class VaRunner:
         # G10 — evaluate writes va_runs / va_events with mode='evaluate' so it
         # appears in `deeptrade volume-anomaly history` alongside other modes.
         return self._drive("evaluate", params, self._iter_evaluate(params))
+
+    def execute_backfill_history(
+        self, params: BackfillHistoryParams
+    ) -> RunOutcome:
+        # v0.9.0 — runs under mode='backfill_history' so the row is
+        # distinguishable in `va_runs` history from live `screen`.
+        return self._drive(
+            "backfill_history", params, self._iter_backfill_history(params)
+        )
 
     # ----- driver --------------------------------------------------------
 
@@ -707,6 +735,139 @@ class VaRunner:
                 "n_pending": n_pending,
                 "lookback_days": lookback,
                 "backfill_all": params.backfill_all,
+            },
+        )
+
+    # ----- backfill_history (v0.9.0) -------------------------------------
+
+    def _iter_backfill_history(
+        self, params: BackfillHistoryParams
+    ) -> Iterable[StrategyEvent]:
+        """LLM-free batch replay of the screen rules over [start, end].
+
+        For each open trade_date T in the calendar window, calls the same
+        :func:`screen_anomalies` used by live ``screen`` and appends the
+        hits to ``va_anomaly_history``. Skips trade_dates that already have
+        rows unless ``overwrite=True``. Does NOT touch ``va_watchlist`` —
+        backfill is a training-corpus bootstrap, not live tracking.
+        """
+        rt = self._rt
+        rt.tushare = build_tushare_client(
+            rt, intraday=False, event_cb=self._on_tushare_event
+        )
+
+        yield rt.emit(
+            EventType.STEP_STARTED,
+            f"Step 0: backfill window {params.start_date}..{params.end_date}",
+            payload={"start": params.start_date, "end": params.end_date},
+        )
+        cal_df = rt.tushare.call("trade_cal")
+        cal = TradeCalendar(cal_df)
+        open_dates = cal.open_dates_in_range(params.start_date, params.end_date)
+        yield rt.emit(
+            EventType.STEP_FINISHED,
+            f"Step 0: {len(open_dates)} open trade dates in window",
+            payload={"n_open_dates": len(open_dates)},
+        )
+
+        # Existing-date pre-check (acts as resume). On overwrite, we still
+        # screen every open date and let append_anomaly_history's
+        # DELETE-then-INSERT replace stale rows.
+        existing: set[str] = set()
+        if not params.overwrite and open_dates:
+            rows = rt.db.fetchall(
+                "SELECT DISTINCT trade_date FROM va_anomaly_history "
+                "WHERE trade_date BETWEEN ? AND ?",
+                (open_dates[0], open_dates[-1]),
+            )
+            existing = {str(r[0]) for r in rows}
+
+        rules = ScreenRules.from_dict(params.screen_rules)
+        n_done = 0
+        n_skipped = 0
+        n_failed = 0
+        n_total_hits = 0
+        for i, T in enumerate(open_dates, start=1):
+            if T in existing:
+                n_skipped += 1
+                yield rt.emit(
+                    EventType.LOG,
+                    f"[{i}/{len(open_dates)}] {T}: skipped (rows exist; "
+                    f"use --overwrite to re-screen)",
+                    payload={"trade_date": T, "skipped": True},
+                )
+                continue
+            try:
+                result: ScreenResult = screen_anomalies(
+                    tushare=rt.tushare,
+                    calendar=cal,
+                    trade_date=T,
+                    rules=rules,
+                    force_sync=params.force_sync,
+                )
+            except TushareUnauthorizedError:
+                # Auth failure is fatal — surface and stop the loop.
+                raise
+            except Exception as e:  # noqa: BLE001 — per-day failure isolated
+                n_failed += 1
+                logger.warning(
+                    "backfill_history: screen_anomalies failed on %s: %s", T, e
+                )
+                yield rt.emit(
+                    EventType.LOG,
+                    f"[{i}/{len(open_dates)}] {T}: failed ({type(e).__name__}: {e})",
+                    level=EventLevel.WARN,
+                    payload={"trade_date": T, "error": str(e)},
+                )
+                yield from self._drain_pending()
+                continue
+            if params.overwrite:
+                # Wholesale replace this date — drops stale rows from prior
+                # rule sets that aren't in the new hit list. append's
+                # per-(date,code) DELETE+INSERT alone would leave them behind.
+                rt.db.execute(
+                    "DELETE FROM va_anomaly_history WHERE trade_date=?", (T,)
+                )
+            append_anomaly_history(rt.db, result.hits)
+            n_done += 1
+            n_total_hits += len(result.hits)
+            yield rt.emit(
+                EventType.STEP_FINISHED,
+                f"[{i}/{len(open_dates)}] {T}: {len(result.hits)} hits "
+                f"(funnel {result.n_main_board}→{result.n_after_st_susp}→"
+                f"{result.n_after_t_day_rules}→{result.n_after_turnover}→"
+                f"{result.n_after_vol_rules})",
+                payload={
+                    "trade_date": T,
+                    "n_hits": len(result.hits),
+                    "n_main_board": result.n_main_board,
+                    "n_after_st_susp": result.n_after_st_susp,
+                    "n_after_t_day_rules": result.n_after_t_day_rules,
+                    "n_after_turnover": result.n_after_turnover,
+                    "n_after_vol_rules": result.n_after_vol_rules,
+                },
+            )
+            yield from self._drain_pending()
+
+        history_total = int(
+            rt.db.fetchone("SELECT COUNT(*) FROM va_anomaly_history")[0]
+        )
+        export_llm_calls(rt.run_id, rt.db)
+        yield rt.emit(
+            EventType.RESULT_PERSISTED,
+            f"backfill done — processed={n_done}, skipped={n_skipped}, "
+            f"failed={n_failed}, hits_added={n_total_hits}, "
+            f"history_total={history_total}",
+            payload={
+                "n_open_dates": len(open_dates),
+                "n_processed": n_done,
+                "n_skipped": n_skipped,
+                "n_failed": n_failed,
+                "n_hits_added": n_total_hits,
+                "history_total": history_total,
+                "start": params.start_date,
+                "end": params.end_date,
+                "overwrite": params.overwrite,
             },
         )
 

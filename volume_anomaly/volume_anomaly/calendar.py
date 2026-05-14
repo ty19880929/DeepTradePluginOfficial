@@ -50,3 +50,15 @@ class TradeCalendar:
         if opens.empty:
             raise ValueError(f"no future open trading day after {date}")
         return str(opens.iloc[0]["cal_date"])
+
+    def open_dates_in_range(self, start: str, end: str) -> list[str]:
+        """Return sorted YYYYMMDD trade dates with is_open==1 in [start, end].
+
+        Both endpoints inclusive. Non-open dates (weekends, holidays) and dates
+        outside the loaded calendar window are silently dropped.
+        """
+        if start > end:
+            return []
+        df = self._df
+        mask = (df["cal_date"] >= start) & (df["cal_date"] <= end) & (df["is_open"] == 1)
+        return [str(v) for v in df.loc[mask, "cal_date"].tolist()]

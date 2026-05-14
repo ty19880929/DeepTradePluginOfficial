@@ -34,6 +34,7 @@ from .lgb.config import VaLgbConfig, list_for_show, load_config, save_config
 from .runner import (
     DEFAULT_PRUNE_DAYS,
     AnalyzeParams,
+    BackfillHistoryParams,
     EvaluateParams,
     PruneParams,
     ScreenParams,
@@ -78,6 +79,30 @@ def cmd_screen(
     trade_date: Optional[str] = typer.Option(None, "--trade-date", help="YYYYMMDD"),
     allow_intraday: bool = typer.Option(False, "--allow-intraday"),
     force_sync: bool = typer.Option(False, "--force-sync"),
+    backfill_history: bool = typer.Option(
+        False,
+        "--backfill-history",
+        help=(
+            "v0.9.0 — 批量重放 screen 规则到历史区间，"
+            "纯填充 va_anomaly_history，不进 LLM、不动 va_watchlist。"
+            "为新用户 bootstrap LightGBM 训练样本。需要 --start / --end。"
+        ),
+    ),
+    start: Optional[str] = typer.Option(
+        None, "--start",
+        help="--backfill-history 模式下起始 trade_date (YYYYMMDD, 含)",
+    ),
+    end: Optional[str] = typer.Option(
+        None, "--end",
+        help="--backfill-history 模式下结束 trade_date (YYYYMMDD, 含)",
+    ),
+    overwrite: bool = typer.Option(
+        False, "--overwrite",
+        help=(
+            "--backfill-history 模式下,对已存在 va_anomaly_history 行的日期"
+            "也重新筛选 (DELETE 后 INSERT)。默认跳过已有日期 (作为 resume)。"
+        ),
+    ),
     no_dashboard: bool = typer.Option(
         False,
         "--no-dashboard",
@@ -87,7 +112,61 @@ def cmd_screen(
         ),
     ),
 ) -> None:
-    """Apply local screening rules → upsert va_watchlist (no LLM)."""
+    """Apply local screening rules → upsert va_watchlist (no LLM).
+
+    With ``--backfill-history --start --end`` switches to LLM-free batch
+    replay mode: iterates every open trade_date in [start, end] and writes
+    hits to ``va_anomaly_history`` only (does NOT touch ``va_watchlist``).
+    """
+    if backfill_history:
+        if not start or not end:
+            typer.echo("✘ --backfill-history requires both --start and --end")
+            raise typer.Exit(2)
+        if len(start) != 8 or len(end) != 8 or not start.isdigit() or not end.isdigit():
+            typer.echo("✘ --start / --end must be YYYYMMDD")
+            raise typer.Exit(2)
+        if start > end:
+            typer.echo(f"✘ --start ({start}) > --end ({end})")
+            raise typer.Exit(2)
+        if trade_date is not None:
+            typer.echo("✘ --trade-date is incompatible with --backfill-history")
+            raise typer.Exit(2)
+        if allow_intraday:
+            typer.echo("✘ --allow-intraday is incompatible with --backfill-history")
+            raise typer.Exit(2)
+        db, rt = _open_runtime()
+        try:
+            bh_params = BackfillHistoryParams(
+                start_date=start,
+                end_date=end,
+                force_sync=force_sync,
+                overwrite=overwrite,
+            )
+            # backfill_history is intentionally forced-legacy (mirrors prune /
+            # evaluate): the dashboard's StageStack model is single-day; a
+            # multi-day loop would render misleading progress.
+            outcome = VaRunner(
+                rt, renderer=LegacyStreamRenderer()
+            ).execute_backfill_history(bh_params)
+            typer.echo(
+                f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}"
+            )
+            if outcome.error:
+                typer.echo(f"error: {outcome.error}")
+            if outcome.status.value != "success":
+                raise typer.Exit(1)
+        finally:
+            db.close()
+        return
+
+    # Live screen path (--start / --end / --overwrite forbidden here).
+    if start is not None or end is not None:
+        typer.echo("✘ --start / --end only valid with --backfill-history")
+        raise typer.Exit(2)
+    if overwrite:
+        typer.echo("✘ --overwrite only valid with --backfill-history")
+        raise typer.Exit(2)
+
     db, rt = _open_runtime()
     try:
         params = ScreenParams(
