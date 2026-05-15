@@ -395,6 +395,26 @@ class TestEnumerateTradeDates:
         assert _enumerate_trade_dates(calendar, "20260530", "20260520") == []
 
 
+class TestTradeCalendarRange:
+    """Direct coverage for the new TradeCalendar.range() public API (P3-1)."""
+
+    def test_inclusive_endpoints(self, calendar: TradeCalendar) -> None:
+        days = calendar.range("20260520", "20260526")
+        assert days == _TRADE_DATES
+        # First/last open day in the window must be present (闭区间)
+        assert days[0] == _TRADE_DATES[0]
+        assert days[-1] == _TRADE_DATES[-1]
+
+    def test_excludes_closed_days(self, calendar: TradeCalendar) -> None:
+        # 20260523 (周六) / 20260524 (周日) 在 _ALL_DATES_INCL_T1 标 is_open=0；不应出现
+        days = calendar.range("20260520", "20260526")
+        assert "20260523" not in days
+        assert "20260524" not in days
+
+    def test_inverted_window_returns_empty(self, calendar: TradeCalendar) -> None:
+        assert calendar.range("20260530", "20260520") == []
+
+
 class TestCollectTrainingWindow:
     @pytest.fixture(scope="class")
     def dataset(

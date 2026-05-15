@@ -120,13 +120,16 @@ def _apply_market_filter(
     max_close_yuan: float,
     min_float_mv_yi: float = 0.0,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """v0.4 — keep only rows whose ``min_float_mv_yi`` < 流通市值 < ``max_float_mv_yi``
-    (亿) AND close < ``max_close_yuan`` (元). Null in either field → dropped
-    (conservative; we cannot validate "small cap / low price" claims without the
-    data).
+    """v0.6.4 (P2-1) — 闭区间筛选：
+    ``min_float_mv_yi <= 流通市值(亿) <= max_float_mv_yi`` AND ``close <= max_close_yuan``。
 
-    Returns ``(filtered_df, summary)`` where summary is the candidate_filter_summary
-    payload that gets stored in ``bundle.market_summary``.
+    边界从开 (``> < <``) 改为闭 (``>= <= <=``) —— 用户在 settings 里写
+    ``max=100`` 时，100 亿的标的现在会通过；同理 ``max_close_yuan=15`` 时 15 元的
+    标的也会通过。Null 仍然被剔除（保守，无法验证"小市值/低价"声明）。
+
+    Returns ``(filtered_df, summary)``。除常规 before/after，还在
+    ``summary["dropped_top3"]`` 写入"被剔除的 TOP 3 ts_code + 剔除原因"，
+    便于 render 报告时直接展示。
     """
     n_before = int(len(candidates_df))
     summary: dict[str, Any] = {
@@ -135,6 +138,7 @@ def _apply_market_filter(
         "min_float_mv_yi": min_float_mv_yi,
         "max_float_mv_yi": max_float_mv_yi,
         "max_close_yuan": max_close_yuan,
+        "dropped_top3": [],
     }
     if n_before == 0:
         return candidates_df, summary
@@ -143,12 +147,47 @@ def _apply_market_filter(
     mask = (
         fm_yi.notna()
         & cl.notna()
-        & (fm_yi > min_float_mv_yi)
-        & (fm_yi < max_float_mv_yi)
-        & (cl < max_close_yuan)
+        & (fm_yi >= min_float_mv_yi)
+        & (fm_yi <= max_float_mv_yi)
+        & (cl <= max_close_yuan)
     )
     filtered = candidates_df[mask].reset_index(drop=True)
     summary["after"] = int(len(filtered))
+
+    # P2-1: 把剔除的 TOP 3（按 float_mv 降序）连同原因写进 summary，
+    # 让 render 报告能展示"为何排除"。空 / 全保留场景下保持空 list。
+    dropped_df = candidates_df[~mask]
+    if not dropped_df.empty:
+        dropped_fm = fm_yi.where(~mask)
+        # 排序键：先按 float_mv_yi 降序；NaN 排到最后保证有数值的优先。
+        ordered_idx = dropped_fm.sort_values(ascending=False, na_position="last").index
+        top3: list[dict[str, Any]] = []
+        for idx in ordered_idx[:3]:
+            row = candidates_df.loc[idx]
+            mv_val = float(fm_yi.loc[idx]) if pd.notna(fm_yi.loc[idx]) else None
+            close_val = float(cl.loc[idx]) if pd.notna(cl.loc[idx]) else None
+            reasons: list[str] = []
+            if mv_val is None:
+                reasons.append("float_mv_null")
+            else:
+                if mv_val < min_float_mv_yi:
+                    reasons.append(f"float_mv<{min_float_mv_yi}")
+                if mv_val > max_float_mv_yi:
+                    reasons.append(f"float_mv>{max_float_mv_yi}")
+            if close_val is None:
+                reasons.append("close_null")
+            elif close_val > max_close_yuan:
+                reasons.append(f"close>{max_close_yuan}")
+            top3.append(
+                {
+                    "ts_code": str(row.get("ts_code", "")),
+                    "name": row.get("name"),
+                    "float_mv_yi": round(mv_val, 2) if mv_val is not None else None,
+                    "close_yuan": round(close_val, 2) if close_val is not None else None,
+                    "reasons": reasons or ["unknown"],
+                }
+            )
+        summary["dropped_top3"] = top3
     return filtered, summary
 
 
@@ -381,6 +420,7 @@ def collect_round1(
     min_float_mv_yi: float = 0.0,
     force_sync: bool = False,
     lgb_scorer: LgbScorer | None = None,
+    intraday: bool = False,
 ) -> Round1Bundle:
     """Assemble the R1 input bundle.
 
@@ -402,6 +442,16 @@ def collect_round1(
     """
     bundle = Round1Bundle(trade_date=trade_date, next_trade_date=next_trade_date)
     data_unavailable: list[str] = []
+
+    # P0-3 — intraday 路径下，许多日终聚合字段在 close 之前要么未结算（amount /
+    # turnover_rate / moneyflow），要么 Tushare 返回为空（top_list / cyq_perf /
+    # limit_step）。把这条作为一个统一 marker 写入 data_unavailable，让 LLM /
+    # render 都能识别"哪些字段在当前时点本来就不可靠"。
+    if intraday:
+        data_unavailable.append(
+            "intraday_unstable: daily.amount, daily_basic.turnover_rate, "
+            "moneyflow.*, top_list, top_inst, cyq_perf, limit_step"
+        )
 
     # 1. main board pool
     stock_basic = tushare.call("stock_basic", force_sync=force_sync)
@@ -453,6 +503,19 @@ def collect_round1(
     # B2 — cyq_perf (chip distribution) — REQUIRED.
     # 单只 candidate 在返回中无记录 → 该 candidate.missing_data 写入 cyq 字段名（LLM 自动填）。
     cyq_perf_df = tushare.call("cyq_perf", trade_date=trade_date, force_sync=force_sync)
+
+    # P1-3: required API 全表为空 → 不一定意味着 API 不可用，但「全市场无龙虎榜个股」
+    # 或「全市场无 cyq 数据」都是值得在报告/事件流里提示用户的情景。把空响应写入
+    # data_unavailable，由 LLM 与下游 _build_lhb_rollup 共同识别成 api_empty 状态。
+    top_list_empty = top_list_df.empty
+    top_inst_empty = top_inst_df.empty
+    cyq_perf_empty = cyq_perf_df.empty
+    if top_list_empty:
+        data_unavailable.append("top_list_empty_response")
+    if top_inst_empty:
+        data_unavailable.append("top_inst_empty_response")
+    if cyq_perf_empty:
+        data_unavailable.append("cyq_perf_empty_response")
 
     # 3a. ST exclusion — REQUIRED. Unauthorized must propagate to the runner.
     # Per DESIGN §11.1 + B1.3 fix: stock_st is in metadata.required → cannot
@@ -566,6 +629,8 @@ def collect_round1(
         cyq_perf_df=cyq_perf_df,
         daily_lookback=daily_lookback,
         moneyflow_lookback=moneyflow_lookback,
+        # P1-3 — propagate "整体空" 信号到每个 candidate 的 lhb_data_quality 三态
+        lhb_api_empty=top_list_empty and top_inst_empty,
     )
     bundle.data_unavailable = data_unavailable
 
@@ -1104,6 +1169,8 @@ def _build_candidate_rows(
     cyq_perf_df: pd.DataFrame | None = None,
     daily_lookback: int = 30,
     moneyflow_lookback: int = 5,
+    lhb_api_empty: bool = False,
+    lhb_api_unavailable: bool = False,
 ) -> list[dict[str, Any]]:
     """Project candidates to a list of dicts with raw + normalized fields + history.
 
@@ -1201,6 +1268,15 @@ def _build_candidate_rows(
         rec["lhb_net_buy_yi"] = lhb.get("lhb_net_buy_yi")
         rec["lhb_inst_count"] = lhb.get("lhb_inst_count")
         rec["lhb_famous_seats"] = lhb.get("lhb_famous_seats") or []
+        # P1-3 — 三态显式标记数据质量，让 LLM 区分「未上榜（事实）」与「接口异常」
+        if lhb_api_unavailable:
+            rec["lhb_data_quality"] = "api_unavailable"
+        elif lhb_api_empty:
+            rec["lhb_data_quality"] = "api_empty"
+        elif lhb:
+            rec["lhb_data_quality"] = "listed"
+        else:
+            rec["lhb_data_quality"] = "not_listed"
         # B2 cyq_perf — null when no row for this ts_code (LLM puts cyq_* in
         # candidate.missing_data via the standard prompt rule)
         cyq = cyq_lookup.get(ts_code, {})

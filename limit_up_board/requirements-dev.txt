@@ -1,0 +1,18 @@
+# limit-up-board 本地开发与测试依赖
+#
+# 与 deeptrade_plugin.yaml::dependencies 对齐 —— 框架 install 时会
+# `uv pip install` 这些；本地直接 `pytest` 时需要先手动装齐。
+# 用法：
+#   pipx install deeptrade-quant
+#   pip install -r limit_up_board/requirements-dev.txt
+#   cd limit_up_board ; pytest -m "not slow"
+
+tushare>=1.4
+pandas>=2.2,<3
+pyarrow>=15
+numpy>=1.26,<3
+lightgbm>=4.3,<5
+scikit-learn>=1.4,<2
+
+# 测试运行时
+pytest>=8

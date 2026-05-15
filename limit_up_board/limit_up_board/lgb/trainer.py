@@ -70,6 +70,10 @@ class TrainResult:
     hyperparams: dict[str, Any] = field(default_factory=dict)
     best_iteration: int | None = None
     folds: int = 0
+    # P1-2: 最终全量 fit 实际跑的轮次。当 CV 内 early-stopping 给出 mean best_iter
+    # 时优先用它；否则回退到 ``num_boost_round`` 上限（1500）。值同样会写入
+    # ``hyperparams_json`` 便于 `lgb info` 输出。
+    final_num_boost_round: int = 0
 
     def top_features(self, n: int = 10) -> list[tuple[str, float]]:
         return self.feature_importance[:n]
@@ -214,8 +218,9 @@ def train_lightgbm(
     cv_auc_mean: float | None = None
     cv_auc_std: float | None = None
     cv_logloss_mean: float | None = None
+    mean_best_iter: int = 0
     if folds >= 2 and dataset.split_groups.nunique() >= folds:
-        aucs, loglosses, _ = _crossval_metrics(
+        aucs, loglosses, mean_best_iter = _crossval_metrics(
             lgb_mod,
             dataset,
             params=params,
@@ -237,6 +242,16 @@ def train_lightgbm(
         )
 
     # ---- Final fit on all labeled data ----
+    # P1-2: 优先使用 CV 各折 early-stopping 给出的 mean best_iter；CV 被跳过或
+    # 全部折数命中 num_boost_round 上限时回退到 num_boost_round。这样最终模型
+    # 不会盲目 fit 1500 轮（过拟合风险 + 训练时间浪费）。
+    final_num_boost_round = mean_best_iter if mean_best_iter > 0 else num_boost_round
+    logger.info(
+        "final fit num_boost_round=%d (cv mean_best_iter=%d, ceiling=%d)",
+        final_num_boost_round,
+        mean_best_iter,
+        num_boost_round,
+    )
     full_ds = _build_dataset(
         lgb_mod,
         dataset.feature_matrix,
@@ -246,7 +261,7 @@ def train_lightgbm(
     model = lgb_mod.train(
         params,
         full_ds,
-        num_boost_round=num_boost_round,
+        num_boost_round=final_num_boost_round,
     )
 
     # ---- Feature importance ----
@@ -263,6 +278,10 @@ def train_lightgbm(
     # cast np.int → float for JSON friendliness
     importance_typed: list[tuple[str, float]] = [(name, float(score)) for name, score in importance]
 
+    # 把 final_num_boost_round 一并写入 hyperparams 快照，下游 `lgb info`
+    # 直接展示 hyperparams_json 即能反映"全量 fit 实际跑了多少轮"。
+    hyperparams_snapshot = {**params, "final_num_boost_round": final_num_boost_round}
+
     return TrainResult(
         model=model,
         n_samples=dataset.n_samples,
@@ -271,7 +290,8 @@ def train_lightgbm(
         cv_auc_std=cv_auc_std,
         cv_logloss_mean=cv_logloss_mean,
         feature_importance=importance_typed,
-        hyperparams=params,
+        hyperparams=hyperparams_snapshot,
         best_iteration=getattr(model, "best_iteration", None),
         folds=folds,
+        final_num_boost_round=final_num_boost_round,
     )

@@ -103,6 +103,11 @@ class RunParams:
     # v0.5 LGB 开关：用户传 --no-lgb 时设为 False（一次性覆盖 LubConfig.lgb_enabled）。
     # PR-0.3 仅落字段，pipeline 接入在 PR-2.2。
     lgb_enabled: bool = True
+    # P0-3 (v0.6.4) — 标记 LGB 是否被 intraday 模式自动禁用。仅由 CLI 在
+    # ``allow_intraday and not force_lgb`` 时置 True，让 runner 输出 LOG 事件。
+    # 与 `lgb_enabled=False` 同时为 True 时含义为：本来想跑 LGB（``--no-lgb`` 没传），
+    # 但因 intraday 时点风险被自动禁用。
+    intraday_lgb_auto_disabled: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +384,7 @@ class LubRunner:
             max_close_yuan=lub_cfg.max_close_yuan,
             min_float_mv_yi=lub_cfg.min_float_mv_yi,
             force_sync=params.force_sync,
+            intraday=params.allow_intraday,
         )
         yield from self._drain_pending()
         yield rt.emit(
@@ -391,6 +397,16 @@ class LubRunner:
         """Full pipeline: Step 0..5."""
         rt = self._rt
         cfg = rt.config.get_app_config()
+
+        # P0-3 — intraday 模式自动禁用 LGB 时，先 emit 一条 LOG 让用户在事件流 /
+        # dashboard / `lub_events` 表中看到这一行为决策的原因。
+        if params.intraday_lgb_auto_disabled:
+            yield rt.emit(
+                EventType.LOG,
+                "intraday 模式自动禁用 LGB（训练样本为日终语义，盘中评分等于分布偏移）；"
+                "需保留请加 `--force-lgb` 显式覆盖。",
+                level=EventLevel.WARN,
+            )
 
         # Step 0
         yield rt.emit(EventType.STEP_STARTED, "Step 0: resolve trade date")
@@ -431,6 +447,7 @@ class LubRunner:
                 min_float_mv_yi=lub_cfg.min_float_mv_yi,
                 force_sync=params.force_sync,
                 lgb_scorer=rt.lgb_scorer,
+                intraday=params.allow_intraday,
             )
         except TushareUnauthorizedError as e:
             yield rt.emit(
@@ -593,6 +610,17 @@ class LubRunner:
 
         seen_validation_failed = False
         try:
+            # P0-3 — intraday 自动禁用 LGB 时给用户 surface 一条 WARN，确保在 debate
+            # 路径下也能在事件流 / 仪表盘 / `lub_events` 表里看到这条决策原因。
+            if params.intraday_lgb_auto_disabled:
+                emit(
+                    rt.emit(
+                        EventType.LOG,
+                        "intraday 模式自动禁用 LGB（训练样本为日终语义，盘中评分"
+                        "等于分布偏移）；需保留请加 `--force-lgb` 显式覆盖。",
+                        level=EventLevel.WARN,
+                    )
+                )
             emit(
                 rt.emit(
                     EventType.LOG,
@@ -860,6 +888,11 @@ class LubRunner:
         auto_resolved_to_today_after_close = (
             params.trade_date is None and not params.allow_intraday and T == today_str
         )
+        # P3-2: 回填 lub_runs.trade_date —— _record_run_start 时 params.trade_date 可能为 None
+        # （CLI 未传 --trade-date），导致表里落了 ""，对 history / report join 不友好。
+        # Step 0 解析出真实 T 后立即更新，保证 lub_runs.trade_date 始终非空。
+        if rt.run_id:
+            self._backfill_run_trade_date(rt.run_id, T)
         emit(
             rt.emit(
                 EventType.STEP_FINISHED,
@@ -884,6 +917,7 @@ class LubRunner:
                 min_float_mv_yi=lub_cfg.min_float_mv_yi,
                 force_sync=params.force_sync,
                 lgb_scorer=rt.lgb_scorer,
+                intraday=params.allow_intraday,
             )
         except TushareUnauthorizedError as e:
             emit(
@@ -1022,6 +1056,17 @@ class LubRunner:
                 params.allow_intraday,
                 json.dumps(params.__dict__, ensure_ascii=False),
             ),
+        )
+
+    def _backfill_run_trade_date(self, run_id: str, trade_date: str) -> None:
+        """更新 lub_runs.trade_date —— Step 0 解析真实 T 后调用。
+
+        ``_record_run_start`` 写入的 trade_date 可能为 ""（用户未传 ``--trade-date``）。
+        Step 0 解析出真实 T 后必须立即回填，否则 history / report join 不到。
+        """
+        self._rt.db.execute(
+            "UPDATE lub_runs SET trade_date=? WHERE run_id=?",
+            (trade_date, run_id),
         )
 
     def _record_run_finish(

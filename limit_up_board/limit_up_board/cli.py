@@ -34,7 +34,7 @@ from deeptrade.core.llm_manager import LLMManager
 from deeptrade.plugins_api import render_exception
 
 from .calendar import TradeCalendar
-from .config import LubConfig, list_for_show, load_config, save_config
+from .config import LubConfig, list_for_show, load_config, save_config, validate_config
 from .lgb import checkpoint as lgb_checkpoint
 from .lgb import paths as lgb_paths
 from .lgb import registry as lgb_registry
@@ -65,7 +65,7 @@ app.add_typer(settings_app, name="settings")
 
 lgb_app = typer.Typer(
     name="lgb",
-    help="LightGBM 连板概率评分模型生命周期管理（v0.5+）。",
+    help="LightGBM 次日最大溢价概率评分模型生命周期管理（v0.5+）。",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -107,6 +107,14 @@ def cmd_run(
             "R1/R2 prompt 仍能跑通。等价于 LubConfig.lgb_enabled=false 的一次性覆盖。"
         ),
     ),
+    force_lgb: bool = typer.Option(
+        False,
+        "--force-lgb",
+        help=(
+            "intraday 模式下强制启用 LGB 评分（默认自动禁用）。"
+            "训练样本是日终语义，盘中评分等于分布偏移；仅在你明确接受这一偏差时使用。"
+        ),
+    ),
     no_dashboard: bool = typer.Option(
         False,
         "--no-dashboard",
@@ -127,6 +135,11 @@ def cmd_run(
             typer.echo("✘ --debate-llms 解析后为空")
             raise typer.Exit(2)
 
+    # P0-3 (v0.6.4) — intraday 模式下默认禁用 LGB：训练样本是日终语义（pre_close /
+    # 收盘后聚合等），盘中评分等于分布偏移；用户需 `--force-lgb` 显式接受。
+    intraday_auto_disable = allow_intraday and not no_lgb and not force_lgb
+    effective_lgb_enabled = (not no_lgb) and (force_lgb or not allow_intraday)
+
     db, rt = _open_runtime()
     try:
         params = RunParams(
@@ -137,7 +150,8 @@ def cmd_run(
             moneyflow_lookback=moneyflow_lookback,
             debate=debate,
             debate_llms=debate_llms_list,
-            lgb_enabled=not no_lgb,
+            lgb_enabled=effective_lgb_enabled,
+            intraday_lgb_auto_disabled=intraday_auto_disable,
         )
         # v0.6 — pick a renderer. ``choose_renderer`` returns the rich
         # dashboard only when stdout is an interactive terminal and none of
@@ -266,11 +280,6 @@ def cmd_settings(ctx: typer.Context) -> None:
         new_min_mv = _prompt_positive_float("流通市值下限（亿）", cur.min_float_mv_yi)
         new_mv = _prompt_positive_float("流通市值上限（亿）", cur.max_float_mv_yi)
         new_close = _prompt_positive_float("当前股价上限（元）", cur.max_close_yuan)
-        if new_min_mv >= new_mv:
-            typer.echo(
-                f"✘ 流通市值下限（{new_min_mv}亿）必须小于上限（{new_mv}亿）"
-            )
-            raise typer.Exit(2)
         # 用 dataclasses.replace 保留所有未交互的字段（如 v0.5 的 lgb_* 配置）。
         new_cfg = replace(
             cur,
@@ -278,6 +287,11 @@ def cmd_settings(ctx: typer.Context) -> None:
             max_float_mv_yi=new_mv,
             max_close_yuan=new_close,
         )
+        try:
+            validate_config(new_cfg)
+        except ValueError as e:
+            typer.echo(f"✘ {e}")
+            raise typer.Exit(2) from e
         save_config(db, new_cfg)
         typer.echo(
             f"✔ Saved: {new_cfg.min_float_mv_yi}亿 < 流通市值 < "
@@ -629,6 +643,19 @@ def cmd_lgb_train(
     崩溃/中断后再次以同窗口 + 同筛选参数运行将自动跳过已完成日；训练成功后
     checkpoint 自动清理。用 ``--fresh`` 丢弃现有 shard 重新抓取。
     """
+    # P2-6 — Phase-1 checkpoint shard 写盘与 dataset snapshot 都依赖 pyarrow。
+    # 框架 install 时会自动 uv pip install pyarrow（plugin_required_dependencies.md），
+    # 但裸 venv 直接跑 `deeptrade limit-up-board lgb train` 可能踩空。提前在入口
+    # 给出 UsageError，比让 `df.to_parquet(...)` 直接抛 ImportError 友好得多。
+    # 不在 lgb evaluate / info / list 等读路径做硬自检，避免阻断排查问题的场景。
+    try:
+        import pyarrow  # noqa: F401, PLC0415
+    except ImportError as e:
+        raise typer.BadParameter(
+            "lgb train 需要 pyarrow（用于 checkpoint shard 与 dataset snapshot）。"
+            "请确保 pyarrow>=15 已安装；手动执行：pip install 'pyarrow>=15'"
+        ) from e
+
     if start > end:
         typer.echo("✘ --start 必须 ≤ --end")
         raise typer.Exit(2)

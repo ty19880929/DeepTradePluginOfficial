@@ -381,12 +381,7 @@ def _enumerate_trade_dates(
     calendar: TradeCalendar, start_date: str, end_date: str
 ) -> list[str]:
     """All open trading days T with ``start_date <= T <= end_date``."""
-    if start_date > end_date:
-        return []
-    df = calendar._df  # noqa: SLF001 — TradeCalendar 没暴露区间 API；直接读私有
-    mask = (df["cal_date"] >= start_date) & (df["cal_date"] <= end_date)
-    rows = df[mask & (df["is_open"] == 1)]
-    return [str(d) for d in rows["cal_date"].tolist()]
+    return calendar.range(start_date, end_date)
 
 
 def collect_training_window(

@@ -17,7 +17,8 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 _R1_LGB_BLOCK_FLOOR = (
-    "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，越大越倾向次日溢价/连板）；"
+    "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，预测「次日最大溢价概率」——"
+    "T+1 最高价 ≥ T 收盘价 × (1+阈值%) 的概率，越大越倾向高位溢价但 ≠ 必涨停 / ≠ 可实现收益）；"
     "lgb_decile（1=最弱，10=最强，当批分位）。\n"
     "  · lgb_score < {floor} 的标的，除非有极强的突发题材或一线游资认可，否则倾向 selected=false。\n"
     "  · lgb_score 缺失（null）或本次未启用模型时，按其他证据判断，不要因为缺失就一概 selected=false。\n"
@@ -26,7 +27,8 @@ _R1_LGB_BLOCK_FLOOR = (
 )
 
 _R1_LGB_BLOCK_NO_FLOOR = (
-    "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，越大越倾向次日溢价/连板）；"
+    "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，预测「次日最大溢价概率」——"
+    "T+1 最高价 ≥ T 收盘价 × (1+阈值%) 的概率，越大越倾向高位溢价但 ≠ 必涨停 / ≠ 可实现收益）；"
     "lgb_decile（1=最弱，10=最强，当批分位）。\n"
     "  · lgb_score 缺失（null）或本次未启用模型时，按其他证据判断，不要因为缺失就一概 selected=false。\n"
     "  · 在 evidence 中引用时 field=lgb_score，unit=\"无\"，interpretation 形如 "
@@ -186,8 +188,10 @@ R2_SYSTEM = """\
 - 不允许引用 missing_data 中的字段；可引用所有派生字段
   （amplitude_pct / fd_amount_ratio / ma_* / up_count_30d）。
 - LightGBM 量化分（lgb_score / lgb_decile）作为 continuation_score 的统计学锚点之一：
+  · lgb_score = 模型预测的「次日最大溢价概率」（T+1 最高价 ≥ T 收盘价 × (1+阈值%)）；
+    数值越大越倾向高位溢价，但**不等价于"必涨停"或"可实现收益"**——盘口风险信号仍优先。
   · lgb_score ≥ 70 的标的可适度上调 confidence；但若同时存在 cyq_winner_pct > 70 / 高位连板等
-    分歧风险，仍需下调；模型分不优先于盘口风险信号。
+    分歧风险，仍需下调。
   · lgb_score < __R2_LGB_FLOOR__ 的标的若你给出 top_candidate，rationale 必须明确写出"为何超越模型判断"。
   · lgb_score 缺失（null）或本次未启用模型时，忽略此维度，按其他证据评估。
   · 引用时 field 可以是 lgb_score 或 lgb_decile，value 必须填标量（分数 / 分位数）。

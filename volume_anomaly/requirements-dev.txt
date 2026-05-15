@@ -1,0 +1,17 @@
+# volume-anomaly 本地开发与测试依赖
+#
+# 与 deeptrade_plugin.yaml::dependencies 对齐 —— 框架 install 时会
+# `uv pip install` 这些；本地直接 `pytest` 时需要先手动装齐。
+# 用法：
+#   pipx install deeptrade-quant
+#   pip install -r volume_anomaly/requirements-dev.txt
+#   cd volume_anomaly ; pytest -m "not slow"
+
+tushare>=1.4
+pandas>=2.2,<3
+pyarrow>=14
+lightgbm>=4.3,<5
+scikit-learn>=1.4,<2
+
+# 测试运行时
+pytest>=8

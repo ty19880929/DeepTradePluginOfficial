@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from limit_up_board.lgb import trainer as trainer_mod
 from limit_up_board.lgb.dataset import LgbDataset
 from limit_up_board.lgb.features import FEATURE_NAMES
 from limit_up_board.lgb.trainer import (
@@ -153,3 +156,111 @@ class TestTrainSmoke:
         assert result.cv_auc_std is None
         # 模型仍然训出来了
         assert result.model is not None
+
+
+class TestFinalFitUsesCvBestIter:
+    """P1-2: ``_crossval_metrics`` 的 ``mean_best_iter`` 必须喂给全量 fit；
+    被跳过 / 返回 0 时回退到 ``num_boost_round`` 上限。
+
+    用 monkeypatch 注入受控的 ``_crossval_metrics`` 返回值 + 截胡 ``lgb.train``，
+    无须真跑 booster；测试不带 ``slow`` 标记。
+    """
+
+    def _stub_lgb_module(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        """Replace _import_lgb so train_lightgbm uses a fake module.
+
+        Returns the captured kwargs list — caller asserts on
+        ``[-1]['num_boost_round']`` for the final fit call.
+        """
+        captured: list[dict[str, Any]] = []
+
+        class _FakeBooster:
+            def __init__(self) -> None:
+                self.best_iteration = 0
+
+            def feature_name(self) -> list[str]:
+                return list(FEATURE_NAMES)
+
+            def feature_importance(
+                self, importance_type: str = "gain"
+            ) -> list[int]:  # noqa: ARG002
+                return [1] * len(FEATURE_NAMES)
+
+        class _FakeDataset:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                pass
+
+        def _fake_train(*args: Any, **kwargs: Any) -> _FakeBooster:
+            captured.append(dict(kwargs))
+            return _FakeBooster()
+
+        class _FakeLgb:
+            Dataset = _FakeDataset
+            train = staticmethod(_fake_train)
+
+            @staticmethod
+            def early_stopping(*args: Any, **kwargs: Any) -> None:  # noqa: ARG004
+                return None
+
+        monkeypatch.setattr(trainer_mod, "_import_lgb", lambda: _FakeLgb)
+        return captured
+
+    def test_final_fit_uses_cv_mean_best_iter(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = self._stub_lgb_module(monkeypatch)
+
+        # 受控 CV 返回 mean_best_iter=42
+        monkeypatch.setattr(
+            trainer_mod,
+            "_crossval_metrics",
+            lambda *a, **kw: ([0.7, 0.71], [0.6, 0.6], 42),
+        )
+
+        ds = _toy_dataset(n_per_day=4, n_days=4)
+        result = train_lightgbm(
+            ds, folds=2, num_boost_round=500, early_stopping_rounds=50
+        )
+
+        # CV 给出 42 → 全量 fit 用 42，而非 num_boost_round=500
+        assert result.final_num_boost_round == 42
+        assert captured, "lgb.train should have been called for the final fit"
+        assert captured[-1]["num_boost_round"] == 42
+        # hyperparams_json 应当同时记录这个值，方便 `lgb info` 输出
+        assert result.hyperparams.get("final_num_boost_round") == 42
+
+    def test_final_fit_falls_back_when_cv_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured = self._stub_lgb_module(monkeypatch)
+
+        # 只构造 1 个交易日 → folds=2 时 split_groups.nunique() < folds 跳过 CV
+        ds = _toy_dataset(n_per_day=8, n_days=1)
+        result = train_lightgbm(
+            ds, folds=2, num_boost_round=123, early_stopping_rounds=50
+        )
+
+        assert result.cv_auc_mean is None  # CV 确实被跳过
+        # 回退到 num_boost_round=123
+        assert result.final_num_boost_round == 123
+        assert captured[-1]["num_boost_round"] == 123
+        assert result.hyperparams.get("final_num_boost_round") == 123
+
+    def test_final_fit_falls_back_when_cv_returns_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """病态情景：CV 跑完但 best_iters 全为 0 → 也回退到 num_boost_round。"""
+        captured = self._stub_lgb_module(monkeypatch)
+        monkeypatch.setattr(
+            trainer_mod,
+            "_crossval_metrics",
+            lambda *a, **kw: ([0.5, 0.5], [0.7, 0.7], 0),
+        )
+
+        ds = _toy_dataset(n_per_day=4, n_days=4)
+        result = train_lightgbm(
+            ds, folds=2, num_boost_round=77, early_stopping_rounds=50
+        )
+
+        assert result.final_num_boost_round == 77
+        assert captured[-1]["num_boost_round"] == 77

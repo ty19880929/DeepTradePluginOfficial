@@ -12,7 +12,11 @@ v0.5 LGB 字段（lightgbm_design.md §10）：
     * ``lgb_enabled``                  — 全局开关
     * ``lgb_min_score_floor``          — R1 prompt 中提示 LLM 的分数下限
     * ``lgb_decile_in_prompt``         — 是否注入 lgb_decile
-    * ``lgb_label_threshold_pct``      — T+1 阈值（默认 9.7）
+    * ``lgb_label_threshold_pct``      — 次日最大溢价概率阈值（%）：T+1.high
+                                         >= pre_close * (1 + 阈值%) 的样本标为正例。
+                                         **注意**：此标签为「次日最高价是否触及阈值溢价」，
+                                         并非「能否成交」、也非「真实可实现收益」（详见 P1-1
+                                         讨论）。默认 9.7 接近涨停。
     * ``lgb_train_lookback_days``      — train CLI 默认窗口
     * ``lgb_train_min_samples``        — 训练样本量下限
     * ``lgb_max_models_to_keep``       — prune 默认保留模型数
@@ -53,19 +57,73 @@ def _full_key(field_name: str) -> str:
     return f"{_KEY_PREFIX}{field_name}"
 
 
+def validate_config(cfg: LubConfig) -> None:
+    """Strict validation for a :class:`LubConfig` instance.
+
+    Called by ``load_config`` (catches corrupt DB values) / ``save_config``
+    (rejects bad CLI input) so violations surface as early as possible
+    rather than silently produce 0-candidate runs or model training errors.
+
+    Raises ``ValueError`` (not ``AssertionError``) with a human-readable
+    message identifying the offending field — typer will surface the message
+    verbatim to CLI users via Exit(2).
+    """
+    if cfg.min_float_mv_yi < 0:
+        raise ValueError(
+            f"min_float_mv_yi 必须 >= 0（当前 {cfg.min_float_mv_yi}）"
+        )
+    if cfg.min_float_mv_yi >= cfg.max_float_mv_yi:
+        raise ValueError(
+            f"min_float_mv_yi（{cfg.min_float_mv_yi}）必须 < "
+            f"max_float_mv_yi（{cfg.max_float_mv_yi}）"
+        )
+    if cfg.max_close_yuan <= 0:
+        raise ValueError(
+            f"max_close_yuan 必须 > 0（当前 {cfg.max_close_yuan}）"
+        )
+    if not (0 < cfg.lgb_label_threshold_pct < 20):
+        raise ValueError(
+            f"lgb_label_threshold_pct 必须落在 (0, 20) 之间"
+            f"（当前 {cfg.lgb_label_threshold_pct}）"
+        )
+    if cfg.lgb_min_score_floor is not None and not (
+        0 <= cfg.lgb_min_score_floor <= 100
+    ):
+        raise ValueError(
+            f"lgb_min_score_floor 必须为 None 或 [0, 100] 内的数值"
+            f"（当前 {cfg.lgb_min_score_floor}）"
+        )
+    if cfg.lgb_train_lookback_days < 30:
+        raise ValueError(
+            f"lgb_train_lookback_days 必须 >= 30（当前 {cfg.lgb_train_lookback_days}）"
+        )
+    if cfg.lgb_train_min_samples < 100:
+        raise ValueError(
+            f"lgb_train_min_samples 必须 >= 100（当前 {cfg.lgb_train_min_samples}）"
+        )
+    if cfg.lgb_max_models_to_keep < 1:
+        raise ValueError(
+            f"lgb_max_models_to_keep 必须 >= 1（当前 {cfg.lgb_max_models_to_keep}）"
+        )
+
+
 def load_config(db: Database) -> LubConfig:
     """Materialize a :class:`LubConfig` from ``lub_config``; missing rows fall
-    through to the dataclass default."""
+    through to the dataclass default. ``validate_config`` runs on the
+    assembled object so corrupt DB values surface immediately."""
     overrides: dict[str, Any] = {}
     for f in fields(LubConfig):
         row = db.fetchone("SELECT value_json FROM lub_config WHERE key = ?", (_full_key(f.name),))
         if row is not None:
             overrides[f.name] = json.loads(row[0])
-    return LubConfig(**overrides)
+    cfg = LubConfig(**overrides)
+    validate_config(cfg)
+    return cfg
 
 
 def save_config(db: Database, cfg: LubConfig) -> None:
-    """Upsert every field of *cfg* into ``lub_config``."""
+    """Upsert every field of *cfg* into ``lub_config``. Validates first."""
+    validate_config(cfg)
     with db.transaction():
         for f in fields(LubConfig):
             key = _full_key(f.name)

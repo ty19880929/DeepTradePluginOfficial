@@ -32,33 +32,33 @@ def _df(rows: list[dict]) -> pd.DataFrame:
 
 class TestApplyMarketFilter:
     def test_default_thresholds_keep_only_qualifying(self) -> None:
-        # 流通市值 raw 单位 = 元；100 亿 = 1e10
+        # v0.6.4 P2-1：闭区间 (>=, <=, <=)。100 亿 / 15 元的标的现在通过。
         df = _df(
             [
                 {"ts_code": "A", "float_mv": 50e8, "close": 10.0},   # keep
                 {"ts_code": "B", "float_mv": 99e8, "close": 14.99},  # keep (just under)
-                {"ts_code": "C", "float_mv": 100e8, "close": 10.0},  # drop (= 100亿)
-                {"ts_code": "D", "float_mv": 50e8, "close": 15.0},   # drop (= 15元)
+                {"ts_code": "C", "float_mv": 100e8, "close": 10.0},  # keep (= 100亿 边界，闭区间)
+                {"ts_code": "D", "float_mv": 50e8, "close": 15.0},   # keep (= 15元 边界，闭区间)
                 {"ts_code": "E", "float_mv": 200e8, "close": 30.0},  # drop (both over)
             ]
         )
         out, summary = _apply_market_filter(
             df, max_float_mv_yi=100.0, max_close_yuan=15.0
         )
-        assert list(out["ts_code"]) == ["A", "B"]
-        assert summary == {
-            "before": 5,
-            "after": 2,
-            "min_float_mv_yi": 0.0,
-            "max_float_mv_yi": 100.0,
-            "max_close_yuan": 15.0,
-        }
+        assert list(out["ts_code"]) == ["A", "B", "C", "D"]
+        # 子集断言：只看核心字段，避免 P2-1 新增 `dropped_top3` 字段影响其它用例
+        assert summary["before"] == 5
+        assert summary["after"] == 4
+        assert summary["min_float_mv_yi"] == 0.0
+        assert summary["max_float_mv_yi"] == 100.0
+        assert summary["max_close_yuan"] == 15.0
 
     def test_min_float_mv_drops_too_small(self) -> None:
+        # v0.6.4 P2-1：闭区间下，30 亿（== min）现在保留，25 亿（< min）剔除。
         df = _df(
             [
-                {"ts_code": "A", "float_mv": 25e8, "close": 10.0},   # drop (= 25亿 ≤ 30)
-                {"ts_code": "B", "float_mv": 30e8, "close": 10.0},   # drop (= 30亿 边界)
+                {"ts_code": "A", "float_mv": 25e8, "close": 10.0},   # drop (< 30亿)
+                {"ts_code": "B", "float_mv": 30e8, "close": 10.0},   # keep (= 30亿 边界，闭区间)
                 {"ts_code": "C", "float_mv": 35e8, "close": 10.0},   # keep
                 {"ts_code": "D", "float_mv": 99e8, "close": 10.0},   # keep
                 {"ts_code": "E", "float_mv": 120e8, "close": 10.0},  # drop (> 100亿)
@@ -70,10 +70,10 @@ class TestApplyMarketFilter:
             max_close_yuan=15.0,
             min_float_mv_yi=30.0,
         )
-        assert list(out["ts_code"]) == ["C", "D"]
+        assert list(out["ts_code"]) == ["B", "C", "D"]
         assert summary["min_float_mv_yi"] == 30.0
         assert summary["before"] == 5
-        assert summary["after"] == 2
+        assert summary["after"] == 3
 
     def test_null_fields_filtered(self) -> None:
         df = _df(
@@ -95,8 +95,8 @@ class TestApplyMarketFilter:
         df = _df(
             [
                 {"ts_code": "A", "float_mv": 20e8, "close": 5.0},   # keep
-                {"ts_code": "B", "float_mv": 35e8, "close": 5.0},   # drop (mv ≥ 30)
-                {"ts_code": "C", "float_mv": 20e8, "close": 9.0},   # drop (close ≥ 8)
+                {"ts_code": "B", "float_mv": 35e8, "close": 5.0},   # drop (mv > 30 上限)
+                {"ts_code": "C", "float_mv": 20e8, "close": 9.0},   # drop (close > 8 上限)
             ]
         )
         out, summary = _apply_market_filter(
@@ -112,13 +112,13 @@ class TestApplyMarketFilter:
             df, max_float_mv_yi=100.0, max_close_yuan=15.0
         )
         assert out.empty
-        assert summary == {
-            "before": 0,
-            "after": 0,
-            "min_float_mv_yi": 0.0,
-            "max_float_mv_yi": 100.0,
-            "max_close_yuan": 15.0,
-        }
+        # P2-1 后 summary 多了一个空 `dropped_top3` 字段；用 subset 校验更稳健。
+        assert summary["before"] == 0
+        assert summary["after"] == 0
+        assert summary["min_float_mv_yi"] == 0.0
+        assert summary["max_float_mv_yi"] == 100.0
+        assert summary["max_close_yuan"] == 15.0
+        assert summary["dropped_top3"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -160,4 +160,4 @@ def test_user_prompts_omit_lgb_when_field_absent() -> None:
         data_unavailable=[],
     )
     assert "lgb_score" not in text
-    assert json.dumps(candidates, ensure_ascii=False) in text
+    assert json.dumps(candidates, ensure_ascii=False, indent=2) in text

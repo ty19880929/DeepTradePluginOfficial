@@ -1,4 +1,8 @@
-"""LightGBM 连板概率评分子包（v0.5+）。
+"""LightGBM 次日最大溢价概率评分子包（v0.5+）。
+
+「次日最大溢价概率」语义见 ``config.py::LubConfig.lgb_label_threshold_pct``：
+T+1 最高价 ≥ T 收盘价 × (1 + 阈值%) 为正例。该信号是 R1 / R2 prompt 的
+量化锚点之一，**不是「次日连板」也不是「次日真实可实现收益」**。
 
 子模块的职责划分见 ``lightgbm_design.md §2.1``：
 

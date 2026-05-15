@@ -11,7 +11,7 @@ Implements:
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -165,6 +165,106 @@ class _SetMismatchError(Exception):
     expected set after one repair retry."""
 
 
+class _EvidenceValidationError(Exception):
+    """Raised when LLM output's evidence references (e.g. ``evidence.field``)
+    still violate the input-key whitelist after one repair retry. The
+    ``errors`` attribute carries human-readable strings for the
+    VALIDATION_FAILED event payload.
+    """
+
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__(
+            f"evidence validation failed after retry; {len(errors)} error(s): "
+            f"{errors[:3]}{'...' if len(errors) > 3 else ''}"
+        )
+
+
+# P0-2 v1 — fields the LLM is allowed to put in ``evidence.field`` /
+# ``key_evidence.field``. Anything else is a fabrication risk and triggers a
+# repair retry. ``risk_flags`` / ``next_day_watch_points`` 等自由文本字段不进
+# 白名单（plan T-14 边界条款）—— 它们由 schema 单独承载。
+
+
+# 额外允许引用的"派生 / 上下文"字段名（不出现在 candidate dict 但 prompt 文档
+# 化承诺存在）：sector_strength.* 、market_summary.* 子字段、limit_step 全局摘要等。
+# 这些放在白名单里避免误报；具体值由 prompt 上下文承载，validator 只检 key 名。
+_EVIDENCE_CONTEXT_FIELDS_WHITELIST = frozenset(
+    {
+        "sector_strength",
+        "sector_strength_source",
+        "market_context",
+        "market_summary",
+        "limit_step",
+        "limit_step_trend",
+        "yesterday_failure_rate",
+        "yesterday_winners_today",
+        "limit_up_count",
+        "data_unavailable",
+        # 评分相关 派生字段
+        "lgb_score",
+        "lgb_decile",
+    }
+)
+
+
+def _candidate_allowed_field_set(row: dict[str, Any]) -> set[str]:
+    """Build the per-candidate allow-list = (dict keys) ∪ context allow-list.
+
+    Picks up every key present in the candidate row (including derived /
+    optional ones like ``cyq_winner_pct``, ``lgb_score`` when scoring ran),
+    plus a small whitelist of prompt-documented context fields.
+    """
+    return set(row.keys()) | set(_EVIDENCE_CONTEXT_FIELDS_WHITELIST)
+
+
+def _make_evidence_field_validator(
+    allowed_fields_per_candidate: dict[str, set[str]],
+    *,
+    evidence_attr: str,
+) -> Callable[[Any], list[str]]:
+    """Build a validator closure that inspects ``obj.candidates[i].<evidence_attr>``.
+
+    Returns a function: ``obj -> list[str]`` (empty list = pass). Each error
+    string is of the form ``"{cid}: evidence.field={f!r} not in input keys"``.
+    Unknown candidate_ids are silently skipped — the set-mismatch check
+    catches those earlier.
+    """
+
+    def _validate(obj: Any) -> list[str]:
+        errors: list[str] = []
+        candidates = getattr(obj, "candidates", None) or []
+        for c in candidates:
+            cid = getattr(c, "candidate_id", None)
+            allowed = allowed_fields_per_candidate.get(cid)
+            if allowed is None:
+                continue
+            ev_items = getattr(c, evidence_attr, None) or []
+            for ev in ev_items:
+                field_name = getattr(ev, "field", None)
+                if field_name is None:
+                    continue
+                if field_name not in allowed:
+                    errors.append(
+                        f"{cid}: {evidence_attr}.field={field_name!r} not in input keys"
+                    )
+        return errors
+
+    return _validate
+
+
+def _evidence_validation_repair_hint(errors: list[str]) -> str:
+    """Corrective instruction appended to user prompt when evidence references
+    fabricated fields. Lists up to 6 offending fields so the LLM can self-correct."""
+    head = errors[:6]
+    tail = "" if len(errors) <= 6 else f"\n（共 {len(errors)} 条，仅列前 6 条）"
+    return (
+        "\n\n⚠ 上一次响应中的 evidence 引用了输入数据中不存在的字段名，已被自动拒绝。"
+        "请只引用候选股 JSON 中实际出现的键名（如 fd_amount_yi、turnover_ratio、"
+        "lgb_score 等）；禁止编造或猜测字段。\n违规字段：\n" + "\n".join(head) + tail
+    )
+
+
 def _complete_with_set_check(
     llm: LLMClient,
     *,
@@ -176,6 +276,7 @@ def _complete_with_set_check(
     output_attr: str = "candidates",
     repair_retries: int = 1,
     envelope_defaults: dict[str, Any] | None = None,
+    evidence_validator: Callable[[Any], list[str]] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Call LLM and verify the output's id-set matches. On mismatch, retry
     once with a corrective hint appended to the user prompt.
@@ -187,9 +288,20 @@ def _complete_with_set_check(
             'finalists' for final_ranking.
         envelope_defaults: caller-controlled top-level fields (e.g. ``stage``,
             ``trade_date``, ``batch_no``) injected when the LLM omits them.
+        evidence_validator: P0-2 v1 — optional callable returning a list of
+            human-readable error strings (empty = pass). Runs **after** the
+            set-equality check passes; on non-empty errors it follows the
+            same repair-retry contract as set-mismatch. On final attempt
+            with errors → raise :class:`_EvidenceValidationError`.
+
+    On retry, the meta dict carries ``evidence_validation_errors_first_attempt``
+    (the first-attempt errors that the LLM self-corrected); callers can fold
+    that into ``lub_stage_results.evidence_validation_errors_json`` if they
+    want to record near-misses.
     """
     current_user = user
     last_actual: set[str] = set()
+    first_attempt_evidence_errors: list[str] = []
     for attempt in range(repair_retries + 1):
         raw, meta = llm.complete_json(
             system=system,
@@ -201,16 +313,34 @@ def _complete_with_set_check(
         obj = raw if isinstance(raw, schema) else schema.model_validate(raw)
         items = getattr(obj, output_attr)
         actual_ids = {item.candidate_id for item in items}
-        if expected_ids == actual_ids:
+        if expected_ids != actual_ids:
+            last_actual = actual_ids
+            if attempt < repair_retries:
+                current_user = user + _set_mismatch_repair_hint(expected_ids, actual_ids)
+                continue
+            raise _SetMismatchError(
+                f"set mismatch after {repair_retries + 1} attempts; "
+                f"missing={sorted(expected_ids - last_actual)}, "
+                f"extra={sorted(last_actual - expected_ids)}"
+            )
+        # set OK; now apply evidence-field whitelist if caller wired one in.
+        if evidence_validator is None:
             return obj, meta
-        last_actual = actual_ids
+        ev_errors = evidence_validator(obj)
+        if not ev_errors:
+            # Stamp recovery info into meta when this run took retries.
+            meta = {**meta, "evidence_validation_errors_first_attempt": first_attempt_evidence_errors}
+            return obj, meta
+        # Validator triggered; retry once with a corrective hint, then bail.
+        if attempt == 0:
+            first_attempt_evidence_errors = list(ev_errors)
         if attempt < repair_retries:
-            current_user = user + _set_mismatch_repair_hint(expected_ids, actual_ids)
-    raise _SetMismatchError(
-        f"set mismatch after {repair_retries + 1} attempts; "
-        f"missing={sorted(expected_ids - last_actual)}, "
-        f"extra={sorted(last_actual - expected_ids)}"
-    )
+            current_user = user + _evidence_validation_repair_hint(ev_errors)
+            continue
+        raise _EvidenceValidationError(ev_errors)
+    # Should be unreachable given the loop above always returns or raises;
+    # added for type-checker satisfaction.
+    raise _SetMismatchError("unreachable")
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +433,16 @@ def run_r1(
         )
 
         expected_ids = _ids(batch)
+        # P0-2 v1 — evidence field whitelist (per candidate). 见
+        # _make_evidence_field_validator 注释。
+        allowed_fields_r1 = {
+            row.get("candidate_id"): _candidate_allowed_field_set(row)
+            for row in batch
+            if row.get("candidate_id")
+        }
+        ev_validator = _make_evidence_field_validator(
+            allowed_fields_r1, evidence_attr="evidence"
+        )
         try:
             obj, meta = _complete_with_set_check(
                 llm,
@@ -318,16 +458,25 @@ def run_r1(
                     "batch_total": plan.n_batches,
                     "batch_summary": "",
                 },
+                evidence_validator=ev_validator,
             )
-        except (LLMValidationError, LLMTransportError, _SetMismatchError) as e:
+        except (
+            LLMValidationError,
+            LLMTransportError,
+            _SetMismatchError,
+            _EvidenceValidationError,
+        ) as e:
             result.failed_batches += 1
             result.failed_batch_ids.append(f"r1.batch.{i + 1}")
+            payload: dict[str, Any] = {"batch_no": i + 1}
+            if isinstance(e, _EvidenceValidationError):
+                payload["evidence_validation_errors"] = e.errors
             yield (
                 StrategyEvent(
                     type=EventType.VALIDATION_FAILED,
                     level=EventLevel.ERROR,
                     message=f"R1 batch {i + 1} failed: {e}",
-                    payload={"batch_no": i + 1},
+                    payload=payload,
                 ),
                 None,
             )
@@ -470,6 +619,16 @@ def run_r2(
         )
 
         expected_ids = _ids(batch_objs)
+        # P0-2 v1 — evidence field whitelist for R2 (key_evidence on
+        # ContinuationCandidate). 用 R2 prompt 实际看到的 payload_rows 作为允许集。
+        allowed_fields_r2 = {
+            row.get("candidate_id"): _candidate_allowed_field_set(row)
+            for row in batch_rows
+            if row.get("candidate_id")
+        }
+        ev_validator = _make_evidence_field_validator(
+            allowed_fields_r2, evidence_attr="key_evidence"
+        )
         try:
             obj, meta = _complete_with_set_check(
                 llm,
@@ -485,16 +644,25 @@ def run_r2(
                     "market_context_summary": "",
                     "risk_disclaimer": "",
                 },
+                evidence_validator=ev_validator,
             )
-        except (LLMValidationError, LLMTransportError, _SetMismatchError) as e:
+        except (
+            LLMValidationError,
+            LLMTransportError,
+            _SetMismatchError,
+            _EvidenceValidationError,
+        ) as e:
             result.failed_batches += 1
             result.failed_batch_ids.append(f"r2.batch.{i + 1}")
+            payload: dict[str, Any] = {"batch_no": i + 1}
+            if isinstance(e, _EvidenceValidationError):
+                payload["evidence_validation_errors"] = e.errors
             yield (
                 StrategyEvent(
                     type=EventType.VALIDATION_FAILED,
                     level=EventLevel.ERROR,
                     message=f"R2 batch {i + 1} failed: {e}",
-                    payload={"batch_no": i + 1},
+                    payload=payload,
                 ),
                 None,
             )
@@ -803,6 +971,18 @@ def run_r3_debate(
         ),
         None,
     )
+    # P0-2 v1 — R3 修订阶段 evidence validator 用 R2 own_predictions 中每只
+    # candidate 在 bundle.candidates 里对应的 dict keys 作为允许字段集。
+    # R3 prompt 给 LLM 看的是 own_predictions（精简版），但 key_evidence 仍可
+    # 引用原始 bundle.candidates 中的字段名，故以 bundle 字典 keys 为准。
+    bundle_lookup = {c["candidate_id"]: c for c in bundle.candidates if "candidate_id" in c}
+    allowed_fields_r3 = {
+        c.candidate_id: _candidate_allowed_field_set(bundle_lookup.get(c.candidate_id, {}))
+        for c in own_predictions
+    }
+    ev_validator = _make_evidence_field_validator(
+        allowed_fields_r3, evidence_attr="key_evidence"
+    )
     try:
         obj, meta = _complete_with_set_check(
             llm,
@@ -817,14 +997,24 @@ def run_r3_debate(
                 "next_trade_date": bundle.next_trade_date,
                 "revision_summary": "",
             },
+            evidence_validator=ev_validator,
         )
-    except (LLMValidationError, LLMTransportError, _SetMismatchError) as e:
+    except (
+        LLMValidationError,
+        LLMTransportError,
+        _SetMismatchError,
+        _EvidenceValidationError,
+    ) as e:
         result.error = f"{type(e).__name__}: {e}"
+        fail_payload: dict[str, Any] = {}
+        if isinstance(e, _EvidenceValidationError):
+            fail_payload["evidence_validation_errors"] = e.errors
         yield (
             StrategyEvent(
                 type=EventType.VALIDATION_FAILED,
                 level=EventLevel.ERROR,
                 message=f"R3 debate failed: {e}",
+                payload=fail_payload,
             ),
             None,
         )

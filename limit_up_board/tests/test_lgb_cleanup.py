@@ -17,6 +17,7 @@ lgb_db fixtures the other LGB tests use.
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -98,13 +99,15 @@ def _seed_artifacts(db: Database, model_id: str = "20260530_1_seed") -> dict[str
         activate=True,
     )
     # Seed two audit rows so we can assert truncation later.
+    # Run_id 派生自 model_id，避免单测试内多次 seed 不同 model 撞 PK(run_id, ts_code)。
+    run_id = str(uuid.uuid5(uuid.NAMESPACE_OID, model_id))
     for ts in ("600519.SH", "000001.SZ"):
         db.execute(
             "INSERT INTO lub_lgb_predictions("
             "run_id, trade_date, ts_code, model_id, lgb_score, lgb_decile, "
             "feature_hash, feature_missing_json) VALUES (?,?,?,?,?,?,?,?)",
             (
-                "00000000-0000-0000-0000-00000000000a",
+                run_id,
                 "20260530",
                 ts,
                 model_id,

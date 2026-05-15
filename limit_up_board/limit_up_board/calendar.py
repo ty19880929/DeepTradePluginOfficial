@@ -63,3 +63,17 @@ class TradeCalendar:
         if self.is_open(date):
             return date
         return self.pretrade_date(date)
+
+    def range(self, start: str, end: str) -> list[str]:
+        """Return open trading days T with ``start <= T <= end``, in ascending order.
+
+        Empty list when ``start > end`` (caller convenience for invalid windows).
+        """
+        if start > end:
+            return []
+        mask = (
+            (self._df["cal_date"] >= start)
+            & (self._df["cal_date"] <= end)
+            & (self._df["is_open"] == 1)
+        )
+        return [str(d) for d in self._df.loc[mask, "cal_date"].tolist()]

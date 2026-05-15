@@ -61,6 +61,14 @@ def render_banners(
             parts.append(f"> 失败批次：`{', '.join(failed_batch_ids)}`（详见 `llm_calls.jsonl`）")
     if is_intraday:
         parts.append("> ⚠ **INTRADAY MODE** — 数据可能不完整，仅供盘中观察，不可与日终结果混用")
+        # P0-3 — 列出未达 close 时点不稳定 / 可能为空的字段，让用户在解读报告时
+        # 自行降低相关字段的可信度（runner 也会自动禁用 LGB —— 详见 lub_events）。
+        parts.append(
+            "> 未达 close 时下列字段可能为空 / 动态："
+            "`daily.amount`、`daily_basic.turnover_rate`、`moneyflow.*`、"
+            "`top_list`、`top_inst`、`cyq_perf`、`limit_step`；LGB 评分默认自动禁用"
+            "（如需保留请加 `--force-lgb`）。"
+        )
     return "\n".join(parts) + ("\n\n" if parts else "")
 
 
@@ -100,6 +108,11 @@ def render_summary_md(
 
     if bundle.data_unavailable:
         out.append(f"\n*data_unavailable*: `{bundle.data_unavailable}`\n")
+
+    # ----- 候选筛选 summary (P2-1: 被剔除的 TOP 3) -----
+    filter_section = _render_candidate_filter_section(bundle)
+    if filter_section:
+        out.append(filter_section)
 
     # ----- LGB score distribution (PR-3.2) -----
     lgb_section = _render_lgb_distribution_section(bundle)
@@ -376,6 +389,11 @@ def render_debate_summary_md(
     )
     if bundle.data_unavailable:
         out.append(f"\n*data_unavailable*: `{bundle.data_unavailable}`\n")
+
+    # ----- 候选筛选 summary (P2-1: 被剔除的 TOP 3) -----
+    filter_section = _render_candidate_filter_section(bundle)
+    if filter_section:
+        out.append(filter_section)
 
     # ----- LGB score distribution (PR-3.2) -----
     lgb_section = _render_lgb_distribution_section(bundle)
@@ -831,6 +849,48 @@ def _lgb_compact(c: dict[str, Any]) -> str:
         return "—"
 
 
+def _render_candidate_filter_section(bundle: Round1Bundle) -> str:
+    """P2-1 — 候选筛选 summary：before / after + 被剔除 TOP 3。
+
+    依赖 ``data._apply_market_filter`` 在 ``bundle.market_summary[
+    "candidate_filter_summary"]`` 落地的 ``dropped_top3`` 列表（每项含
+    ``ts_code / name / float_mv_yi / close_yuan / reasons``）。当 summary
+    缺失或 dropped_top3 为空时返回空字符串，不污染报告。
+    """
+    fs = bundle.market_summary.get("candidate_filter_summary") if isinstance(
+        bundle.market_summary, dict
+    ) else None
+    if not isinstance(fs, dict):
+        return ""
+    before = fs.get("before")
+    after = fs.get("after")
+    dropped_top3 = fs.get("dropped_top3") or []
+    if before is None or after is None or before == after:
+        # 没有人被剔除 → 用户无需关心，跳过整节
+        return ""
+    parts = [
+        "\n## 候选筛选\n",
+        f"- 进入筛选：{before} 只；通过筛选：{after} 只；剔除：{before - after} 只\n",
+        f"- 阈值：min_float_mv_yi={fs.get('min_float_mv_yi')}亿、"
+        f"max_float_mv_yi={fs.get('max_float_mv_yi')}亿、"
+        f"max_close_yuan={fs.get('max_close_yuan')}元（闭区间）\n",
+    ]
+    if dropped_top3:
+        parts.append("\n剔除 TOP 3（按流通市值降序）：\n")
+        parts.append("| Code | Name | float_mv_yi | close_yuan | 剔除原因 |\n")
+        parts.append("|------|------|------------:|-----------:|---------|\n")
+        for d in dropped_top3:
+            ts = d.get("ts_code") or ""
+            name = d.get("name") or "—"
+            mv = d.get("float_mv_yi")
+            cl = d.get("close_yuan")
+            reasons = ", ".join(d.get("reasons") or [])
+            mv_str = "—" if mv is None else f"{mv:.2f}"
+            cl_str = "—" if cl is None else f"{cl:.2f}"
+            parts.append(f"| `{ts}` | {name} | {mv_str} | {cl_str} | {reasons} |\n")
+    return "".join(parts)
+
+
 def _render_lgb_distribution_section(bundle: Round1Bundle) -> str:
     """Optional "本次 LGB 评分分布" small section for summary.md (PR-3.2).
 
@@ -855,7 +915,7 @@ def _render_lgb_distribution_section(bundle: Round1Bundle) -> str:
     p25 = _quantile(arr, 0.25)
     p75 = _quantile(arr, 0.75)
     parts = [
-        "\n## 本次 LGB 评分分布\n",
+        "\n## 本次 LGB 评分分布（次日最大溢价概率，0–100）\n",
         f"- n={n}  min={lo:.1f}  p25={p25:.1f}  median={med:.1f}  p75={p75:.1f}  max={hi:.1f}\n",
     ]
     # 10-point histogram (0..100) — ASCII art friendly even in plain terminals.

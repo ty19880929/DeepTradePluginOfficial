@@ -147,8 +147,9 @@ def test_no_active_model_loads_false(lgb_db: Database) -> None:
     assert scorer.load_error == "no_active_model"
     assert out["lgb_score"].isna().all()
     # diagnostics 仍写入（hash 与 missing payload 不依赖模型）
+    # scorer.py:194-206 红线：per-row hash 总是计算，便于审计 & 上游 data_unavailable 提示
     assert list(out.columns) == ["lgb_score", "feature_hash", "feature_missing_json"]
-    assert all(h == "" for h in out["feature_hash"])
+    assert all(isinstance(h, str) and len(h) == 16 for h in out["feature_hash"])
 
 
 # ---------------------------------------------------------------------------

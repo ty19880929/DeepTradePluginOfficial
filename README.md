@@ -39,11 +39,50 @@ deeptrade plugin install volume-anomaly
 pipx inject deeptrade-quant lightgbm scikit-learn
 ```
 
-或者使用 venv：
+或者使用 venv（详见下文「插件本地测试指南」）。
 
-```bash
-pip install -r limit_up_board/requirements.txt
+## 插件本地测试指南
+
+每个插件的测试都通过 `pytest` 运行（`pytest.ini::pythonpath = .` 要求**从插件子目录内执行**）。
+本仓库不直接 import `deeptrade.*` —— 测试运行时框架必须可被 import，所以先装好 `deeptrade-quant`。
+
+### 1. 安装框架与插件依赖
+
+```powershell
+# 安装框架（让 deeptrade.core.* 可被 import）
+pipx install deeptrade-quant
+
+# 装齐插件的运行 + 测试依赖（与各插件 deeptrade_plugin.yaml::dependencies 对齐）
+pip install -r limit_up_board/requirements-dev.txt
+pip install -r volume_anomaly/requirements-dev.txt
 ```
+
+> Windows 用户若用 `pipx`，可改用 `pipx inject deeptrade-quant -r limit_up_board/requirements-dev.txt`，
+> 让依赖注入到与 framework 同一个 venv，避免 import 路径混乱。
+
+### 2. 跑测试
+
+```powershell
+# limit-up-board 全套（不含 LightGBM smoke）
+cd limit_up_board ; pytest -m "not slow"
+
+# volume-anomaly 同形
+cd volume_anomaly ; pytest -m "not slow"
+
+# 跑单文件 / 单用例
+cd limit_up_board ; pytest tests/test_v04_settings.py
+cd limit_up_board ; pytest tests/test_lgb_scorer.py::TestName::test_case
+```
+
+CI（`.github/workflows/plugin-tests.yml`）以同样的命令在每个 PR / push 上执行。
+
+### 3. 常见报错
+
+| 现象 | 根因 | 处置 |
+|------|------|------|
+| `ModuleNotFoundError: deeptrade` | 框架没在当前解释器里 | `pipx install deeptrade-quant` 或在 venv 内 `pip install deeptrade-quant` |
+| `ModuleNotFoundError: pyarrow` / `lightgbm` / `sklearn` | 没装 requirements-dev.txt | 见上方步骤 1 |
+| LightGBM smoke 测试超时 | 默认 `-m "not slow"` 已跳过 | 真要跑 LightGBM 训练 smoke：`pytest -m "slow"`（需真 Tushare 凭据） |
 
 ## 仓库结构
 

@@ -1,0 +1,33 @@
+name: Plugin Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [limit_up_board, volume_anomaly]
+    name: ${{ matrix.plugin }} pytest (-m "not slow")
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install framework + plugin dev deps
+        run: |
+          # 框架（让 deeptrade.* 可被 import；插件 tests/* 直接 `from deeptrade.core.db import ...`）
+          python -m pip install --upgrade pip
+          pip install deeptrade-quant
+          # 插件 runtime + 测试依赖
+          pip install -r ${{ matrix.plugin }}/requirements-dev.txt
+
+      - name: pytest -m "not slow"
+        working-directory: ${{ matrix.plugin }}
+        run: pytest -m "not slow" -q
