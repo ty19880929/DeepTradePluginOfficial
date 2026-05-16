@@ -1,6 +1,6 @@
 plugin_id: volume-anomaly
 name: 成交量异动策略
-version: 0.9.0
+version: 0.9.1
 type: strategy
 api_version: "1"
 entrypoint: volume_anomaly.plugin:VolumeAnomalyPlugin
@@ -47,6 +47,9 @@ migrations:
   - version: "20260601_002"
     file: migrations/20260601_002_va_config.sql
     checksum: "sha256:856d7ac3508510e3376b7f15a1be413edcc1714446b00e9c19e010e6d1666ca2"
+
+# 框架 v0.4+ 会从 plugin_id 推导默认前缀（volume_anomaly_），需显式声明 va_ 以匹配实际表名。
+table_prefix: va_
 
 tables:
   - name: va_watchlist
