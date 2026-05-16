@@ -99,6 +99,15 @@ def cmd_run(
             "必须配合 --debate 使用；不指定则使用全部已配置 provider"
         ),
     ),
+    llm: str | None = typer.Option(
+        None,
+        "--llm",
+        help=(
+            "本次 run 使用的 LLM provider 名称（如 'deepseek'、'kimi'），"
+            "覆盖框架默认值；仅非辩论模式生效，与 --debate / --debate-llms 互斥。"
+            "未配置或缺 api_key 的 provider 会以 ✘ 提前退出。"
+        ),
+    ),
     no_lgb: bool = typer.Option(
         False,
         "--no-lgb",
@@ -135,6 +144,16 @@ def cmd_run(
             typer.echo("✘ --debate-llms 解析后为空")
             raise typer.Exit(2)
 
+    llm_provider: str | None = None
+    if llm is not None:
+        if debate:
+            typer.echo("✘ --llm 仅适用于非辩论模式；辩论模式请用 --debate-llms 指定子集")
+            raise typer.Exit(2)
+        llm_provider = llm.strip()
+        if not llm_provider:
+            typer.echo("✘ --llm 解析后为空")
+            raise typer.Exit(2)
+
     # P0-3 (v0.6.4) — intraday 模式下默认禁用 LGB：训练样本是日终语义（pre_close /
     # 收盘后聚合等），盘中评分等于分布偏移；用户需 `--force-lgb` 显式接受。
     intraday_auto_disable = allow_intraday and not no_lgb and not force_lgb
@@ -150,6 +169,7 @@ def cmd_run(
             moneyflow_lookback=moneyflow_lookback,
             debate=debate,
             debate_llms=debate_llms_list,
+            llm_provider=llm_provider,
             lgb_enabled=effective_lgb_enabled,
             intraday_lgb_auto_disabled=intraday_auto_disable,
         )

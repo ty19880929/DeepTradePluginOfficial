@@ -149,13 +149,15 @@ def open_worker_runtime(
     return db, rt
 
 
-def pick_llm_provider(rt: LubRuntime) -> str | None:
+def pick_llm_provider(rt: LubRuntime, override: str | None = None) -> str | None:
     """Pick which configured LLM provider to use for this run.
 
-    Returning None defers the choice to the framework default
+    ``override`` (v0.6.8+) — CLI ``--llm`` value when the user pinned a
+    provider for this run; takes precedence and is returned verbatim. When
+    None, defers the choice to the framework default
     (``LLMProviderConfig.is_default`` resolved by ``LLMManager.get_client``).
     The plugin keeps this hook so a future revision can reintroduce a
-    plugin-specific override (e.g. ``limit-up-board.default_llm``) without
-    touching the runner.
+    plugin-specific persisted default (e.g. ``limit-up-board.default_llm``)
+    without touching the runner.
     """
-    return None
+    return override

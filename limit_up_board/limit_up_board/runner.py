@@ -101,6 +101,10 @@ class RunParams:
     moneyflow_lookback: int = 5
     debate: bool = False
     debate_llms: list[str] | None = None
+    # v0.6.8 — 非辩论模式下用户用 ``--llm <name>`` 钉死本次 run 的 provider；
+    # None 表示走框架默认（``LLMManager.get_client(name=None)`` 走 is_default 行）。
+    # 与 ``debate`` 互斥，CLI 层提前校验；落到 ``lub_runs.params_json`` 用于复盘。
+    llm_provider: str | None = None
     # v0.5 LGB 开关：用户传 --no-lgb 时设为 False（一次性覆盖 LubConfig.lgb_enabled）。
     # PR-0.3 仅落字段，pipeline 接入在 PR-2.2。
     lgb_enabled: bool = True
@@ -389,7 +393,10 @@ class LubRunner:
     def _execute_single(self, run_id: str, params: RunParams) -> RunOutcome:
         from deeptrade.core import paths
 
-        provider_name = pick_llm_provider(self._rt)
+        # v0.6.8 — precondition check BEFORE _record_run_start so a bad --llm
+        # never persists a "failed" run row. Mirrors _select_debate_providers
+        # in debate mode; raises PreconditionError → cli.main → ✘ {msg}.
+        provider_name = self._validate_single_provider(params)
         self._llm = self._rt.llms.get_client(
             provider_name,
             plugin_id=self._rt.plugin_id,
@@ -403,6 +410,21 @@ class LubRunner:
         seen_validation_failed = False
         terminal_status = RunStatus.SUCCESS
         terminal_error: str | None = None
+
+        # Surface the chosen provider as the first persisted event of the run
+        # (symmetric to debate mode's "[辩论模式] 启用，参与 LLM = ..." LOG).
+        # None means we deferred to the framework default; show that verbatim
+        # so the log is unambiguous.
+        provider_display = provider_name if provider_name is not None else "(framework default)"
+        provider_event = self._rt.emit(
+            EventType.LOG,
+            f"LLM provider = {provider_display}",
+            payload={"llm_provider": provider_name},
+        )
+        self._seq += 1
+        self._persist_event(run_id, self._seq, provider_event)
+        events.append(provider_event)
+        self._dispatch_to_renderer(provider_event)
 
         try:
             for ev in self._iter_pipeline(params):
@@ -976,6 +998,31 @@ class LubRunner:
             seen_events=events,
             debate_results=provider_results,
         )
+
+    def _validate_single_provider(self, params: RunParams) -> str | None:
+        """Resolve & validate the non-debate-mode provider override.
+
+        Returns the provider name to pass to ``LLMManager.get_client`` —
+        either ``params.llm_provider`` (when the user pinned one via
+        ``--llm``) or ``None`` (defer to framework default).
+
+        Raises:
+            PreconditionError: when ``--llm`` named a provider that is not
+                in ``LLMManager.list_providers()`` (i.e. not configured or
+                missing api_key). Surface BEFORE ``_record_run_start`` so no
+                run row is persisted; cli.main renders as ``✘ {message}``.
+        """
+        override = pick_llm_provider(self._rt, params.llm_provider)
+        if override is None:
+            return None
+        available = self._rt.llms.list_providers()
+        if override not in available:
+            raise PreconditionError(
+                f"--llm 指定的 provider {override!r} 未配置或缺 api_key; "
+                f"当前可用: {available}。"
+                "请运行 `deeptrade config set-llm` 配置后重试。"
+            )
+        return override
 
     def _select_debate_providers(self, params: RunParams) -> list[str]:
         available = self._rt.llms.list_providers()
