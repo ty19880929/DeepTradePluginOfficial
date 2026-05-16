@@ -262,6 +262,10 @@ def run_analyze(
                 },
             )
         except (LLMValidationError, LLMTransportError, _SetMismatchError) as e:
+            # v0.9.3 — log full traceback to the per-run + framework log files
+            # so support copy-paste captures more than the str(e) summary that
+            # lands in the StrategyEvent.message column.
+            logger.exception("走势分析 批 %d failed", i + 1)
             result.failed_batches += 1
             # Match limit-up-board: store just the 1-based ordinal; the runner
             # prepends the phase prefix (``走势分析#3``) when building the
