@@ -225,7 +225,7 @@ def run_analyze(
         yield (
             StrategyEvent(
                 type=EventType.LLM_BATCH_STARTED,
-                message=f"analyze batch {i + 1}/{plan.n_batches}",
+                message=f"走势分析 批 {i + 1}/{plan.n_batches}",
                 payload={"batch_no": i + 1, "size": len(batch)},
             ),
             None,
@@ -263,12 +263,15 @@ def run_analyze(
             )
         except (LLMValidationError, LLMTransportError, _SetMismatchError) as e:
             result.failed_batches += 1
-            result.failed_batch_ids.append(f"analyze.batch.{i + 1}")
+            # Match limit-up-board: store just the 1-based ordinal; the runner
+            # prepends the phase prefix (``走势分析#3``) when building the
+            # report banner so the persisted id stays stage-agnostic.
+            result.failed_batch_ids.append(str(i + 1))
             yield (
                 StrategyEvent(
                     type=EventType.VALIDATION_FAILED,
                     level=EventLevel.ERROR,
-                    message=f"analyze batch {i + 1} failed: {e}",
+                    message=f"走势分析 批 {i + 1} 失败: {e}",
                     payload={"batch_no": i + 1},
                 ),
                 None,
@@ -283,7 +286,7 @@ def run_analyze(
         yield (
             StrategyEvent(
                 type=EventType.LLM_BATCH_FINISHED,
-                message=f"analyze batch {i + 1}/{plan.n_batches} ok",
+                message=f"走势分析 批 {i + 1}/{plan.n_batches} 完成",
                 payload={
                     "batch_no": i + 1,
                     "input_tokens": meta["input_tokens"],

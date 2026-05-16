@@ -1445,6 +1445,19 @@ def cmd_lgb_refresh_features(
 
 
 def main(argv: list[str]) -> int:
+    # v0.9.2 — ensure the framework's logger has handlers wired up before any
+    # ``logger.exception(...)`` runs. The framework defines ``setup_logging``
+    # (writes to stderr + rotating file ~/.deeptrade/logs/deeptrade.log) but
+    # nothing calls it; without this every traceback was going through
+    # Python's last-resort handler and getting lost behind the rich Live
+    # dashboard. Idempotent — safe to call on every dispatch.
+    try:
+        from deeptrade.core.logging_config import setup_logging  # noqa: PLC0415
+
+        setup_logging()
+    except Exception:  # noqa: BLE001 — logging setup never blocks a run
+        pass
+
     try:
         app(argv, standalone_mode=False)
         return 0

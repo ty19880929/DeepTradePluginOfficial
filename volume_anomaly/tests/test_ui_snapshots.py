@@ -121,7 +121,7 @@ def _build_u1_analyze() -> RichDashboardRenderer:
                 "lgb_enabled": True,
             },
         ),
-        _ev(EventType.STEP_STARTED, "Step 0: resolve trade date"),
+        _ev(EventType.STEP_STARTED, "Step 0: 核对交易日期"),
         _ev(
             EventType.STEP_FINISHED,
             "Step 0: T=20260512 T+1=20260513",
@@ -130,10 +130,10 @@ def _build_u1_analyze() -> RichDashboardRenderer:
                 "next_trade_date": "20260513",
             },
         ),
-        _ev(EventType.STEP_STARTED, "Step 1: data assembly"),
+        _ev(EventType.STEP_STARTED, "Step 1: 组装候选包"),
         _ev(
             EventType.STEP_FINISHED,
-            "Step 1: 35 candidates from watchlist",
+            "Step 1: 从候选池组装 35 只",
             payload={"candidates": 35},
         ),
         _ev(
@@ -143,17 +143,17 @@ def _build_u1_analyze() -> RichDashboardRenderer:
         ),
         _ev(
             EventType.LLM_BATCH_FINISHED,
-            "analyze batch 1/3 ok",
+            "走势分析 批 1/3 完成",
             payload={"batch_no": 1},
         ),
         _ev(
             EventType.LLM_BATCH_FINISHED,
-            "analyze batch 2/3 ok",
+            "走势分析 批 2/3 完成",
             payload={"batch_no": 2},
         ),
         _ev(
             EventType.LLM_BATCH_FINISHED,
-            "analyze batch 3/3 ok",
+            "走势分析 批 3/3 完成",
             payload={"batch_no": 3},
         ),
         _ev(
@@ -167,7 +167,7 @@ def _build_u1_analyze() -> RichDashboardRenderer:
         ),
         _ev(
             EventType.RESULT_PERSISTED,
-            "Report written: /tmp/run/report.md",
+            "报告已生成: /tmp/run/report.md",
             payload={"predictions": 30, "imminent_launch": 5},
         ),
     ]
@@ -176,7 +176,7 @@ def _build_u1_analyze() -> RichDashboardRenderer:
     _freeze_render_state(r)
     r._state.started_at = None
     r._state.run_id = "run-u1-deterministic"
-    r._state.plugin_version = "0.8.0"
+    r._state.plugin_version = "0.9.2"
     return r
 
 
@@ -199,7 +199,7 @@ def _build_u5_screen() -> RichDashboardRenderer:
                 "vol_ratio_5d_min": 2.0,
             },
         ),
-        _ev(EventType.STEP_STARTED, "Step 0: resolve trade date"),
+        _ev(EventType.STEP_STARTED, "Step 0: 核对交易日期"),
         _ev(
             EventType.STEP_FINISHED,
             "Step 0: T=20260512 T+1=20260513",
@@ -208,10 +208,10 @@ def _build_u5_screen() -> RichDashboardRenderer:
                 "next_trade_date": "20260513",
             },
         ),
-        _ev(EventType.DATA_SYNC_STARTED, "Step 1: screen anomalies"),
+        _ev(EventType.DATA_SYNC_STARTED, "Step 1: 异动筛选"),
         _ev(
             EventType.DATA_SYNC_FINISHED,
-            "funnel: 3210 → 3187 → 412 → 248 → 35",
+            "筛选漏斗: 3210 → 3187 → 412 → 248 → 35",
             payload={
                 "n_main_board": 3210,
                 "n_after_st_susp": 3187,
@@ -222,7 +222,7 @@ def _build_u5_screen() -> RichDashboardRenderer:
         ),
         _ev(
             EventType.RESULT_PERSISTED,
-            "screen done — 5 new, 30 updated, pool=85",
+            "异动筛选完成 — 新增 5 只，更新 30 只，候选池 85",
             payload={
                 "n_new": 5,
                 "n_updated": 30,
@@ -235,7 +235,7 @@ def _build_u5_screen() -> RichDashboardRenderer:
     _freeze_render_state(r)
     r._state.started_at = None
     r._state.run_id = "run-u5-deterministic"
-    r._state.plugin_version = "0.8.0"
+    r._state.plugin_version = "0.9.2"
     return r
 
 

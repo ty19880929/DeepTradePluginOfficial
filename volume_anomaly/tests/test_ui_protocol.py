@@ -195,8 +195,8 @@ class TestLegacyStreamRenderer:
         out = _Buffer()
         monkeypatch.setattr("sys.stdout", out)
         r = LegacyStreamRenderer()
-        r.on_event(_ev(EventType.STEP_STARTED, "Step 0: resolve trade date"))
-        assert out.text == "  ✔ [step.started] Step 0: resolve trade date\n"
+        r.on_event(_ev(EventType.STEP_STARTED, "Step 0: 核对交易日期"))
+        assert out.text == "  ✔ [step.started] Step 0: 核对交易日期\n"
 
     def test_warn_event_uses_warn_glyph(
         self, monkeypatch: pytest.MonkeyPatch
@@ -222,12 +222,12 @@ class TestLegacyStreamRenderer:
         r.on_event(
             _ev(
                 EventType.VALIDATION_FAILED,
-                "analyze batch 2 failed",
+                "走势分析 批 2 失败",
                 level=EventLevel.ERROR,
             )
         )
         assert (
-            out.text == "  ✘ [validation.failed] analyze batch 2 failed\n"
+            out.text == "  ✘ [validation.failed] 走势分析 批 2 失败\n"
         )
 
     def test_step2_prefix_pipeline_alignment(
@@ -339,14 +339,14 @@ class TestDispatchToRenderer:
         monkeypatch.setattr("sys.stdout", out)
         raising = _RaisingRenderer(raise_on_call=1)
         runner = _make_runner_with_renderer(raising)
-        first = _ev(EventType.STEP_STARTED, "Step 0: resolve trade date")
+        first = _ev(EventType.STEP_STARTED, "Step 0: 核对交易日期")
         runner._dispatch_to_renderer(first)
         # Renderer was closed on fallback and replaced.
         assert raising.closed is True
         assert isinstance(runner._renderer, LegacyStreamRenderer)
         # The crashing event was re-emitted by legacy so the user sees it.
         assert (
-            out.text == "  ✔ [step.started] Step 0: resolve trade date\n"
+            out.text == "  ✔ [step.started] Step 0: 核对交易日期\n"
         )
         # Subsequent events keep going through legacy.
         second = _ev(EventType.LOG, "after the crash")

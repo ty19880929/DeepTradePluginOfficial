@@ -78,7 +78,7 @@ class TestAnalyzeMultiBatchSuccess:
         r = _new_renderer(mode="analyze")
         events = [
             _ev(EventType.LOG, "运行配置: lgb=on", payload={"lgb_enabled": True}),
-            _ev(EventType.STEP_STARTED, "Step 0: resolve trade date"),
+            _ev(EventType.STEP_STARTED, "Step 0: 核对交易日期"),
             _ev(
                 EventType.STEP_FINISHED,
                 "Step 0: T=20260512 T+1=20260513",
@@ -87,10 +87,10 @@ class TestAnalyzeMultiBatchSuccess:
                     "next_trade_date": "20260513",
                 },
             ),
-            _ev(EventType.STEP_STARTED, "Step 1: data assembly"),
+            _ev(EventType.STEP_STARTED, "Step 1: 组装候选包"),
             _ev(
                 EventType.STEP_FINISHED,
-                "Step 1: 35 candidates from watchlist",
+                "Step 1: 从候选池组装 35 只",
                 payload={"candidates": 35},
             ),
             _ev(
@@ -104,22 +104,22 @@ class TestAnalyzeMultiBatchSuccess:
             ),
             _ev(
                 EventType.LLM_BATCH_STARTED,
-                "analyze batch 1/3",
+                "走势分析 批 1/3",
                 payload={"batch_no": 1, "size": 15},
             ),
             _ev(
                 EventType.LLM_BATCH_FINISHED,
-                "analyze batch 1/3 ok",
+                "走势分析 批 1/3 完成",
                 payload={"batch_no": 1},
             ),
             _ev(
                 EventType.LLM_BATCH_FINISHED,
-                "analyze batch 2/3 ok",
+                "走势分析 批 2/3 完成",
                 payload={"batch_no": 2},
             ),
             _ev(
                 EventType.LLM_BATCH_FINISHED,
-                "analyze batch 3/3 ok",
+                "走势分析 批 3/3 完成",
                 payload={"batch_no": 3},
             ),
             _ev(
@@ -133,7 +133,7 @@ class TestAnalyzeMultiBatchSuccess:
             ),
             _ev(
                 EventType.RESULT_PERSISTED,
-                "Report written: /tmp/run/report.md",
+                "报告已生成: /tmp/run/report.md",
                 payload={"predictions": 30},
             ),
         ]
@@ -173,18 +173,18 @@ class TestAnalyzeValidationFailed:
             ),
             _ev(
                 EventType.LLM_BATCH_FINISHED,
-                "analyze batch 1/3 ok",
+                "走势分析 批 1/3 完成",
                 payload={"batch_no": 1},
             ),
             _ev(
                 EventType.VALIDATION_FAILED,
-                "analyze batch 2 failed: timeout",
+                "走势分析 批 2 失败: timeout",
                 level=EventLevel.ERROR,
                 payload={"batch_no": 2},
             ),
             _ev(
                 EventType.LLM_BATCH_FINISHED,
-                "analyze batch 3/3 ok",
+                "走势分析 批 3/3 完成",
                 payload={"batch_no": 3},
             ),
             _ev(
@@ -217,21 +217,21 @@ class TestAnalyzeEmptyWatchlist:
         candidates, never starts Step 2, jumps to RESULT_PERSISTED."""
         r = _new_renderer(mode="analyze")
         for ev in (
-            _ev(EventType.STEP_STARTED, "Step 0: resolve trade date"),
+            _ev(EventType.STEP_STARTED, "Step 0: 核对交易日期"),
             _ev(
                 EventType.STEP_FINISHED,
                 "Step 0: T=20260512 T+1=20260513",
                 payload={"trade_date": "20260512", "next_trade_date": "20260513"},
             ),
-            _ev(EventType.STEP_STARTED, "Step 1: data assembly"),
+            _ev(EventType.STEP_STARTED, "Step 1: 组装候选包"),
             _ev(
                 EventType.STEP_FINISHED,
-                "Step 1: 0 candidates from watchlist",
+                "Step 1: 从候选池组装 0 只",
                 payload={"candidates": 0},
             ),
             _ev(
                 EventType.RESULT_PERSISTED,
-                "empty analyze report (empty watchlist)",
+                "无候选股，已生成空报告（empty watchlist）",
                 payload={"reason": "empty watchlist"},
             ),
         ):
@@ -260,7 +260,7 @@ class TestCancelledOutcome:
             ),
             _ev(
                 EventType.LLM_BATCH_FINISHED,
-                "analyze batch 1/3 ok",
+                "走势分析 批 1/3 完成",
                 payload={"batch_no": 1},
             ),
         ):
@@ -284,16 +284,16 @@ class TestScreenFunnel:
     def test_funnel_populated_from_payload(self) -> None:
         r = _new_renderer(mode="screen")
         for ev in (
-            _ev(EventType.STEP_STARTED, "Step 0: resolve trade date"),
+            _ev(EventType.STEP_STARTED, "Step 0: 核对交易日期"),
             _ev(
                 EventType.STEP_FINISHED,
                 "Step 0: T=20260512 T+1=20260513",
                 payload={"trade_date": "20260512", "next_trade_date": "20260513"},
             ),
-            _ev(EventType.DATA_SYNC_STARTED, "Step 1: screen anomalies"),
+            _ev(EventType.DATA_SYNC_STARTED, "Step 1: 异动筛选"),
             _ev(
                 EventType.DATA_SYNC_FINISHED,
-                "funnel: 3210 → 3187 → 412 → 248 → 35",
+                "筛选漏斗: 3210 → 3187 → 412 → 248 → 35",
                 payload={
                     "n_main_board": 3210,
                     "n_after_st_susp": 3187,
@@ -304,7 +304,7 @@ class TestScreenFunnel:
             ),
             _ev(
                 EventType.RESULT_PERSISTED,
-                "screen done — 5 new, 30 updated, pool=85",
+                "异动筛选完成 — 新增 5 只，更新 30 只，候选池 85",
                 payload={"n_new": 5, "n_updated": 30, "watchlist_total": 85},
             ),
         ):
@@ -363,7 +363,7 @@ class TestTushareFallbackBadge:
 class TestCompactWidth:
     def test_no_panel_borders_at_70_cols(self) -> None:
         r = _new_renderer(mode="analyze")
-        r.on_event(_ev(EventType.STEP_STARTED, "Step 0: resolve trade date"))
+        r.on_event(_ev(EventType.STEP_STARTED, "Step 0: 核对交易日期"))
         text = _render_state_text(r._state, width=70)
         # Rich panel top borders look like `╭───`; compact mode omits them.
         assert "╭" not in text

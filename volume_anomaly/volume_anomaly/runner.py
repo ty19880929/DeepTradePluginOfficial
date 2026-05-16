@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import logging
+import traceback
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, time
+from pathlib import Path
 from typing import Any
 
 from deeptrade.core.run_status import RunStatus
@@ -125,6 +127,110 @@ class RunOutcome:
     seen_events: list[StrategyEvent]
 
 
+# ---------------------------------------------------------------------------
+# Per-run plugin-local log file (mirrors limit-up-board v0.6.5)
+# ---------------------------------------------------------------------------
+
+
+def _plugin_logs_dir() -> Path:
+    """Return ``<framework data root>/volume_anomaly/logs/`` (mkdir on use).
+
+    Sits alongside the LGB models / datasets / checkpoints dirs so all
+    per-plugin state lives under one tree. We don't reuse the framework's
+    ``~/.deeptrade/logs/deeptrade.log`` because that's a shared rotating sink;
+    the per-run file here is keyed by ``run_id`` so support copy-paste is easy.
+    """
+    from deeptrade.core import paths as _fw_paths  # noqa: PLC0415
+
+    p = _fw_paths.home_dir() / "volume_anomaly" / "logs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _attach_run_logfile(
+    run_id: str,
+) -> tuple[logging.Handler, Path] | tuple[None, None]:
+    """Attach a per-run FileHandler to the root logger.
+
+    Returns ``(handler, log_path)`` on success; ``(None, None)`` if the file
+    can't be opened (read-only home, encoding issues, …). The caller MUST
+    detach in a ``finally`` via :func:`_detach_run_logfile`; otherwise every
+    run leaks a file descriptor + an in-memory handler that catches unrelated
+    log records from subsequent runs.
+    """
+    try:
+        log_path = _plugin_logs_dir() / f"run-{run_id}.log"
+        handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname).1s] %(name)s: %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        # Tag so _detach_run_logfile can identify ours unambiguously even
+        # if other code touches the root logger handlers list.
+        handler._va_run_id = run_id  # type: ignore[attr-defined]
+        root = logging.getLogger()
+        root.addHandler(handler)
+        # If the root logger's level is higher than INFO (default WARNING),
+        # bump it down so DEBUG / INFO records from this plugin reach the
+        # file. We restore on detach.
+        root._va_prev_level = root.level  # type: ignore[attr-defined]
+        if root.level == logging.NOTSET or root.level > logging.INFO:
+            root.setLevel(logging.INFO)
+        return handler, log_path
+    except Exception:  # noqa: BLE001 — never block a run because logging failed
+        logger.warning(
+            "failed to attach per-run log file for %s", run_id, exc_info=True
+        )
+        return None, None
+
+
+def _detach_run_logfile(handler: logging.Handler | None) -> None:
+    if handler is None:
+        return
+    root = logging.getLogger()
+    try:
+        root.removeHandler(handler)
+    except ValueError:
+        pass
+    prev = getattr(root, "_va_prev_level", None)
+    if isinstance(prev, int):
+        root.setLevel(prev)
+        try:
+            delattr(root, "_va_prev_level")
+        except AttributeError:
+            pass
+    try:
+        handler.close()
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
+
+
+def _format_traceback(e: BaseException, *, limit: int = 12) -> list[str]:
+    """Render an exception's traceback as a list of stripped lines.
+
+    Used by the runner to feed each line into the renderer as a separate LOG
+    ERROR event, so the dashboard's log panel can show the stack frame-by-frame
+    instead of one wrapped blob. ``limit`` caps the number of stack frames to
+    keep the dashboard from being flooded by a deep recursion.
+    """
+    tb_text = "".join(
+        traceback.format_exception(type(e), e, e.__traceback__)
+    )
+    raw_lines = tb_text.splitlines()
+    if len(raw_lines) > limit * 2:
+        head = raw_lines[:limit]
+        tail = raw_lines[-limit:]
+        return (
+            head
+            + [f"... ({len(raw_lines) - 2 * limit} more lines elided) ..."]
+            + tail
+        )
+    return raw_lines
+
+
 class VaRunner:
     def __init__(
         self, rt: VaRuntime, *, renderer: EventRenderer | None = None
@@ -138,6 +244,11 @@ class VaRunner:
         # close); see _dispatch_to_renderer for the contract-isolation
         # wrapper (Plan §3.6.1).
         self._renderer: EventRenderer = renderer or NullRenderer()
+        # Path of the per-run plugin-local log file (set in _drive()).
+        # ``None`` outside of a run, or when attaching the FileHandler failed
+        # (read-only home etc.); that failure mode is observable in the
+        # framework's ~/.deeptrade/logs/deeptrade.log only.
+        self._log_file_path: Path | None = None
 
     # ----- entry points --------------------------------------------------
 
@@ -179,6 +290,15 @@ class VaRunner:
         terminal_status = RunStatus.SUCCESS
         terminal_error: str | None = None
 
+        # v0.9.2 — attach a per-run plugin-local FileHandler so any
+        # ``logger.exception(...)`` traceback (the bottom-of-_drive catch
+        # block, scorer warmup failures, etc.) lands on disk. The framework's
+        # shared ~/.deeptrade/logs/deeptrade.log gets the same record from the
+        # framework-level StreamHandler+RotatingFileHandler (when
+        # ``setup_logging()`` has been called by ``cli.main``), so this
+        # per-run file is for support copy-paste rather than primary storage.
+        log_handler, self._log_file_path = _attach_run_logfile(run_id)
+
         # v0.8 — renderer lifecycle. on_run_start is called once before any
         # event; the finally block guarantees on_run_finish + close even on
         # KeyboardInterrupt or unhandled exception (Plan §3.1, §3.6). The
@@ -195,6 +315,25 @@ class VaRunner:
         try:
             try:
                 seq = 0
+                # Surface the log file path right at the top of the run so
+                # users can find it before anything goes wrong (dashboard log
+                # panel / legacy stream both pick this up). Suppressed for
+                # forced-legacy paths (prune / evaluate) to keep their stdout
+                # byte-identical to v0.7.x.
+                if (
+                    self._log_file_path is not None
+                    and not isinstance(self._renderer, LegacyStreamRenderer)
+                ):
+                    log_ev = StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.INFO,
+                        message=f"运行日志: {self._log_file_path}",
+                        payload={"log_file": str(self._log_file_path)},
+                    )
+                    seq += 1
+                    self._persist_event(run_id, seq, log_ev)
+                    events.append(log_ev)
+                    self._dispatch_to_renderer(log_ev)
                 # Settings LOG — emit once before any pipeline event so the
                 # dashboard's ConfigSummary is populated by the time stages
                 # start arriving. Restricted to screen / analyze modes (Plan
@@ -224,8 +363,9 @@ class VaRunner:
                 terminal_error = "KeyboardInterrupt"
             except Exception as e:  # noqa: BLE001
                 terminal_status = RunStatus.FAILED
-                terminal_error = f"{type(e).__name__}: {e}"
-                logger.exception("volume-anomaly %s run %s raised", mode, run_id)
+                terminal_error = self._handle_runtime_exception(
+                    e, run_id, mode
+                )
 
             if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
                 terminal_status = RunStatus.PARTIAL_FAILED
@@ -238,7 +378,67 @@ class VaRunner:
                 self._renderer.on_run_finish(outcome)
             finally:
                 self._renderer.close()
+                _detach_run_logfile(log_handler)
         return outcome
+
+    # ----- error surfacing ----------------------------------------------
+
+    def _handle_runtime_exception(
+        self, e: BaseException, run_id: str, mode: str
+    ) -> str:
+        """Format a runtime exception for the outcome, surface it to the user.
+
+        v0.9.2 — previously ``_drive`` only set ``terminal_error = "Exc: msg"``
+        and called ``logger.exception``. With the rich dashboard owning stdout
+        (and Python's last-resort log handler going to stderr), tracebacks
+        frequently never reached the user. This helper:
+
+          1. emits each traceback line as a ``LOG ERROR`` event → the active
+             renderer's log panel surfaces them in order;
+          2. appends a single LOG event pointing at the per-run log file so
+             users have a copy-pasteable path even when the dashboard scrolls;
+          3. delegates to ``logger.exception`` so the FileHandler attached by
+             :func:`_attach_run_logfile` records the full traceback on disk.
+        """
+        summary = f"{type(e).__name__}: {e}"
+        logger.exception("volume-anomaly %s run %s raised", mode, run_id)
+
+        # Feed each traceback line individually so the dashboard's log ring
+        # buffer captures the stack frame-by-frame (the buffer's maxlen was
+        # bumped to 12 in v0.9.2 to make room for this).
+        try:
+            for line in _format_traceback(e):
+                if not line.strip():
+                    continue
+                self._dispatch_to_renderer(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.ERROR,
+                        message=line,
+                    )
+                )
+        except Exception:  # noqa: BLE001 — never let surfacing the error fail the run
+            logger.warning(
+                "surfacing traceback to renderer failed", exc_info=True
+            )
+
+        # Point the user at the log file (banner / log panel both pick this
+        # up). If FileHandler attach failed earlier, ``_log_file_path`` is
+        # None and we omit the hint rather than print a misleading path.
+        if self._log_file_path is not None:
+            try:
+                self._dispatch_to_renderer(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.ERROR,
+                        message=f"完整 traceback 见 {self._log_file_path}",
+                        payload={"log_file": str(self._log_file_path)},
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return f"{summary}  (完整 traceback 见 {self._log_file_path})"
+        return summary
 
     # ----- screen --------------------------------------------------------
 
@@ -249,7 +449,7 @@ class VaRunner:
         )
         cfg = rt.config.get_app_config()
 
-        yield rt.emit(EventType.STEP_STARTED, "Step 0: resolve trade date")
+        yield rt.emit(EventType.STEP_STARTED, "Step 0: 核对交易日期")
         cal_df = rt.tushare.call("trade_cal")
         cal = TradeCalendar(cal_df)
         T, T1 = resolve_trade_date(
@@ -266,7 +466,7 @@ class VaRunner:
         )
 
         rules = ScreenRules.from_dict(params.screen_rules)
-        yield rt.emit(EventType.DATA_SYNC_STARTED, "Step 1: screen anomalies")
+        yield rt.emit(EventType.DATA_SYNC_STARTED, "Step 1: 异动筛选")
         try:
             result: ScreenResult = screen_anomalies(
                 tushare=rt.tushare,
@@ -277,13 +477,15 @@ class VaRunner:
             )
         except TushareUnauthorizedError as e:
             yield rt.emit(
-                EventType.LOG, f"required tushare api unauthorized: {e}", level=EventLevel.ERROR
+                EventType.LOG,
+                f"tushare 接口未授权: {e}",
+                level=EventLevel.ERROR,
             )
             raise
         yield from self._drain_pending()
         yield rt.emit(
             EventType.DATA_SYNC_FINISHED,
-            f"funnel: {result.n_main_board} → {result.n_after_st_susp} → "
+            f"筛选漏斗: {result.n_main_board} → {result.n_after_st_susp} → "
             f"{result.n_after_t_day_rules} → {result.n_after_turnover} → "
             f"{result.n_after_vol_rules}",
             payload={
@@ -312,7 +514,7 @@ class VaRunner:
         export_llm_calls(rt.run_id, rt.db)
         yield rt.emit(
             EventType.RESULT_PERSISTED,
-            f"screen done — {n_new} new, {n_updated} updated, pool={watchlist_total}",
+            f"异动筛选完成 — 新增 {n_new} 只，更新 {n_updated} 只，候选池 {watchlist_total}",
             payload={
                 "report_dir": str(report_path),
                 "n_new": n_new,
@@ -357,13 +559,13 @@ class VaRunner:
             if rt.lgb_scorer.load_error and not rt.lgb_scorer.loaded:
                 yield rt.emit(
                     EventType.LOG,
-                    f"lgb_model unavailable: {rt.lgb_scorer.load_error}",
+                    f"lgb 模型不可用: {rt.lgb_scorer.load_error}",
                     level=EventLevel.WARN,
                 )
         else:
             rt.lgb_scorer = None
 
-        yield rt.emit(EventType.STEP_STARTED, "Step 0: resolve trade date")
+        yield rt.emit(EventType.STEP_STARTED, "Step 0: 核对交易日期")
         cal_df = rt.tushare.call("trade_cal")
         cal = TradeCalendar(cal_df)
         T, T1 = resolve_trade_date(
@@ -379,7 +581,7 @@ class VaRunner:
             payload={"trade_date": T, "next_trade_date": T1},
         )
 
-        yield rt.emit(EventType.STEP_STARTED, "Step 1: data assembly")
+        yield rt.emit(EventType.STEP_STARTED, "Step 1: 组装候选包")
         try:
             bundle: AnalyzeBundle = collect_analyze_bundle(
                 tushare=rt.tushare,
@@ -392,7 +594,9 @@ class VaRunner:
             )
         except TushareUnauthorizedError as e:
             yield rt.emit(
-                EventType.LOG, f"required tushare api unauthorized: {e}", level=EventLevel.ERROR
+                EventType.LOG,
+                f"tushare 接口未授权: {e}",
+                level=EventLevel.ERROR,
             )
             raise
         yield from self._drain_pending()
@@ -408,7 +612,7 @@ class VaRunner:
                 break
         yield rt.emit(
             EventType.STEP_FINISHED,
-            f"Step 1: {len(bundle.candidates)} candidates from watchlist",
+            f"Step 1: 从候选池组装 {len(bundle.candidates)} 只",
             payload={
                 "candidates": len(bundle.candidates),
                 "data_unavailable": bundle.data_unavailable,
@@ -451,7 +655,14 @@ class VaRunner:
             terminal_status = RunStatus.PARTIAL_FAILED
 
         _write_stage_results(rt, "analyze", predictions, bundle)
-        failed_batches = list(analyze_result.failed_batch_ids) if analyze_result else []
+        # v0.9.2 — pipeline now stores batch IDs as bare ordinals (``"3"``).
+        # Prepend the phase tag here so the report banner reads
+        # ``失败批次：走势分析#3, 走势分析#5`` rather than ``analyze.batch.3``.
+        failed_batches = (
+            [f"走势分析#{b}" for b in analyze_result.failed_batch_ids]
+            if analyze_result
+            else []
+        )
 
         report_path = write_analyze_report(
             rt.run_id,
@@ -468,7 +679,7 @@ class VaRunner:
         n_imminent = sum(1 for c in predictions if c.prediction == "imminent_launch")
         yield rt.emit(
             EventType.RESULT_PERSISTED,
-            f"Report written: {report_path}",
+            f"报告已生成: {report_path}",
             payload={
                 "report_dir": str(report_path),
                 "predictions": len(predictions),
@@ -492,7 +703,7 @@ class VaRunner:
         export_llm_calls(rt.run_id, rt.db)
         yield rt.emit(
             EventType.RESULT_PERSISTED,
-            f"empty analyze report ({reason})",
+            f"无候选股，已生成空报告（{reason}）",
             payload={"report_dir": str(report_path), "reason": reason},
         )
 
@@ -508,7 +719,7 @@ class VaRunner:
         if params.days < 0:
             raise ValueError(f"days must be ≥ 0, got {params.days}")
 
-        yield rt.emit(EventType.STEP_STARTED, "Step 0: resolve today")
+        yield rt.emit(EventType.STEP_STARTED, "Step 0: 核对当前交易日")
         cal_df = rt.tushare.call("trade_cal")
         cal = TradeCalendar(cal_df)
         today, _ = resolve_trade_date(
@@ -523,12 +734,12 @@ class VaRunner:
         )
 
         before_total = int(rt.db.fetchone("SELECT COUNT(*) FROM va_watchlist")[0])
-        yield rt.emit(EventType.STEP_STARTED, "Step 1: prune watchlist")
+        yield rt.emit(EventType.STEP_STARTED, "Step 1: 候选池清理")
         pruned = prune_watchlist(rt.db, min_tracked_calendar_days=params.days, today=today)
         remaining = int(rt.db.fetchone("SELECT COUNT(*) FROM va_watchlist")[0])
         yield rt.emit(
             EventType.STEP_FINISHED,
-            f"pruned {len(pruned)}; remaining {remaining}",
+            f"已淘汰 {len(pruned)} 只；剩余 {remaining} 只",
             payload={
                 "pruned": len(pruned),
                 "before_total": before_total,
@@ -548,7 +759,7 @@ class VaRunner:
         export_llm_calls(rt.run_id, rt.db)
         yield rt.emit(
             EventType.RESULT_PERSISTED,
-            f"prune done — removed {len(pruned)} / remaining {remaining}",
+            f"候选池清理完成 — 淘汰 {len(pruned)} 只 / 剩余 {remaining} 只",
             payload={
                 "report_dir": str(report_path),
                 "pruned": len(pruned),
@@ -565,7 +776,7 @@ class VaRunner:
         )
         cfg = rt.config.get_app_config()
 
-        yield rt.emit(EventType.STEP_STARTED, "Step 0: resolve today")
+        yield rt.emit(EventType.STEP_STARTED, "Step 0: 核对当前交易日")
         cal_df = rt.tushare.call("trade_cal")
         cal = TradeCalendar(cal_df)
         today, _ = resolve_trade_date(
@@ -593,9 +804,9 @@ class VaRunner:
         targets = [pair for pair in anomaly_pairs if pair not in completed]
         yield rt.emit(
             EventType.STEP_FINISHED,
-            f"Step 1: {len(targets)} target hits "
-            f"({len(anomaly_pairs)} total within lookback, "
-            f"{len(anomaly_pairs) - len(targets)} already complete)",
+            f"Step 1: 待评估 {len(targets)} 条 "
+            f"(回看窗口共 {len(anomaly_pairs)} 条，"
+            f"已完成 {len(anomaly_pairs) - len(targets)} 条)",
             payload={
                 "targets": len(targets),
                 "total_in_lookback": len(anomaly_pairs),
@@ -642,7 +853,7 @@ class VaRunner:
 
         yield rt.emit(
             EventType.STEP_FINISHED,
-            f"Step 2: fetched daily for {n_fetched}/{len(all_dates_to_fetch)} unique dates",
+            f"Step 2: 已抓取 {n_fetched}/{len(all_dates_to_fetch)} 个交易日的日线",
             payload={
                 "dates_fetched": n_fetched,
                 "dates_planned": len(all_dates_to_fetch),
@@ -726,8 +937,8 @@ class VaRunner:
         export_llm_calls(rt.run_id, rt.db)
         yield rt.emit(
             EventType.RESULT_PERSISTED,
-            f"evaluate done — complete={n_complete}, partial={n_partial}, "
-            f"pending={n_pending}",
+            f"效果评估完成 — 完成 {n_complete} 条，部分 {n_partial} 条，"
+            f"待定 {n_pending} 条",
             payload={
                 "report_dir": str(report_path),
                 "n_complete": n_complete,
@@ -758,7 +969,7 @@ class VaRunner:
 
         yield rt.emit(
             EventType.STEP_STARTED,
-            f"Step 0: backfill window {params.start_date}..{params.end_date}",
+            f"Step 0: 回填窗口 {params.start_date}..{params.end_date}",
             payload={"start": params.start_date, "end": params.end_date},
         )
         cal_df = rt.tushare.call("trade_cal")
@@ -766,7 +977,7 @@ class VaRunner:
         open_dates = cal.open_dates_in_range(params.start_date, params.end_date)
         yield rt.emit(
             EventType.STEP_FINISHED,
-            f"Step 0: {len(open_dates)} open trade dates in window",
+            f"Step 0: 窗口内 {len(open_dates)} 个交易日",
             payload={"n_open_dates": len(open_dates)},
         )
 
@@ -792,8 +1003,7 @@ class VaRunner:
                 n_skipped += 1
                 yield rt.emit(
                     EventType.LOG,
-                    f"[{i}/{len(open_dates)}] {T}: skipped (rows exist; "
-                    f"use --overwrite to re-screen)",
+                    f"[{i}/{len(open_dates)}] {T}: 已有数据，跳过（如需重做请加 --overwrite）",
                     payload={"trade_date": T, "skipped": True},
                 )
                 continue
@@ -815,7 +1025,7 @@ class VaRunner:
                 )
                 yield rt.emit(
                     EventType.LOG,
-                    f"[{i}/{len(open_dates)}] {T}: failed ({type(e).__name__}: {e})",
+                    f"[{i}/{len(open_dates)}] {T}: 失败 ({type(e).__name__}: {e})",
                     level=EventLevel.WARN,
                     payload={"trade_date": T, "error": str(e)},
                 )
@@ -833,8 +1043,8 @@ class VaRunner:
             n_total_hits += len(result.hits)
             yield rt.emit(
                 EventType.STEP_FINISHED,
-                f"[{i}/{len(open_dates)}] {T}: {len(result.hits)} hits "
-                f"(funnel {result.n_main_board}→{result.n_after_st_susp}→"
+                f"[{i}/{len(open_dates)}] {T}: {len(result.hits)} 命中 "
+                f"(漏斗 {result.n_main_board}→{result.n_after_st_susp}→"
                 f"{result.n_after_t_day_rules}→{result.n_after_turnover}→"
                 f"{result.n_after_vol_rules})",
                 payload={
@@ -855,9 +1065,9 @@ class VaRunner:
         export_llm_calls(rt.run_id, rt.db)
         yield rt.emit(
             EventType.RESULT_PERSISTED,
-            f"backfill done — processed={n_done}, skipped={n_skipped}, "
-            f"failed={n_failed}, hits_added={n_total_hits}, "
-            f"history_total={history_total}",
+            f"历史回填完成 — 已处理 {n_done} 天，跳过 {n_skipped} 天，"
+            f"失败 {n_failed} 天，新增 {n_total_hits} 条，"
+            f"累计 {history_total} 条",
             payload={
                 "n_open_dates": len(open_dates),
                 "n_processed": n_done,
