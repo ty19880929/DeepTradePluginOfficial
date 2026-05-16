@@ -1,0 +1,66 @@
+name: Sync registry latest_version on tag push
+
+on:
+  push:
+    tags:
+      - '*/v*'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve plugin_id and tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          PLUGIN_ID="${TAG%%/*}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "plugin_id=$PLUGIN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Update registry/index.json
+        env:
+          PLUGIN_ID: ${{ steps.meta.outputs.plugin_id }}
+          NEW_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, sys
+          pid = os.environ["PLUGIN_ID"]
+          new_tag = os.environ["NEW_TAG"]
+          p = pathlib.Path("registry/index.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          entries = data.get("plugins", {})
+          if pid not in entries:
+              print(f"::notice::plugin_id {pid!r} not in registry, skipping")
+              sys.exit(0)
+          old = entries[pid].get("latest_version")
+          if old == new_tag:
+              print(f"::notice::latest_version already {new_tag}, no change")
+              sys.exit(0)
+          entries[pid]["latest_version"] = new_tag
+          p.write_text(
+              json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          print(f"updated {pid}: {old} -> {new_tag}")
+          PY
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet registry/index.json; then
+            echo "no changes to commit"
+            exit 0
+          fi
+          git add registry/index.json
+          git commit -m "registry: bump ${{ steps.meta.outputs.plugin_id }} latest_version -> ${{ steps.meta.outputs.tag }}"
+          git push origin main

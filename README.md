@@ -16,15 +16,17 @@
 ## 安装
 
 ```bash
-# 先安装框架
+# 先安装框架（推荐 v0.8+，走 CDN 路径、零 GitHub API 调用，免限流）
 pipx install deeptrade-quant
+# 已装老版本的用户升级：
+# uv tool install --upgrade deeptrade-quant   # 或 pipx upgrade deeptrade-quant
 
 # 通过短名安装插件（框架会自动查询本仓库的 registry/index.json）
 deeptrade plugin install limit-up-board
 deeptrade plugin install volume-anomaly
 ```
 
-框架会按 `registry/index.json` 中的 `repo` 与 `tag_prefix`，调用 GitHub Releases API 解析最新匹配的 tag，再从对应 `subdir` 拉取插件源码与迁移脚本。
+框架 v0.8 起从 `registry/index.json` 直接读取每条 entry 的 `latest_version` 字段，并通过 `codeload.github.com` CDN 拉取对应 tag 的 tarball —— 全程不打 `api.github.com`，不再受 GitHub 未认证请求 60/h 的限流约束。框架 ≤ v0.7 仍会回落到 GitHub Releases API 解析，未知字段会被忽略，注册表向后兼容。
 
 ### 插件可选依赖
 
@@ -95,7 +97,8 @@ DeepTradePluginOfficial/
 │   └── check_release.py        # tag 推送时校验 yaml.version 与 tag 版本一致
 ├── .github/workflows/
 │   ├── registry-check.yml      # PR / push 到 main 触发 registry 校验
-│   └── plugin-release.yml      # 推送 `*/v*` tag 触发版本校验并自动创建 GitHub Release
+│   ├── plugin-release.yml      # 推送 `*/v*` tag 触发版本校验并自动创建 GitHub Release
+│   └── registry-sync.yml       # 推送 `*/v*` tag 触发，自动把 latest_version 回填到 index.json
 ├── limit_up_board/
 │   ├── deeptrade_plugin.yaml   # 插件清单（permissions / migrations / tables）
 │   ├── migrations/             # SQL 迁移脚本（带 sha256 checksum）
@@ -117,8 +120,9 @@ DeepTradePluginOfficial/
 1. 在对应插件目录修改代码并更新 `deeptrade_plugin.yaml` 中的 `version`
 2. 合入 main 后，推送匹配的 tag（如 `git tag limit-up-board/v0.4.1 && git push origin limit-up-board/v0.4.1`）
 3. `plugin-release.yml` 工作流会调用 `tools/check_release.py` 验证 tag 版本与 yaml 一致，校验通过后自动创建 GitHub Release
+4. `registry-sync.yml` 工作流并行触发，把 `registry/index.json` 里该插件的 `latest_version` 自动回填为新 tag，并以 `github-actions[bot]` 身份 push 回 main
 
-框架 CLI 在安装时会通过 GitHub Releases API 解析 `tag_prefix` 下最新版本，因此**未发布 Release 的 tag 不会被框架使用**。
+框架 ≤ v0.7 安装时通过 GitHub Releases API 解析 `tag_prefix` 下最新版本，因此**未发布 Release 的 tag 不会被框架使用**；框架 ≥ v0.8 直接读取 `latest_version`，所以 §4 自动回填必须成功（失败可手工 PR 修复 `registry/index.json`）。
 
 ## CI 校验
 
@@ -127,6 +131,7 @@ DeepTradePluginOfficial/
 - `registry/index.json` schema 合法（`schema_version=1`）
 - 每个条目的必填字段齐全，`type` 仅允许 `strategy` / `channel`
 - `tag_prefix` 必须以 `/` 结尾，`repo` 必须为 `owner/repo` 形式
+- `latest_version` 必须以 `tag_prefix` 开头（即完整 tag 形如 `limit-up-board/v0.6.4`），框架 ≥ v0.8 据此跳过 GitHub Releases API
 - 每个 `subdir/deeptrade_plugin.yaml` 与注册表项的 `plugin_id` / `name` / `type` 一致
 - 每条迁移文件的 `sha256` checksum 与 yaml 中声明的一致（与框架 `_verify_migration_checksum` 同款逻辑）
 

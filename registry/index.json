@@ -8,7 +8,8 @@
       "repo": "ty19880929/DeepTradePluginOfficial",
       "subdir": "limit_up_board",
       "tag_prefix": "limit-up-board/",
-      "min_framework_version": "0.4.2"
+      "min_framework_version": "0.4.2",
+      "latest_version": "limit-up-board/v0.6.4"
     },
     "volume-anomaly": {
       "name": "成交量异动策略",
@@ -17,7 +18,8 @@
       "repo": "ty19880929/DeepTradePluginOfficial",
       "subdir": "volume_anomaly",
       "tag_prefix": "volume-anomaly/",
-      "min_framework_version": "0.4.2"
+      "min_framework_version": "0.4.2",
+      "latest_version": "volume-anomaly/v0.9.0"
     }
   }
 }

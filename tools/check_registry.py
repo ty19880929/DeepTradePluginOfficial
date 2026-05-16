@@ -8,6 +8,8 @@ Checks:
   - yaml.name == index name; yaml.type == index type
   - tag_prefix ends with "/"
   - repo is owner/repo form
+  - latest_version is a non-empty string that starts with tag_prefix
+    (consumed by framework >= v0.8 to skip the GitHub Releases API call)
   - Each migration's sha256 checksum matches the file content
     (matches the framework's _verify_migration_checksum logic)
 """
@@ -25,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 REQUIRED_FIELDS = {
     "name", "type", "description", "repo",
     "subdir", "tag_prefix", "min_framework_version",
+    "latest_version",
 }
 ALLOWED_TYPES = {"strategy", "channel"}
 
@@ -69,6 +72,16 @@ def main() -> int:
 
         if "/" not in entry["repo"]:
             errors.append(f"{prefix} repo must be in 'owner/repo' form, got {entry['repo']!r}")
+
+        latest_version = entry["latest_version"]
+        if not isinstance(latest_version, str) or not latest_version:
+            errors.append(f"{prefix} latest_version must be a non-empty string")
+        elif not latest_version.startswith(entry["tag_prefix"]):
+            errors.append(
+                f"{prefix} latest_version {latest_version!r} must start with "
+                f"tag_prefix {entry['tag_prefix']!r} (use the full tag, e.g. "
+                f"{entry['tag_prefix']}v0.1.0)"
+            )
 
         subdir = ROOT / entry["subdir"]
         if not subdir.is_dir():
