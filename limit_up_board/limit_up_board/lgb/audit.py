@@ -4,7 +4,7 @@
 hash + 缺失字段 JSON。复盘工具与离线评估（PR-3.x）都基于此表查询。
 
 API 单一入口 :func:`record_predictions` — 由 ``runner._execute_single`` /
-``runner._execute_debate`` 在 R1 collect 之后调用。
+``runner._execute_debate`` 在强势初筛 collect 之后调用。
 """
 
 from __future__ import annotations

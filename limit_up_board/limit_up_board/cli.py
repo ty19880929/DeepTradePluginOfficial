@@ -104,7 +104,7 @@ def cmd_run(
         "--no-lgb",
         help=(
             "本次 run 禁用 LightGBM 评分；候选股的 lgb_score 字段为 None，"
-            "R1/R2 prompt 仍能跑通。等价于 LubConfig.lgb_enabled=false 的一次性覆盖。"
+            "初筛/预测 prompt 仍能跑通。等价于 LubConfig.lgb_enabled=false 的一次性覆盖。"
         ),
     ),
     force_lgb: bool = typer.Option(
@@ -1258,6 +1258,19 @@ def cmd_lgb_refresh_features(
 
 def main(argv: list[str]) -> int:
     """Plugin's dispatch entry. Returns exit code."""
+    # v0.6.5 — ensure the framework's logger has handlers wired up before any
+    # ``logger.exception(...)`` runs. The framework defines ``setup_logging``
+    # (writes to stderr + rotating file ~/.deeptrade/logs/deeptrade.log) but
+    # nothing calls it; without this every traceback was going through Python's
+    # last-resort handler and getting lost behind the rich Live dashboard.
+    # Idempotent — safe to call on every dispatch.
+    try:
+        from deeptrade.core.logging_config import setup_logging  # noqa: PLC0415
+
+        setup_logging()
+    except Exception:  # noqa: BLE001 — logging setup never blocks a run
+        pass
+
     try:
         app(argv, standalone_mode=False)
         return 0

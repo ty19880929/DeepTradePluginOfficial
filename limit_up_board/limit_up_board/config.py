@@ -10,7 +10,7 @@ v0.4 字段（已沿用）：
 
 v0.5 LGB 字段（lightgbm_design.md §10）：
     * ``lgb_enabled``                  — 全局开关
-    * ``lgb_min_score_floor``          — R1 prompt 中提示 LLM 的分数下限
+    * ``lgb_min_score_floor``          — 强势初筛 prompt 中提示 LLM 的分数下限
     * ``lgb_decile_in_prompt``         — 是否注入 lgb_decile
     * ``lgb_label_threshold_pct``      — 次日最大溢价概率阈值（%）：T+1.high
                                          >= pre_close * (1 + 阈值%) 的样本标为正例。

@@ -1,10 +1,10 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.6.5
+version: 0.6.6
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
-description: A 股打板策略：双轮 LLM 漏斗（强势标的分析 → 连板预测）
+description: A 股打板策略：双轮 LLM 漏斗（强势初筛 → 连板预测）
 author: DeepTrade
 
 # v0.4.0 框架起：插件自行声明非框架自带的运行时依赖（PEP 508）。
@@ -76,7 +76,7 @@ tables:
     description: 同花顺涨停榜单缓存（limit_list_ths）
     purge_on_uninstall: true
   - name: lub_stage_results
-    description: 策略各阶段（R1/R2/final_ranking）结构化结果
+    description: 策略各阶段（强势初筛/连板预测/全局重排/辩论修订）结构化结果
     purge_on_uninstall: true
   - name: lub_runs
     description: 本插件 run 历史（替代框架 strategy_runs）

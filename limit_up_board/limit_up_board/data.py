@@ -306,7 +306,7 @@ FIELD_UNITS_RAW: dict[str, str] = {
 # B1 — known A-share 游资席位 substring hints. Match is verbatim against
 # top_inst.exalter; on hit, the actual exalter string is written into
 # lhb_famous_seats (we never expose the hint label to the LLM, preserving
-# anonymity per DESIGN §12 R3 spirit).
+# anonymity per DESIGN §12 辩论修订 spirit).
 FAMOUS_SEATS_HINTS: tuple[str, ...] = (
     "拉萨团结路",
     "拉萨东环路",
@@ -385,7 +385,7 @@ def round2(value: float | None) -> float | None:
 
 @dataclass
 class Round1Bundle:
-    """Everything the R1 LLM stage needs.
+    """Everything the 强势初筛 LLM stage needs.
 
     v0.5+ — ``lgb_model_id`` captures which LightGBM booster produced the
     ``lgb_score`` values on each candidate dict; ``None`` 表示 LGB 未启用 /
@@ -422,7 +422,7 @@ def collect_round1(
     lgb_scorer: LgbScorer | None = None,
     intraday: bool = False,
 ) -> Round1Bundle:
-    """Assemble the R1 input bundle.
+    """Assemble the 强势初筛 input bundle.
 
     The flow:
         1. stock_basic (static) → main_board_filter()
@@ -1333,7 +1333,7 @@ def _attach_lgb_scores(
       stays ``None`` and ``bundle.data_unavailable`` is annotated with the
       ``lgb_model (…)`` reason from the scorer.
     * Any exception inside this path is logged and degrades to the "未启用"
-      branch above—LGB must never block R1/R2 (设计 §7.3 红线)。
+      branch above—LGB must never block 初筛/预测 (设计 §7.3 红线)。
 
     The actual booster math + per-row diagnostics live in :class:`LgbScorer`;
     this function only marshals data between the strategy pipeline and the

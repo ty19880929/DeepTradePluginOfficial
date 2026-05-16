@@ -300,14 +300,14 @@ class RichDashboardRenderer:
             if stage_id == "2":
                 selected = payload.get("selected")
                 if isinstance(selected, int):
-                    row.r1_count = selected
+                    row.screening_count = selected
                 failed = int(payload.get("failed_batches", 0) or 0)
                 if failed > 0:
                     row.phase_a_status = StageStatus.PARTIAL
             elif stage_id == "4":
                 preds = payload.get("predictions")
                 if isinstance(preds, int):
-                    row.r2_count = preds
+                    row.prediction_count = preds
                 failed = int(payload.get("failed_batches", 0) or 0)
                 if failed > 0 and row.phase_a_status != StageStatus.FAILED:
                     row.phase_a_status = StageStatus.PARTIAL

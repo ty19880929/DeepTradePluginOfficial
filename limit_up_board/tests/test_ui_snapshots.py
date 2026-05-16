@@ -131,24 +131,24 @@ def _build_u1() -> RichDashboardRenderer:
         ),
         _ev(
             EventType.STEP_STARTED,
-            "Step 2: R1 strong target analysis",
+            "Step 2: 强势初筛",
             payload={"n_candidates": 20, "n_batches": 1},
         ),
-        _ev(EventType.LLM_BATCH_FINISHED, "R1 batch 1/1 ok"),
+        _ev(EventType.LLM_BATCH_FINISHED, "初筛 批 1/1 完成"),
         _ev(
             EventType.STEP_FINISHED,
-            "Step 2: R1 strong target analysis",
+            "Step 2: 强势初筛",
             payload={"selected": 12, "success_batches": 1, "failed_batches": 0},
         ),
         _ev(
             EventType.STEP_STARTED,
-            "Step 4: R2 continuation prediction",
+            "Step 4: 连板预测",
             payload={"n_candidates": 12, "n_batches": 1},
         ),
-        _ev(EventType.LLM_BATCH_FINISHED, "R2 batch 1/1 ok"),
+        _ev(EventType.LLM_BATCH_FINISHED, "预测 批 1/1 完成"),
         _ev(
             EventType.STEP_FINISHED,
-            "Step 4: R2 continuation prediction",
+            "Step 4: 连板预测",
             payload={"predictions": 12, "success_batches": 1, "failed_batches": 0},
         ),
         _ev(
@@ -184,31 +184,31 @@ def _build_u2() -> RichDashboardRenderer:
         ),
         _ev(
             EventType.STEP_STARTED,
-            "Step 2: R1 strong target analysis",
+            "Step 2: 强势初筛",
             payload={"n_candidates": 40, "n_batches": 2},
         ),
-        _ev(EventType.LLM_BATCH_FINISHED, "R1 batch 1/2 ok"),
-        _ev(EventType.LLM_BATCH_FINISHED, "R1 batch 2/2 ok"),
+        _ev(EventType.LLM_BATCH_FINISHED, "初筛 批 1/2 完成"),
+        _ev(EventType.LLM_BATCH_FINISHED, "初筛 批 2/2 完成"),
         _ev(
             EventType.STEP_FINISHED,
-            "Step 2: R1 strong target analysis",
+            "Step 2: 强势初筛",
             payload={"selected": 25, "success_batches": 2, "failed_batches": 0},
         ),
         _ev(
             EventType.STEP_STARTED,
-            "Step 4: R2 continuation prediction",
+            "Step 4: 连板预测",
             payload={"n_candidates": 25, "n_batches": 2},
         ),
-        _ev(EventType.LLM_BATCH_FINISHED, "R2 batch 1/2 ok"),
-        _ev(EventType.LLM_BATCH_FINISHED, "R2 batch 2/2 ok"),
+        _ev(EventType.LLM_BATCH_FINISHED, "预测 批 1/2 完成"),
+        _ev(EventType.LLM_BATCH_FINISHED, "预测 批 2/2 完成"),
         _ev(
             EventType.STEP_FINISHED,
-            "Step 4: R2 continuation prediction",
+            "Step 4: 连板预测",
             payload={"predictions": 25, "success_batches": 2, "failed_batches": 0},
         ),
         _ev(
             EventType.STEP_STARTED,
-            "Step 4.5: final_ranking global reconciliation",
+            "Step 4.5: 全局重排（多批合并）",
             payload={"n_finalists": 25},
         ),
         _ev(
@@ -218,7 +218,7 @@ def _build_u2() -> RichDashboardRenderer:
         ),
         _ev(
             EventType.STEP_FINISHED,
-            "Step 4.5: final_ranking global reconciliation",
+            "Step 4.5: 全局重排（多批合并）",
             payload={"success": True, "finalists": 25},
         ),
         _ev(
@@ -266,33 +266,33 @@ def _build_u5() -> RichDashboardRenderer:
         )
     )
     r.on_event(
-        _ev(EventType.LIVE_STATUS, "[辩论模式] Phase A — 并行执行 R1+R2 (3 个 LLM)")
+        _ev(EventType.LIVE_STATUS, "[辩论模式] Phase A — 并行执行 初筛+预测 (3 个 LLM)")
     )
     for p, n in [("deepseek", 8), ("kimi", 7), ("qwen", 6)]:
         payload = {"llm_provider": p, "debate_phase": "phase_a"}
         r.on_event(
             _ev(
                 EventType.STEP_FINISHED,
-                f"[{p}] Step 2: R1 strong target analysis",
+                f"[{p}] Step 2: 强势初筛",
                 payload={**payload, "selected": n, "success_batches": 1, "failed_batches": 0},
             )
         )
         r.on_event(
             _ev(
                 EventType.STEP_FINISHED,
-                f"[{p}] Step 4: R2 continuation prediction",
+                f"[{p}] Step 4: 连板预测",
                 payload={**payload, "predictions": n, "success_batches": 1, "failed_batches": 0},
             )
         )
     r.on_event(
-        _ev(EventType.LIVE_STATUS, "[辩论模式] Phase B — 并行执行 R3 修订 (3 个 LLM)")
+        _ev(EventType.LIVE_STATUS, "[辩论模式] Phase B — 并行执行 辩论修订 (3 个 LLM)")
     )
     for p in providers:
         payload = {"llm_provider": p, "debate_phase": "phase_b"}
         r.on_event(
             _ev(
                 EventType.STEP_FINISHED,
-                f"[{p}] Step 4.7: R3 debate revision",
+                f"[{p}] Step 4.7: 辩论修订",
                 payload={**payload, "success": True, "revised": 6},
             )
         )
@@ -331,8 +331,8 @@ class TestSnapshotU1:
         "执行进度",
         "阶段 0: 核对交易日期",
         "阶段 1: 捕获基础标的",
-        "阶段 2: R1 强势标的初筛",
-        "阶段 4: R2 连板潜力预测",
+        "阶段 2: 强势初筛",
+        "阶段 4: 连板预测",
         "阶段 5: 生成策略报告",
         "完成",
         "日志",
@@ -342,6 +342,10 @@ class TestSnapshotU1:
         "辩论",  # Single-LLM should not show the debate banner.
         "Step 4.5",
         "阶段 4.5",
+        # v0.6.5: R1/R2/R3 stage labels are gone from runtime UI.
+        " R1 ",
+        " R2 ",
+        " R3 ",
     ]
 
     def test_required_tokens_present(self) -> None:
@@ -370,8 +374,8 @@ class TestSnapshotU2:
         "DeepTrade · 打板策略",
         "阶段 0: 核对交易日期",
         "阶段 1: 捕获基础标的",
-        "阶段 2: R1 强势标的初筛",
-        "阶段 4: R2 连板潜力预测",
+        "阶段 2: 强势初筛",
+        "阶段 4: 连板预测",
         "阶段 4.5: 全局重排（多批合并）",
         "阶段 5: 生成策略报告",
         "全局重排完成",
@@ -386,7 +390,7 @@ class TestSnapshotU2:
 
     def test_45_ordered_between_4_and_5(self) -> None:
         text = _strip_ansi(_render_to_text(_build_u2()))
-        i4 = text.find("阶段 4: R2")
+        i4 = text.find("阶段 4: 连板预测")
         i45 = text.find("阶段 4.5: 全局重排")
         i5 = text.find("阶段 5: 生成策略报告")
         assert 0 < i4 < i45 < i5, (
@@ -410,14 +414,14 @@ class TestSnapshotU5:
         "阶段 1: 捕获基础标的",
         "辩论汇总",
         "Provider",
-        "Phase A (R1+R2)",
-        "R3 修订",
+        "Phase A · 初筛+预测",
+        "Phase B · 辩论修订",
         "deepseek",
         "kimi",
         "qwen",
-        "R1=8 R2=8",
-        "R1=7 R2=7",
-        "R1=6 R2=6",
+        "初筛=8 预测=8",
+        "初筛=7 预测=7",
+        "初筛=6 预测=6",
         "修订 6 只",
     ]
 

@@ -1,13 +1,13 @@
-"""PR-2.3 — R1 / R2 system prompts contain the LGB §8.1 / §8.2 paragraph.
+"""PR-2.3 — 强势初筛 / 连板预测 system prompts contain the LGB §8.1 / §8.2 paragraph.
 
 Asserts:
-* Default ``build_r1_system()`` mentions ``lgb_score`` + the numeric floor.
-* ``build_r1_system(lgb_min_score_floor=None)`` drops the numeric line but
+* Default ``build_screening_system()`` mentions ``lgb_score`` + the numeric floor.
+* ``build_screening_system(lgb_min_score_floor=None)`` drops the numeric line but
   keeps the rest of the LGB guidance.
 * Custom floor (e.g. 42.5) is correctly interpolated.
-* Same set for R2.
-* The user prompt itself doesn't need to change — ``r1_user_prompt`` /
-  ``r2_user_prompt`` just dump the candidates dict; we verify that an
+* Same set for 连板预测.
+* The user prompt itself doesn't need to change — ``screening_user_prompt`` /
+  ``prediction_user_prompt`` just dump the candidates dict; we verify that an
   ``lgb_score`` key on a candidate naturally lands in the rendered prompt.
 """
 
@@ -18,12 +18,12 @@ import json
 import pytest
 
 from limit_up_board.prompts import (
-    R1_SYSTEM,
-    R2_SYSTEM,
-    build_r1_system,
-    build_r2_system,
-    r1_user_prompt,
-    r2_user_prompt,
+    PREDICTION_SYSTEM,
+    SCREENING_SYSTEM,
+    build_prediction_system,
+    build_screening_system,
+    prediction_user_prompt,
+    screening_user_prompt,
 )
 
 
@@ -32,19 +32,19 @@ from limit_up_board.prompts import (
 # ---------------------------------------------------------------------------
 
 
-def test_r1_system_default_contains_lgb_block_and_default_floor() -> None:
-    assert "lgb_score" in R1_SYSTEM
-    assert "lgb_decile" in R1_SYSTEM
-    assert "lgb_score < 30" in R1_SYSTEM
+def test_screening_system_default_contains_lgb_block_and_default_floor() -> None:
+    assert "lgb_score" in SCREENING_SYSTEM
+    assert "lgb_decile" in SCREENING_SYSTEM
+    assert "lgb_score < 30" in SCREENING_SYSTEM
     # Discipline checks the model still hard rules apply
-    assert "硬性纪律" in R1_SYSTEM
+    assert "硬性纪律" in SCREENING_SYSTEM
 
 
-def test_r2_system_default_contains_lgb_block_and_default_floor() -> None:
-    assert "lgb_score" in R2_SYSTEM
-    assert "lgb_decile" in R2_SYSTEM
-    assert "lgb_score < 30" in R2_SYSTEM
-    assert "硬性纪律" in R2_SYSTEM
+def test_prediction_system_default_contains_lgb_block_and_default_floor() -> None:
+    assert "lgb_score" in PREDICTION_SYSTEM
+    assert "lgb_decile" in PREDICTION_SYSTEM
+    assert "lgb_score < 30" in PREDICTION_SYSTEM
+    assert "硬性纪律" in PREDICTION_SYSTEM
 
 
 # ---------------------------------------------------------------------------
@@ -53,15 +53,15 @@ def test_r2_system_default_contains_lgb_block_and_default_floor() -> None:
 
 
 @pytest.mark.parametrize("floor", [10.0, 25, 42.5, 50.0, 70.5])
-def test_build_r1_system_custom_floor(floor: float) -> None:
-    out = build_r1_system(lgb_min_score_floor=floor)
+def test_build_screening_system_custom_floor(floor: float) -> None:
+    out = build_screening_system(lgb_min_score_floor=floor)
     # The custom value should be present and no other floor.
     assert f"lgb_score < {floor:g}" in out
 
 
 @pytest.mark.parametrize("floor", [10.0, 25, 42.5, 50.0, 70.5])
-def test_build_r2_system_custom_floor(floor: float) -> None:
-    out = build_r2_system(lgb_min_score_floor=floor)
+def test_build_prediction_system_custom_floor(floor: float) -> None:
+    out = build_prediction_system(lgb_min_score_floor=floor)
     assert f"lgb_score < {floor:g}" in out
 
 
@@ -70,16 +70,16 @@ def test_build_r2_system_custom_floor(floor: float) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_r1_system_no_floor_drops_threshold() -> None:
-    out = build_r1_system(lgb_min_score_floor=None)
+def test_build_screening_system_no_floor_drops_threshold() -> None:
+    out = build_screening_system(lgb_min_score_floor=None)
     assert "lgb_score < " not in out
     # The rest of the LGB block survives
     assert "lgb_score" in out
     assert "lgb_decile" in out
 
 
-def test_build_r2_system_no_floor_drops_threshold() -> None:
-    out = build_r2_system(lgb_min_score_floor=None)
+def test_build_prediction_system_no_floor_drops_threshold() -> None:
+    out = build_prediction_system(lgb_min_score_floor=None)
     assert "lgb_score < " not in out
     assert "lgb_score" in out
     assert "lgb_decile" in out
@@ -90,7 +90,7 @@ def test_build_r2_system_no_floor_drops_threshold() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_r1_user_prompt_includes_candidate_lgb_score() -> None:
+def test_screening_user_prompt_includes_candidate_lgb_score() -> None:
     candidates = [
         {
             "candidate_id": "600519.SH",
@@ -101,7 +101,7 @@ def test_r1_user_prompt_includes_candidate_lgb_score() -> None:
             "lgb_feature_missing": [],
         }
     ]
-    text = r1_user_prompt(
+    text = screening_user_prompt(
         trade_date="20260530",
         batch_no=1,
         batch_total=1,
@@ -116,7 +116,7 @@ def test_r1_user_prompt_includes_candidate_lgb_score() -> None:
     assert '"lgb_decile": 8' in text
 
 
-def test_r2_user_prompt_includes_candidate_lgb_score() -> None:
+def test_prediction_user_prompt_includes_candidate_lgb_score() -> None:
     candidates = [
         {
             "candidate_id": "600519.SH",
@@ -127,7 +127,7 @@ def test_r2_user_prompt_includes_candidate_lgb_score() -> None:
             "lgb_feature_missing": ["f_lhb_inst_count"],
         }
     ]
-    text = r2_user_prompt(
+    text = prediction_user_prompt(
         trade_date="20260530",
         next_trade_date="20260531",
         candidates=candidates,
@@ -149,7 +149,7 @@ def test_user_prompts_omit_lgb_when_field_absent() -> None:
             "name": "茅台",
         }
     ]
-    text = r1_user_prompt(
+    text = screening_user_prompt(
         trade_date="20260530",
         batch_no=1,
         batch_total=1,

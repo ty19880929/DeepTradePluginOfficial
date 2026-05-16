@@ -3,7 +3,7 @@
 设计文档 §6.1：本模块复用 :mod:`limit_up_board.data` 的数据装配 helper
 （``apply_market_filter`` / ``build_lhb_rollup`` / ``build_cyq_lookup`` /
 ``index_by_code``）+ :func:`lgb.features.build_feature_frame` +
-:func:`lgb.labels.compute_label_for_t1`，**不进入 R1/R2 LLM 阶段**。
+:func:`lgb.labels.compute_label_for_t1`，**不进入强势初筛 / 连板预测 LLM 阶段**。
 
 API 单一入口：:func:`collect_training_window`。返回 :class:`LgbDataset`，
 可被 :func:`trainer.train_lightgbm` 直接消费。
@@ -157,7 +157,7 @@ def collect_day_samples(
 ) -> _DayBundle:
     """收集单个交易日的训练样本。
 
-    流程（无 R1/R2 LLM 阶段）：
+    流程（无 强势初筛 / 连板预测 LLM 阶段）：
         1. ``limit_list_d(T, limit='U')`` → 候选集
         2. main_board 过滤 + market filter（流通市值/股价）
         3. ST 排除（``stock_st(T)`` REQUIRED）

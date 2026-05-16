@@ -66,32 +66,32 @@ def _worker_event_burst_success(provider: str, *, r1: int, r2: int) -> list[Stra
     return [
         _ev(
             EventType.STEP_STARTED,
-            f"[{provider}] Step 2: R1 strong target analysis",
+            f"[{provider}] Step 2: 强势初筛",
             payload={**base_payload, "n_batches": 1},
         ),
         _ev(
             EventType.LLM_BATCH_FINISHED,
-            f"[{provider}] R1 batch 1/1 ok",
+            f"[{provider}] 初筛 批 1/1 完成",
             payload=base_payload,
         ),
         _ev(
             EventType.STEP_FINISHED,
-            f"[{provider}] Step 2: R1 strong target analysis",
+            f"[{provider}] Step 2: 强势初筛",
             payload={**base_payload, "selected": r1, "success_batches": 1, "failed_batches": 0},
         ),
         _ev(
             EventType.STEP_STARTED,
-            f"[{provider}] Step 4: R2 continuation prediction",
+            f"[{provider}] Step 4: 连板预测",
             payload={**base_payload, "n_batches": 1},
         ),
         _ev(
             EventType.LLM_BATCH_FINISHED,
-            f"[{provider}] R2 batch 1/1 ok",
+            f"[{provider}] 预测 批 1/1 完成",
             payload=base_payload,
         ),
         _ev(
             EventType.STEP_FINISHED,
-            f"[{provider}] Step 4: R2 continuation prediction",
+            f"[{provider}] Step 4: 连板预测",
             payload={**base_payload, "predictions": r2, "success_batches": 1, "failed_batches": 0},
         ),
     ]
@@ -119,12 +119,12 @@ def _worker_event_burst_phase_b_success(
     return [
         _ev(
             EventType.STEP_STARTED,
-            f"[{provider}] Step 4.7: R3 debate revision",
+            f"[{provider}] Step 4.7: 辩论修订",
             payload=payload,
         ),
         _ev(
             EventType.STEP_FINISHED,
-            f"[{provider}] Step 4.7: R3 debate revision",
+            f"[{provider}] Step 4.7: 辩论修订",
             payload={**payload, "success": True, "revised": revised},
         ),
     ]
@@ -156,7 +156,7 @@ class TestU5DebateAllSuccess:
         r.on_event(
             _ev(
                 EventType.LIVE_STATUS,
-                "[辩论模式] Phase A — 并行执行 R1+R2 (3 个 LLM)",
+                "[辩论模式] Phase A — 并行执行 初筛+预测 (3 个 LLM)",
             )
         )
         # Worker bursts come back in completion order.
@@ -170,20 +170,20 @@ class TestU5DebateAllSuccess:
         assert grid is not None
         for row in grid.rows:
             assert row.phase_a_status == StageStatus.SUCCESS
-        assert grid.row_for("deepseek").r1_count == 8
-        assert grid.row_for("deepseek").r2_count == 8
-        assert grid.row_for("kimi").r1_count == 7
-        assert grid.row_for("qwen").r2_count == 6
+        assert grid.row_for("deepseek").screening_count == 8
+        assert grid.row_for("deepseek").prediction_count == 8
+        assert grid.row_for("kimi").screening_count == 7
+        assert grid.row_for("qwen").prediction_count == 6
 
     def test_phase_b_banner_finalises_phase_a_and_runs_phase_b(self) -> None:
         r = _make_debate_renderer(["deepseek", "kimi"])
-        r.on_event(_ev(EventType.LIVE_STATUS, "[辩论模式] Phase A — 并行执行 R1+R2 (2 个 LLM)"))
+        r.on_event(_ev(EventType.LIVE_STATUS, "[辩论模式] Phase A — 并行执行 初筛+预测 (2 个 LLM)"))
         for ev in _worker_event_burst_success("deepseek", r1=5, r2=5):
             r.on_event(ev)
         for ev in _worker_event_burst_success("kimi", r1=5, r2=5):
             r.on_event(ev)
         r.on_event(
-            _ev(EventType.LIVE_STATUS, "[辩论模式] Phase B — 并行执行 R3 修订 (2 个 LLM)")
+            _ev(EventType.LIVE_STATUS, "[辩论模式] Phase B — 并行执行 辩论修订 (2 个 LLM)")
         )
         for ev in _worker_event_burst_phase_b_success("deepseek", revised=5):
             r.on_event(ev)
@@ -241,7 +241,7 @@ class TestU6DebatePhaseAFailure:
     def test_failed_worker_row_marked_failed_and_note_set(self) -> None:
         r = _make_debate_renderer(["deepseek", "kimi", "qwen"])
         r.on_event(
-            _ev(EventType.LIVE_STATUS, "[辩论模式] Phase A — 并行执行 R1+R2 (3 个 LLM)")
+            _ev(EventType.LIVE_STATUS, "[辩论模式] Phase A — 并行执行 初筛+预测 (3 个 LLM)")
         )
         for ev in _worker_event_burst_success("deepseek", r1=8, r2=8):
             r.on_event(ev)
@@ -275,8 +275,8 @@ class TestU6DebatePhaseAFailure:
         grid = DebateGrid()
         grid.seed(["deepseek", "qwen"])
         grid.row_for("deepseek").phase_a_status = StageStatus.SUCCESS
-        grid.row_for("deepseek").r1_count = 8
-        grid.row_for("deepseek").r2_count = 8
+        grid.row_for("deepseek").screening_count = 8
+        grid.row_for("deepseek").prediction_count = 8
         grid.row_for("deepseek").phase_b_status = StageStatus.SUCCESS
         grid.row_for("deepseek").revised_count = 7
         grid.row_for("qwen").phase_a_status = StageStatus.FAILED

@@ -13,10 +13,10 @@ import json
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# R1: strong target analysis
+# 强势初筛 (strong target analysis)
 # ---------------------------------------------------------------------------
 
-_R1_LGB_BLOCK_FLOOR = (
+_SCREENING_LGB_BLOCK_FLOOR = (
     "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，预测「次日最大溢价概率」——"
     "T+1 最高价 ≥ T 收盘价 × (1+阈值%) 的概率，越大越倾向高位溢价但 ≠ 必涨停 / ≠ 可实现收益）；"
     "lgb_decile（1=最弱，10=最强，当批分位）。\n"
@@ -26,7 +26,7 @@ _R1_LGB_BLOCK_FLOOR = (
     "\"分位 X / 模型分 Y\"；不可同时把 lgb_score 当做 risk_flags 与 evidence 的唯一支柱。"
 )
 
-_R1_LGB_BLOCK_NO_FLOOR = (
+_SCREENING_LGB_BLOCK_NO_FLOOR = (
     "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，预测「次日最大溢价概率」——"
     "T+1 最高价 ≥ T 收盘价 × (1+阈值%) 的概率，越大越倾向高位溢价但 ≠ 必涨停 / ≠ 可实现收益）；"
     "lgb_decile（1=最弱，10=最强，当批分位）。\n"
@@ -36,7 +36,7 @@ _R1_LGB_BLOCK_NO_FLOOR = (
 )
 
 
-def _r1_system_with(lgb_block: str) -> str:
+def _screening_system_with(lgb_block: str) -> str:
     return f"""\
 你是一个 A 股打板策略研究助手。你只能基于本次消息中提供的结构化数据进行分析。
 
@@ -64,23 +64,23 @@ def _r1_system_with(lgb_block: str) -> str:
 【evidence 要求】"""
 
 
-def build_r1_system(*, lgb_min_score_floor: float | None = 30.0) -> str:
-    """Render R1 system prompt with the LGB §8.1 paragraph.
+def build_screening_system(*, lgb_min_score_floor: float | None = 30.0) -> str:
+    """Render 强势初筛 system prompt with the LGB §8.1 paragraph.
 
     ``lgb_min_score_floor=None`` → omit the soft-floor sentence (the model still
     sees the lgb_score description, but no numeric threshold is suggested).
     """
     if lgb_min_score_floor is None:
-        block = _R1_LGB_BLOCK_NO_FLOOR
+        block = _SCREENING_LGB_BLOCK_NO_FLOOR
     else:
         # Format inline; ``floor`` is the only placeholder. Trim trailing zeros
         # so 30.0 renders as "30" but 32.5 stays as "32.5".
         floor_repr = f"{lgb_min_score_floor:g}"
-        block = _R1_LGB_BLOCK_FLOOR.format(floor=floor_repr)
-    return _r1_system_with(block) + _R1_TAIL
+        block = _SCREENING_LGB_BLOCK_FLOOR.format(floor=floor_repr)
+    return _screening_system_with(block) + _SCREENING_TAIL
 
 
-_R1_TAIL = """
+_SCREENING_TAIL = """
 
 每个候选股至少给出 1 条、至多 4 条 evidence；每条必须引用真实出现在输入中的字段名 (`field`)，并填上对应数值 (`value`)、单位 (`unit`) 和你的解读 (`interpretation`)。
 任何无法用输入字段佐证的 rationale 都视为幻觉。
@@ -130,11 +130,11 @@ rationale 不超过 80 字（输出截断会触发 JSON 失败）。
 
 # Backward-compatible constant — reflects the LubConfig default
 # (lgb_min_score_floor=30.0). Pipelines that want a different floor must call
-# ``build_r1_system(...)`` directly.
-R1_SYSTEM = build_r1_system(lgb_min_score_floor=30.0)
+# ``build_screening_system(...)`` directly.
+SCREENING_SYSTEM = build_screening_system(lgb_min_score_floor=30.0)
 
 
-def r1_user_prompt(
+def screening_user_prompt(
     *,
     trade_date: str,
     batch_no: int,
@@ -145,7 +145,7 @@ def r1_user_prompt(
     sector_strength_data: dict[str, Any],
     data_unavailable: list[str],
 ) -> str:
-    """Render the R1 user prompt for one batch."""
+    """Render the 强势初筛 user prompt for one batch."""
     return _render_user(
         title=f"trade_date = {trade_date}\nbatch_no   = {batch_no}\nbatch_total= {batch_total}",
         n=len(candidates),
@@ -162,10 +162,10 @@ def r1_user_prompt(
 
 
 # ---------------------------------------------------------------------------
-# R2: continuation prediction
+# 连板预测 (continuation prediction)
 # ---------------------------------------------------------------------------
 
-R2_SYSTEM = """\
+PREDICTION_SYSTEM = """\
 你是一个 A 股打板策略研究助手，正在执行第二轮"连板预测"。
 
 【硬性纪律】（与第一轮一致）
@@ -192,7 +192,7 @@ R2_SYSTEM = """\
     数值越大越倾向高位溢价，但**不等价于"必涨停"或"可实现收益"**——盘口风险信号仍优先。
   · lgb_score ≥ 70 的标的可适度上调 confidence；但若同时存在 cyq_winner_pct > 70 / 高位连板等
     分歧风险，仍需下调。
-  · lgb_score < __R2_LGB_FLOOR__ 的标的若你给出 top_candidate，rationale 必须明确写出"为何超越模型判断"。
+  · lgb_score < __PREDICTION_LGB_FLOOR__ 的标的若你给出 top_candidate，rationale 必须明确写出"为何超越模型判断"。
   · lgb_score 缺失（null）或本次未启用模型时，忽略此维度，按其他证据评估。
   · 引用时 field 可以是 lgb_score 或 lgb_decile，value 必须填标量（分数 / 分位数）。
 - 筹码维度（参考候选行 cyq_winner_pct / cyq_top10_concentration /
@@ -262,14 +262,14 @@ R2_SYSTEM = """\
 """
 
 
-# v0.5 — LGB §8.2 block uses `__R2_LGB_FLOOR__` sentinel so config can override
-# at render time. Constant default (LubConfig.lgb_min_score_floor=30) bakes in
-# the typical value so the constant string stays self-describing.
-R2_SYSTEM = R2_SYSTEM.replace("__R2_LGB_FLOOR__", "30")
+# v0.5 — LGB §8.2 block uses `__PREDICTION_LGB_FLOOR__` sentinel so config can
+# override at render time. Constant default (LubConfig.lgb_min_score_floor=30)
+# bakes in the typical value so the constant string stays self-describing.
+PREDICTION_SYSTEM = PREDICTION_SYSTEM.replace("__PREDICTION_LGB_FLOOR__", "30")
 
 
-def build_r2_system(*, lgb_min_score_floor: float | None = 30.0) -> str:
-    """Render R2 system prompt with the §8.2 LGB paragraph.
+def build_prediction_system(*, lgb_min_score_floor: float | None = 30.0) -> str:
+    """Render 连板预测 system prompt with the §8.2 LGB paragraph.
 
     ``lgb_min_score_floor=None`` → drop the soft-floor sentence entirely; the
     rest of the LGB guidance (≥70 boost, missing-handling, evidence shape) is
@@ -282,15 +282,15 @@ def build_r2_system(*, lgb_min_score_floor: float | None = 30.0) -> str:
         return _re_sub(
             r"\n  · lgb_score < 30 的标的若你给出 top_candidate[^\n]*\n",
             "\n",
-            R2_SYSTEM,
+            PREDICTION_SYSTEM,
         )
     if lgb_min_score_floor == 30.0:
-        return R2_SYSTEM
+        return PREDICTION_SYSTEM
     floor_repr = f"{lgb_min_score_floor:g}"
-    return R2_SYSTEM.replace("lgb_score < 30 的标的", f"lgb_score < {floor_repr} 的标的")
+    return PREDICTION_SYSTEM.replace("lgb_score < 30 的标的", f"lgb_score < {floor_repr} 的标的")
 
 
-def r2_user_prompt(
+def prediction_user_prompt(
     *,
     trade_date: str,
     next_trade_date: str,
@@ -313,7 +313,7 @@ def r2_user_prompt(
 
 
 # ---------------------------------------------------------------------------
-# Final ranking (only when R2 multi-batch)
+# 全局重排 (only when 连板预测 was multi-batch)
 # ---------------------------------------------------------------------------
 
 FINAL_RANKING_SYSTEM = """\
@@ -378,10 +378,10 @@ def final_ranking_user_prompt(
 
 
 # ---------------------------------------------------------------------------
-# R3 — Debate-mode revision (multi-LLM)
+# 辩论修订 (debate-mode revision, multi-LLM)
 # ---------------------------------------------------------------------------
 
-R3_DEBATE_SYSTEM = """\
+REVISION_SYSTEM = """\
 你是 A 股打板策略多 LLM 辩论中的一员。本轮你已经独立完成了"连板预测"，
 下方将给你看其他匿名同行（peer_a / peer_b / ...）对同一批候选股的预测结果。
 
@@ -503,7 +503,7 @@ def _self_view_row(c: Any) -> dict[str, Any]:
     }
 
 
-def r3_user_prompt(
+def revision_user_prompt(
     *,
     trade_date: str,
     next_trade_date: str,
@@ -511,7 +511,7 @@ def r3_user_prompt(
     peers: list[tuple[str, list[Any]]],
     market_context: dict[str, Any],
 ) -> str:
-    """Render the R3 debate prompt.
+    """Render the 辩论修订 prompt.
 
     ``peers`` is ``[(label, predictions), ...]`` where label is already
     anonymised (``peer_a`` / ``peer_b`` / ...).

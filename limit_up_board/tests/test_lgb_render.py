@@ -3,7 +3,7 @@
 Asserts:
 * summary.md metadata header always includes ``lgb_model_id`` (``disabled``
   when the bundle had no scoring).
-* R1 / R2 tables have an LGB column with score + decile, ``—`` when missing.
+* 强势初筛 / 连板预测 tables have an LGB column with score + decile, ``—`` when missing.
 * round2_predictions.json gains ``lgb_score`` / ``lgb_decile`` /
   ``lgb_model_id`` per record.
 * Debate-mode summary.md likewise surfaces ``lgb_model_id``.
@@ -182,10 +182,10 @@ def test_summary_md_r2_table_has_lgb_column() -> None:
         predictions=_make_predictions(),
         final_ranking=None,
     )
-    # Both the R2 single-batch header row and the body should mention LGB
+    # Both the 连板预测 single-batch header row and the body should mention LGB
     assert "Pred | Rationale" in md
-    # The candidate's LGB cell is 73 (d8) → present in either R1 or R2 row
-    assert md.count("73 (d8)") >= 2  # appears in R1 row + R2 row
+    # The candidate's LGB cell is 73 (d8) → present in 强势初筛 + 连板预测 rows
+    assert md.count("73 (d8)") >= 2
 
 
 # ---------------------------------------------------------------------------

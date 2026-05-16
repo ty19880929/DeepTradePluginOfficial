@@ -3,7 +3,7 @@
 Plan §3.4 + §4.2 — the v1 decision is *not* a per-provider concurrent
 swimlane (since worker events arrive in bursts at ``as_completed`` time, a
 "realtime" per-batch progress would lie to the user). Instead we render a
-provider × phase status matrix with R1/R2 yield counts in the body.
+provider × phase status matrix with 初筛/预测 yield counts in the body.
 
 State updates feed off the tagged events that the runner re-emits from
 worker buffers (``runner._tag_event`` adds ``llm_provider`` and
@@ -50,8 +50,8 @@ class DebateRow:
     provider: str
     phase_a_status: StageStatus = StageStatus.WAITING
     phase_b_status: StageStatus = StageStatus.WAITING
-    r1_count: int | None = None
-    r2_count: int | None = None
+    screening_count: int | None = None
+    prediction_count: int | None = None
     revised_count: int | None = None
     note: str = ""  # error message or short remark
 
@@ -108,11 +108,11 @@ def _cell_for_phase_a(row: DebateRow) -> tuple[str, str]:
         return f"{glyph} 运行中", style
     if row.phase_a_status == StageStatus.FAILED:
         return f"{glyph} 失败", style
-    # SUCCESS / PARTIAL — show R1/R2 counts (None → "?" for safety)
-    r1 = "?" if row.r1_count is None else str(row.r1_count)
-    r2 = "?" if row.r2_count is None else str(row.r2_count)
+    # SUCCESS / PARTIAL — show 初筛/预测 counts (None → "?" for safety)
+    n_screen = "?" if row.screening_count is None else str(row.screening_count)
+    n_pred = "?" if row.prediction_count is None else str(row.prediction_count)
     suffix = "⚠" if row.phase_a_status == StageStatus.PARTIAL else ""
-    return f"{glyph}{suffix} R1={r1} R2={r2}", style
+    return f"{glyph}{suffix} 初筛={n_screen} 预测={n_pred}", style
 
 
 def _cell_for_phase_b(row: DebateRow) -> tuple[str, str]:
@@ -135,8 +135,8 @@ def render_grid_table(grid: DebateGrid) -> Table:
     """Build the rich Table that goes in the debate summary panel."""
     table = Table(show_header=True, header_style="table.header", expand=True)
     table.add_column("Provider", style="cyan", no_wrap=True)
-    table.add_column("Phase A (R1+R2)")
-    table.add_column("R3 修订")
+    table.add_column("Phase A · 初筛+预测")
+    table.add_column("Phase B · 辩论修订")
     table.add_column("备注", overflow="fold")
 
     for row in grid.rows:

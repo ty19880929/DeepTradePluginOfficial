@@ -4,12 +4,12 @@
     "limit-up-board": {
       "name": "打板策略",
       "type": "strategy",
-      "description": "A 股打板策略：双轮 LLM 漏斗（强势标的分析 → 连板预测）",
+      "description": "A 股打板策略：双轮 LLM 漏斗（强势初筛 → 连板预测）",
       "repo": "ty19880929/DeepTradePluginOfficial",
       "subdir": "limit_up_board",
       "tag_prefix": "limit-up-board/",
       "min_framework_version": "0.4.2",
-      "latest_version": "limit-up-board/v0.6.5"
+      "latest_version": "limit-up-board/v0.6.6"
     },
     "volume-anomaly": {
       "name": "成交量异动策略",

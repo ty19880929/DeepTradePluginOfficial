@@ -112,8 +112,9 @@ class DashboardState:
     # Debate-mode grid; ``None`` outside of debate mode (Plan §3.4 / §4.2).
     debate_grid: DebateGrid | None = None
     # Log ring buffer — keeps the most recent N lines for the bottom panel.
+    # Bumped to 12 in v0.6.5 so an error traceback (≈ 5–10 lines) fits in-frame.
     log_lines: deque[tuple[str, str, str]] = field(
-        default_factory=lambda: deque(maxlen=5)
+        default_factory=lambda: deque(maxlen=12)
     )
     # Top-of-screen banner; set on TUSHARE_UNAUTH or CANCELLED outcome.
     banner: str | None = None
@@ -271,7 +272,14 @@ def render_dashboard(state: DashboardState, *, width: int) -> RenderableType:
     borders, fewer log rows) layouts (Plan §4.4).
     """
     compact = width < 80
-    log_rows = 5 if width >= 100 else (3 if width >= 80 else 0)
+    # v0.6.5 — when an error banner is up (FAILED / CANCELLED / TUSHARE_UNAUTH),
+    # widen the log window so traceback / context fits. Normal runs keep the
+    # tighter 5-row window so the panel doesn't crowd progress.
+    error_mode = state.banner is not None and "error" in state.banner_style
+    if error_mode:
+        log_rows = 12 if width >= 100 else (8 if width >= 80 else 0)
+    else:
+        log_rows = 5 if width >= 100 else (3 if width >= 80 else 0)
 
     header = _format_header(state)
     config_panel = _format_config(state.config)

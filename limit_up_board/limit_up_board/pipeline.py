@@ -1,11 +1,12 @@
-"""LLM pipeline for limit-up-board: R1 / R2 / final_ranking.
+"""LLM pipeline for limit-up-board: 强势初筛 / 连板预测 / 全局重排 / 辩论修订.
 
 Implements:
-    plan_r1_batches()                — F5 input + output token dual budget
-    run_r1_batches()                 — yields events; collects StrongCandidate
-    run_r2()                         — single-batch by default; auto multi-batch + final_ranking
-    run_final_ranking()              — only when R2 multi-batch (M4)
-    set_equality_check()             — strict candidate_id ⊆ ⊇ check
+    plan_screening_batches()      — F5 input + output token dual budget
+    run_screening()               — yields events; collects StrongCandidate
+    run_prediction()              — single-batch by default; auto multi-batch + 全局重排
+    run_final_ranking()           — only when 连板预测 was multi-batch (M4)
+    run_debate_revision()         — multi-LLM peer revision (debate mode only)
+    set_equality_check()          — strict candidate_id ⊆ ⊇ check
 """
 
 from __future__ import annotations
@@ -26,16 +27,22 @@ from deeptrade.plugins_api import StageProfile
 from deeptrade.plugins_api.events import EventLevel, EventType, StrategyEvent
 
 from .data import Round1Bundle, SectorStrength
-from .profiles import STAGE_FINAL, STAGE_R1, STAGE_R2, STAGE_R3, resolve_profile
+from .profiles import (
+    STAGE_FINAL,
+    STAGE_PREDICTION,
+    STAGE_REVISION,
+    STAGE_SCREENING,
+    resolve_profile,
+)
 from .prompts import (
     FINAL_RANKING_SYSTEM,
-    R3_DEBATE_SYSTEM,
-    build_r1_system,
-    build_r2_system,
+    REVISION_SYSTEM,
+    build_prediction_system,
+    build_screening_system,
     final_ranking_user_prompt,
-    r1_user_prompt,
-    r2_user_prompt,
-    r3_user_prompt,
+    prediction_user_prompt,
+    revision_user_prompt,
+    screening_user_prompt,
 )
 from .schemas import (
     ContinuationCandidate,
@@ -64,8 +71,8 @@ logger = logging.getLogger(__name__)
 # call and lower risk of hitting the per-call output cap.
 DEFAULT_AVG_INPUT_TOKENS_PER_CANDIDATE = 350
 DEFAULT_AVG_OUTPUT_TOKENS_PER_CANDIDATE = 800
-DEFAULT_R1_INPUT_BUDGET = 80_000
-DEFAULT_R2_INPUT_BUDGET = 200_000
+DEFAULT_SCREENING_INPUT_BUDGET = 80_000
+DEFAULT_PREDICTION_INPUT_BUDGET = 200_000
 SAFETY_RATIO = 0.85
 
 
@@ -75,11 +82,11 @@ class BatchPlan:
     n_batches: int
 
 
-def plan_r1_batches(
+def plan_llm_batches(
     *,
     n_candidates: int,
-    input_budget: int = DEFAULT_R1_INPUT_BUDGET,
-    output_budget: int,  # = stage profile's max_output_tokens (R1 default 32k)
+    input_budget: int = DEFAULT_SCREENING_INPUT_BUDGET,
+    output_budget: int,  # = stage profile's max_output_tokens (强势初筛 default 32k)
     overhead_input_tokens: int = 4_000,  # system prompt + market summary + sector
     avg_in: int = DEFAULT_AVG_INPUT_TOKENS_PER_CANDIDATE,
     avg_out: int = DEFAULT_AVG_OUTPUT_TOKENS_PER_CANDIDATE,
@@ -140,7 +147,7 @@ def _set_mismatch_repair_hint(expected: set[str], actual: set[str]) -> str:
 
 @dataclass
 class RoundResult:
-    """Outcome of a single R1 / R2 / final_ranking phase."""
+    """Outcome of a single 强势初筛 / 连板预测 / 全局重排 phase."""
 
     success_batches: int = 0
     failed_batches: int = 0
@@ -149,7 +156,10 @@ class RoundResult:
     selected: list[StrongCandidate] = field(default_factory=list)
     predictions: list[ContinuationCandidate] = field(default_factory=list)
     final_items: list[Any] = field(default_factory=list)
-    # F-L3 — concrete failed batch IDs (e.g. "r1.batch.3") for report banner
+    # F-L3 — concrete failed batch ordinals (1-based, e.g. ``["3", "5"]``)
+    # for report banner. The phase prefix (初筛/预测) is prepended by the runner
+    # so the same RoundResult can be reused across stages without leaking the
+    # stage tag into the persisted ids.
     failed_batch_ids: list[str] = field(default_factory=list)
     # F-M3 — record actual batch_size so finalists selection isn't hardcoded
     batch_size: int = 0
@@ -284,7 +294,7 @@ def _complete_with_set_check(
     Args:
         profile: caller-resolved StageProfile (see profiles.py).
         output_attr: name of the BaseModel field that holds the list of items
-            (each having a ``.candidate_id`` attr). 'candidates' for R1/R2,
+            (each having a ``.candidate_id`` attr). 'candidates' for 初筛/预测,
             'finalists' for final_ranking.
         envelope_defaults: caller-controlled top-level fields (e.g. ``stage``,
             ``trade_date``, ``batch_no``) injected when the LLM omits them.
@@ -344,32 +354,32 @@ def _complete_with_set_check(
 
 
 # ---------------------------------------------------------------------------
-# R1
+# 强势初筛
 # ---------------------------------------------------------------------------
 
 
-def run_r1(
+def run_screening(
     *,
     llm: LLMClient,
     bundle: Round1Bundle,
     preset: str,
-    input_budget: int = DEFAULT_R1_INPUT_BUDGET,
+    input_budget: int = DEFAULT_SCREENING_INPUT_BUDGET,
     lgb_min_score_floor: float | None = 30.0,
 ) -> Iterable[tuple[StrategyEvent, RoundResult | None]]:
-    """Run all R1 batches, yielding (event, terminal_result_or_None).
+    """Run all 强势初筛 batches, yielding (event, terminal_result_or_None).
 
     The caller (strategy.run) re-yields the events into the runner. The final
     iteration yields a result alongside the STEP_FINISHED event so the caller
-    can hand it on to R2.
+    can hand it on to 连板预测.
     """
-    profile = resolve_profile(preset, STAGE_R1)
+    profile = resolve_profile(preset, STAGE_SCREENING)
     candidates = bundle.candidates
-    plan = plan_r1_batches(
+    plan = plan_llm_batches(
         n_candidates=len(candidates),
         input_budget=input_budget,
         output_budget=profile.max_output_tokens,
     )
-    r1_system = build_r1_system(lgb_min_score_floor=lgb_min_score_floor)
+    screening_system = build_screening_system(lgb_min_score_floor=lgb_min_score_floor)
     yield (
         StrategyEvent(
             type=EventType.LIVE_STATUS,
@@ -382,7 +392,7 @@ def run_r1(
     yield (
         StrategyEvent(
             type=EventType.STEP_STARTED,
-            message="Step 2: R1 strong target analysis",
+            message="Step 2: 强势初筛",
             payload={"n_candidates": len(candidates), "n_batches": plan.n_batches},
         ),
         None,
@@ -393,7 +403,7 @@ def run_r1(
         yield (
             StrategyEvent(
                 type=EventType.STEP_FINISHED,
-                message="Step 2: R1 strong target analysis",
+                message="Step 2: 强势初筛",
                 payload={"selected": 0},
             ),
             result,
@@ -415,13 +425,13 @@ def run_r1(
         yield (
             StrategyEvent(
                 type=EventType.LLM_BATCH_STARTED,
-                message=f"R1 batch {i + 1}/{plan.n_batches}",
+                message=f"初筛 批 {i + 1}/{plan.n_batches}",
                 payload={"batch_no": i + 1, "size": len(batch)},
             ),
             None,
         )
 
-        user = r1_user_prompt(
+        user = screening_user_prompt(
             trade_date=bundle.trade_date,
             batch_no=i + 1,
             batch_total=plan.n_batches,
@@ -435,24 +445,24 @@ def run_r1(
         expected_ids = _ids(batch)
         # P0-2 v1 — evidence field whitelist (per candidate). 见
         # _make_evidence_field_validator 注释。
-        allowed_fields_r1 = {
+        allowed_fields_screening = {
             row.get("candidate_id"): _candidate_allowed_field_set(row)
             for row in batch
             if row.get("candidate_id")
         }
         ev_validator = _make_evidence_field_validator(
-            allowed_fields_r1, evidence_attr="evidence"
+            allowed_fields_screening, evidence_attr="evidence"
         )
         try:
             obj, meta = _complete_with_set_check(
                 llm,
-                system=r1_system,
+                system=screening_system,
                 user=user,
                 schema=StrongAnalysisResponse,
                 profile=profile,
                 expected_ids=expected_ids,
                 envelope_defaults={
-                    "stage": STAGE_R1,
+                    "stage": STAGE_SCREENING,
                     "trade_date": bundle.trade_date,
                     "batch_no": i + 1,
                     "batch_total": plan.n_batches,
@@ -467,7 +477,7 @@ def run_r1(
             _EvidenceValidationError,
         ) as e:
             result.failed_batches += 1
-            result.failed_batch_ids.append(f"r1.batch.{i + 1}")
+            result.failed_batch_ids.append(str(i + 1))
             payload: dict[str, Any] = {"batch_no": i + 1}
             if isinstance(e, _EvidenceValidationError):
                 payload["evidence_validation_errors"] = e.errors
@@ -475,7 +485,7 @@ def run_r1(
                 StrategyEvent(
                     type=EventType.VALIDATION_FAILED,
                     level=EventLevel.ERROR,
-                    message=f"R1 batch {i + 1} failed: {e}",
+                    message=f"初筛 批 {i + 1} 失败: {e}",
                     payload=payload,
                 ),
                 None,
@@ -488,7 +498,7 @@ def run_r1(
         yield (
             StrategyEvent(
                 type=EventType.LLM_BATCH_FINISHED,
-                message=f"R1 batch {i + 1}/{plan.n_batches} ok",
+                message=f"初筛 批 {i + 1}/{plan.n_batches} 完成",
                 payload={
                     "batch_no": i + 1,
                     "input_tokens": meta["input_tokens"],
@@ -520,7 +530,7 @@ def run_r1(
     yield (
         StrategyEvent(
             type=EventType.STEP_FINISHED,
-            message="Step 2: R1 strong target analysis",
+            message="Step 2: 强势初筛",
             payload={
                 "success_batches": result.success_batches,
                 "failed_batches": result.failed_batches,
@@ -532,27 +542,27 @@ def run_r1(
 
 
 # ---------------------------------------------------------------------------
-# R2 + (optional) final_ranking
+# 连板预测 + (optional) 全局重排
 # ---------------------------------------------------------------------------
 
 
-def run_r2(
+def run_prediction(
     *,
     llm: LLMClient,
     selected: list[StrongCandidate],
     bundle: Round1Bundle,
     preset: str,
-    input_budget: int = DEFAULT_R2_INPUT_BUDGET,
+    input_budget: int = DEFAULT_PREDICTION_INPUT_BUDGET,
     lgb_min_score_floor: float | None = 30.0,
 ) -> Iterable[tuple[StrategyEvent, RoundResult | None]]:
-    """Run R2; if the candidate set exceeds the input budget, multi-batch + final_ranking."""
-    profile = resolve_profile(preset, STAGE_R2)
-    plan = plan_r1_batches(
+    """Run 连板预测; multi-batch + 全局重排 if the candidate set exceeds the budget."""
+    profile = resolve_profile(preset, STAGE_PREDICTION)
+    plan = plan_llm_batches(
         n_candidates=len(selected),
         input_budget=input_budget,
         output_budget=profile.max_output_tokens,
     )
-    r2_system = build_r2_system(lgb_min_score_floor=lgb_min_score_floor)
+    prediction_system = build_prediction_system(lgb_min_score_floor=lgb_min_score_floor)
     yield (
         StrategyEvent(
             type=EventType.LIVE_STATUS,
@@ -563,7 +573,7 @@ def run_r2(
     yield (
         StrategyEvent(
             type=EventType.STEP_STARTED,
-            message="Step 4: R2 continuation prediction",
+            message="Step 4: 连板预测",
             payload={"n_candidates": len(selected), "n_batches": plan.n_batches},
         ),
         None,
@@ -574,16 +584,16 @@ def run_r2(
         yield (
             StrategyEvent(
                 type=EventType.STEP_FINISHED,
-                message="Step 4: R2 continuation prediction",
+                message="Step 4: 连板预测",
                 payload={"predictions": 0},
             ),
             result,
         )
         return
 
-    # Build candidate dicts for the prompt (R1 selected → minimal payload)
+    # Build candidate dicts for the prompt (初筛 selected → minimal payload)
     payload_rows: list[dict[str, Any]] = [
-        _r2_row_from_selected(c, bundle.candidates) for c in selected
+        _prediction_row_from_selected(c, bundle.candidates) for c in selected
     ]
 
     for i in range(plan.n_batches):
@@ -602,13 +612,13 @@ def run_r2(
         yield (
             StrategyEvent(
                 type=EventType.LLM_BATCH_STARTED,
-                message=f"R2 batch {i + 1}/{plan.n_batches}",
+                message=f"预测 批 {i + 1}/{plan.n_batches}",
                 payload={"batch_no": i + 1, "size": len(batch_objs)},
             ),
             None,
         )
 
-        user = r2_user_prompt(
+        user = prediction_user_prompt(
             trade_date=bundle.trade_date,
             next_trade_date=bundle.next_trade_date,
             candidates=batch_rows,
@@ -619,20 +629,20 @@ def run_r2(
         )
 
         expected_ids = _ids(batch_objs)
-        # P0-2 v1 — evidence field whitelist for R2 (key_evidence on
-        # ContinuationCandidate). 用 R2 prompt 实际看到的 payload_rows 作为允许集。
-        allowed_fields_r2 = {
+        # P0-2 v1 — evidence field whitelist for 连板预测 (key_evidence on
+        # ContinuationCandidate). 用 prompt 实际看到的 payload_rows 作为允许集。
+        allowed_fields_prediction = {
             row.get("candidate_id"): _candidate_allowed_field_set(row)
             for row in batch_rows
             if row.get("candidate_id")
         }
         ev_validator = _make_evidence_field_validator(
-            allowed_fields_r2, evidence_attr="key_evidence"
+            allowed_fields_prediction, evidence_attr="key_evidence"
         )
         try:
             obj, meta = _complete_with_set_check(
                 llm,
-                system=r2_system,
+                system=prediction_system,
                 user=user,
                 schema=ContinuationResponse,
                 profile=profile,
@@ -653,7 +663,7 @@ def run_r2(
             _EvidenceValidationError,
         ) as e:
             result.failed_batches += 1
-            result.failed_batch_ids.append(f"r2.batch.{i + 1}")
+            result.failed_batch_ids.append(str(i + 1))
             payload: dict[str, Any] = {"batch_no": i + 1}
             if isinstance(e, _EvidenceValidationError):
                 payload["evidence_validation_errors"] = e.errors
@@ -661,7 +671,7 @@ def run_r2(
                 StrategyEvent(
                     type=EventType.VALIDATION_FAILED,
                     level=EventLevel.ERROR,
-                    message=f"R2 batch {i + 1} failed: {e}",
+                    message=f"预测 批 {i + 1} 失败: {e}",
                     payload=payload,
                 ),
                 None,
@@ -673,7 +683,7 @@ def run_r2(
         yield (
             StrategyEvent(
                 type=EventType.LLM_BATCH_FINISHED,
-                message=f"R2 batch {i + 1}/{plan.n_batches} ok",
+                message=f"预测 批 {i + 1}/{plan.n_batches} 完成",
                 payload={
                     "batch_no": i + 1,
                     "input_tokens": meta["input_tokens"],
@@ -703,7 +713,7 @@ def run_r2(
     yield (
         StrategyEvent(
             type=EventType.STEP_FINISHED,
-            message="Step 4: R2 continuation prediction",
+            message="Step 4: 连板预测",
             payload={
                 "success_batches": result.success_batches,
                 "failed_batches": result.failed_batches,
@@ -715,7 +725,7 @@ def run_r2(
 
 
 # ---------------------------------------------------------------------------
-# Final ranking (only triggered when R2 was multi-batch)
+# 全局重排 (only triggered when 连板预测 was multi-batch)
 # ---------------------------------------------------------------------------
 
 
@@ -771,7 +781,7 @@ def run_final_ranking(
     yield (
         StrategyEvent(
             type=EventType.STEP_STARTED,
-            message="Step 4.5: final_ranking global reconciliation",
+            message="Step 4.5: 全局重排（多批合并）",
             payload={"n_finalists": len(finalists)},
         ),
         None,
@@ -814,7 +824,7 @@ def run_final_ranking(
         yield (
             StrategyEvent(
                 type=EventType.STEP_FINISHED,
-                message="Step 4.5: final_ranking global reconciliation",
+                message="Step 4.5: 全局重排（多批合并）",
                 payload={"success": False},
             ),
             None,
@@ -842,7 +852,7 @@ def run_final_ranking(
     yield (
         StrategyEvent(
             type=EventType.STEP_FINISHED,
-            message="Step 4.5: final_ranking global reconciliation",
+            message="Step 4.5: 全局重排（多批合并）",
             payload={"success": True, "finalists": len(obj.finalists)},
         ),
         obj,
@@ -854,12 +864,14 @@ def run_final_ranking(
 # ---------------------------------------------------------------------------
 
 
-def _r2_row_from_selected(
+def _prediction_row_from_selected(
     sc: StrongCandidate, all_candidates: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Build a minimal R2 input row from an R1 selected verdict + R1 raw fields.
+    """Build a minimal 连板预测 input row from a 强势初筛 selected verdict + raw fields.
 
     We re-attach the normalized fields so the LLM doesn't have to re-derive them.
+    Dict keys ``r1_*`` are kept verbatim — they appear in the prompt payload the
+    LLM sees, and renaming them would silently change prompt semantics.
     """
     base = next((r for r in all_candidates if r["candidate_id"] == sc.candidate_id), {})
     row: dict[str, Any] = {
@@ -895,13 +907,13 @@ def _final_row_from_pred(p: ContinuationCandidate) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# R3 — Debate-mode revision (each LLM revises its own R2 after seeing peers)
+# 辩论修订 — each LLM revises its own 连板预测 after seeing peers
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class DebateRoundResult:
-    """Outcome of a single LLM's R3 (debate-revision) phase."""
+    """Outcome of a single LLM's 辩论修订 phase."""
 
     success: bool = False
     error: str | None = None
@@ -910,7 +922,7 @@ class DebateRoundResult:
     revised: list[RevisedContinuationCandidate] = field(default_factory=list)
 
 
-def run_r3_debate(
+def run_debate_revision(
     *,
     llm: LLMClient,
     bundle: Round1Bundle,
@@ -919,13 +931,13 @@ def run_r3_debate(
     preset: str,
     self_label: str = "you",
 ) -> Iterable[tuple[StrategyEvent, DebateRoundResult | None]]:
-    """Single-batch R3 revision; yields events + a terminal result.
+    """Single-batch 辩论修订; yields events + a terminal result.
 
     The revising LLM receives its own ``own_predictions`` (full view) plus a
     trimmed view of every entry in ``peers`` (already anonymised). The output
     candidate_id set is enforced to equal the input ``own_predictions`` set.
     """
-    profile = resolve_profile(preset, STAGE_R3)
+    profile = resolve_profile(preset, STAGE_REVISION)
     n = len(own_predictions)
     yield (
         StrategyEvent(
@@ -937,7 +949,7 @@ def run_r3_debate(
     yield (
         StrategyEvent(
             type=EventType.STEP_STARTED,
-            message="Step 4.7: R3 debate revision",
+            message="Step 4.7: 辩论修订",
             payload={"n_candidates": n, "n_peers": len(peers), "self_label": self_label},
         ),
         None,
@@ -948,14 +960,14 @@ def run_r3_debate(
         yield (
             StrategyEvent(
                 type=EventType.STEP_FINISHED,
-                message="Step 4.7: R3 debate revision",
+                message="Step 4.7: 辩论修订",
                 payload={"success": False, "reason": "empty own_predictions"},
             ),
             result,
         )
         return
 
-    user = r3_user_prompt(
+    user = revision_user_prompt(
         trade_date=bundle.trade_date,
         next_trade_date=bundle.next_trade_date,
         own_predictions=own_predictions,
@@ -966,27 +978,27 @@ def run_r3_debate(
     yield (
         StrategyEvent(
             type=EventType.LLM_BATCH_STARTED,
-            message="R3 debate (single batch)",
+            message="辩论修订（单批）",
             payload={"size": n},
         ),
         None,
     )
-    # P0-2 v1 — R3 修订阶段 evidence validator 用 R2 own_predictions 中每只
+    # P0-2 v1 — 辩论修订阶段 evidence validator 用 own_predictions 中每只
     # candidate 在 bundle.candidates 里对应的 dict keys 作为允许字段集。
-    # R3 prompt 给 LLM 看的是 own_predictions（精简版），但 key_evidence 仍可
+    # prompt 给 LLM 看的是 own_predictions（精简版），但 key_evidence 仍可
     # 引用原始 bundle.candidates 中的字段名，故以 bundle 字典 keys 为准。
     bundle_lookup = {c["candidate_id"]: c for c in bundle.candidates if "candidate_id" in c}
-    allowed_fields_r3 = {
+    allowed_fields_revision = {
         c.candidate_id: _candidate_allowed_field_set(bundle_lookup.get(c.candidate_id, {}))
         for c in own_predictions
     }
     ev_validator = _make_evidence_field_validator(
-        allowed_fields_r3, evidence_attr="key_evidence"
+        allowed_fields_revision, evidence_attr="key_evidence"
     )
     try:
         obj, meta = _complete_with_set_check(
             llm,
-            system=R3_DEBATE_SYSTEM,
+            system=REVISION_SYSTEM,
             user=user,
             schema=RevisionResponse,
             profile=profile,
@@ -1013,7 +1025,7 @@ def run_r3_debate(
             StrategyEvent(
                 type=EventType.VALIDATION_FAILED,
                 level=EventLevel.ERROR,
-                message=f"R3 debate failed: {e}",
+                message=f"辩论修订 失败: {e}",
                 payload=fail_payload,
             ),
             None,
@@ -1021,7 +1033,7 @@ def run_r3_debate(
         yield (
             StrategyEvent(
                 type=EventType.STEP_FINISHED,
-                message="Step 4.7: R3 debate revision",
+                message="Step 4.7: 辩论修订",
                 payload={"success": False},
             ),
             result,
@@ -1034,7 +1046,7 @@ def run_r3_debate(
     yield (
         StrategyEvent(
             type=EventType.LLM_BATCH_FINISHED,
-            message="R3 debate ok",
+            message="辩论修订 完成",
             payload={
                 "input_tokens": meta["input_tokens"],
                 "output_tokens": meta["output_tokens"],
@@ -1052,7 +1064,7 @@ def run_r3_debate(
     yield (
         StrategyEvent(
             type=EventType.STEP_FINISHED,
-            message="Step 4.7: R3 debate revision",
+            message="Step 4.7: 辩论修订",
             payload={"success": True, "revised": len(result.revised)},
         ),
         result,

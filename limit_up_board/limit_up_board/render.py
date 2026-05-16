@@ -4,8 +4,8 @@ DESIGN §12.8.3 + the v0.3.1 banner / S5 rules:
     * partial_failed / failed / cancelled  → red banner at top of summary.md
     * is_intraday=True                     → yellow `INTRADAY MODE` banner
     * Both stack
-    * round2_predictions.json contains ALL R2 predictions (with batch_local_rank)
-    * round2_final_ranking.json only emitted when R2 was multi-batch
+    * round2_predictions.json contains ALL 连板预测 outputs (with batch_local_rank)
+    * round2_final_ranking.json only emitted when 连板预测 was multi-batch
 """
 
 from __future__ import annotations
@@ -119,8 +119,8 @@ def render_summary_md(
     if lgb_section:
         out.append(lgb_section)
 
-    # ----- R1 -----
-    out.append(f"\n## R1 强势标的（{len(selected)}/{len(bundle.candidates)} selected）\n")
+    # ----- 强势初筛 -----
+    out.append(f"\n## 强势初筛入选（{len(selected)}/{len(bundle.candidates)}）\n")
     if selected:
         out.append("| Rank | Code | Name | T收盘 (元) | Score | LGB | Level | Theme/Industry | Rationale |\n")
         out.append("|------|------|------|-----------|-------|----:|-------|----------------|-----------|\n")
@@ -133,7 +133,7 @@ def render_summary_md(
     else:
         out.append("_(本轮无强势标的)_\n")
 
-    # ----- R2 / Final -----
+    # ----- 连板预测 / 全局重排 -----
     if predictions:
         if final_ranking is not None:
             out.append("\n## 次日连板预测（按 final_rank 排序）\n")
@@ -332,7 +332,7 @@ def write_report(
             if r.error:
                 (pdir / "error.txt").write_text(r.error, encoding="utf-8")
 
-    # Caller-supplied extras (e.g. R1/R2 raw responses captured during run)
+    # Caller-supplied extras (e.g. 初筛/预测 raw responses captured during run)
     if extra_files:
         for name, content in extra_files.items():
             (root / name).write_text(content, encoding="utf-8")
@@ -402,13 +402,15 @@ def render_debate_summary_md(
 
     # ----- §1 参与 LLM 状态 ------------------------------------------------
     out.append("\n## 1. 参与 LLM 状态\n\n")
-    out.append("| Provider | R1 入选 | R2 预测 | R2 失败批 | final_ranking | R3 修订 | Error |\n")
-    out.append("|----------|--------:|--------:|---------:|:-------------:|:------:|-------|\n")
+    out.append("| Provider | 初筛入选 | 预测产出 | 预测失败批 | 全局重排 | 辩论修订 | Error |\n")
+    out.append("|----------|--------:|--------:|----------:|:--------:|:--------:|-------|\n")
     for r in results:
-        n_r1 = len(r.r1_result.selected) if r.r1_result else 0
-        n_r2 = len(r.r2_result.predictions) if r.r2_result else 0
-        r2_fails = (
-            r.r2_result.failed_batches if r.r2_result and r.r2_result.failed_batches else 0
+        n_screen = len(r.screening_result.selected) if r.screening_result else 0
+        n_pred = len(r.prediction_result.predictions) if r.prediction_result else 0
+        pred_fails = (
+            r.prediction_result.failed_batches
+            if r.prediction_result and r.prediction_result.failed_batches
+            else 0
         )
         if not r.final_attempted:
             fr = "—"
@@ -424,7 +426,7 @@ def render_debate_summary_md(
             rv = "✘"
         err = (r.error or "").replace("|", "/")[:60]
         out.append(
-            f"| `{r.provider}` | {n_r1} | {n_r2} | {r2_fails} | {fr} | {rv} | {err} |\n"
+            f"| `{r.provider}` | {n_screen} | {n_pred} | {pred_fails} | {fr} | {rv} | {err} |\n"
         )
 
     # ----- §2 每个 LLM 的 initial → revised 对照 ----------------------------
@@ -442,7 +444,7 @@ def render_debate_summary_md(
             out.append(f"\n**revision_summary**: {r.revision.revision_summary}\n")
         elif r.revision and not r.revision.success:
             out.append(
-                f"\n_(R3 修订失败: {r.revision.error or '未知'}；下表 Revised 列回退为初始判断)_\n"
+                f"\n_(辩论修订失败: {r.revision.error or '未知'}；下表 Revised 列回退为初始判断)_\n"
             )
         out.append(
             "\n| # | Code | Name | T收盘 (元) | Initial Pred | Init Score | Revised Pred | "
@@ -567,9 +569,9 @@ def render_terminal_summary(
 
     Output sections (only the ones with data are shown):
       - Header line: trade_date / next_trade_date / status / counts
-      - "次日重点关注" — R2 top_candidate picks (full table with rationale)
-      - "观察仓"        — R2 watchlist (compact, no rationale)
-      - "回避"          — R2 avoid (compact)
+      - "次日重点关注" — top_candidate picks (full table with rationale)
+      - "观察仓"        — watchlist (compact, no rationale)
+      - "回避"          — avoid (compact)
       - Footer: report directory + how to re-display
     """
     from rich.console import Console
@@ -668,7 +670,7 @@ def render_terminal_summary(
     console.print(f"\n[k.label]报告目录:[/k.label] [k.value]{root}[/k.value]")
     console.print(
         f"[k.label]完整报告:[/k.label] [k.value]deeptrade strategy report {run_id}[/k.value]  "
-        "[subtitle](查看 markdown 全文 + R1 全表 + 数据快照)[/subtitle]"
+        "[subtitle](查看 markdown 全文 + 强势初筛全表 + 数据快照)[/subtitle]"
     )
     console.print("[subtitle]免责声明: 本报告仅用于策略研究，不构成投资建议。[/subtitle]")
 
@@ -700,7 +702,7 @@ def _render_prediction_table(
 ) -> None:
     """Render one prediction-class section as a uniform table.
 
-    All three R2 prediction classes (top_candidate / watchlist / avoid) share the
+    All three 连板预测 classes (top_candidate / watchlist / avoid) share the
     same column layout — visual hierarchy is conveyed via title_style and
     border_style only. v0.5: an ``LGB`` column was added between ``分`` and
     ``信`` (lightgbm_design.md §11.2).
@@ -983,8 +985,8 @@ def _render_debate_terminal(
         header_style="k.label",
     )
     status_t.add_column("Provider", style="k.value", no_wrap=True)
-    status_t.add_column("R2 初始", justify="right", width=8)
-    status_t.add_column("R3 修订", justify="right", width=8)
+    status_t.add_column("预测初始", justify="right", width=8)
+    status_t.add_column("辩论修订", justify="right", width=8)
     status_t.add_column("升级", justify="right", width=4)
     status_t.add_column("保持", justify="right", width=4)
     status_t.add_column("降级", justify="right", width=4)
@@ -1020,7 +1022,7 @@ def _render_debate_terminal(
     pred_by_provider: dict[str, dict[str, dict]] = {}
     for p in providers:
         prov_map: dict[str, dict] = {}
-        # Prefer revised; fall back to initial when R3 failed for this provider.
+        # Prefer revised; fall back to initial when 辩论修订 failed for this provider.
         source = reviseds.get(p) or initials.get(p, [])
         for c in source:
             cid = c.get("candidate_id")

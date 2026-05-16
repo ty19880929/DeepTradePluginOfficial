@@ -1,9 +1,9 @@
 """Pydantic schemas for the LLM stages.
 
 DESIGN §12.4-12.5 + the v0.3.1 fixes:
-    F5 — R1 evidence max_length=4 (was 8); rationale length-capped via prompt
+    F5 — 强势初筛 evidence max_length=4 (was 8); rationale length-capped via prompt
     M3 — extra='forbid' on every model
-    M4 — FinalRankingResponse for multi-batch R2 reconciliation
+    M4 — FinalRankingResponse for multi-batch 连板预测 reconciliation
     S5 — final_rank field separated from batch_local_rank semantics
 """
 
@@ -35,12 +35,12 @@ class EvidenceItem(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# R1 — strong-target analysis
+# 强势初筛 — strong-target analysis
 # ---------------------------------------------------------------------------
 
 
 class StrongCandidate(BaseModel):
-    """One R1 verdict per input candidate."""
+    """One 强势初筛 verdict per input candidate."""
 
     model_config = ConfigDict(extra="forbid")
     candidate_id: str
@@ -66,7 +66,7 @@ class StrongAnalysisResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# R2 — continuation prediction
+# 连板预测 — continuation prediction
 # ---------------------------------------------------------------------------
 
 
@@ -110,12 +110,13 @@ class ContinuationResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# R3 — Debate-mode revision (each LLM revises its own R2 after seeing peers)
+# 辩论修订 — multi-LLM peer revision (each LLM revises its own 连板预测 after
+# seeing anonymised peer outputs)
 # ---------------------------------------------------------------------------
 
 
 class RevisedContinuationCandidate(ContinuationCandidate):
-    """R2 fields + ``revision_note`` recording why the prediction shifted
+    """连板预测 fields + ``revision_note`` recording why the prediction shifted
     after reviewing peer LLM outputs."""
 
     model_config = ConfigDict(extra="forbid")
@@ -123,9 +124,9 @@ class RevisedContinuationCandidate(ContinuationCandidate):
 
 
 class RevisionResponse(BaseModel):
-    """R3 output. ``candidates`` keeps the same candidate_id set as the LLM's
-    own R2 (set-equality enforced by the pipeline); ranks are 1..N dense
-    within this single batch."""
+    """辩论修订 output. ``candidates`` keeps the same candidate_id set as the
+    LLM's own 连板预测 (set-equality enforced by the pipeline); ranks are 1..N
+    dense within this single batch."""
 
     model_config = ConfigDict(extra="forbid")
     stage: Literal["limit_up_continuation_revision"]
@@ -147,7 +148,7 @@ class RevisionResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Final-ranking — global re-rank when R2 was multi-batch (M4 + S5)
+# 全局重排 — global re-rank when 连板预测 was multi-batch (M4 + S5)
 # ---------------------------------------------------------------------------
 
 

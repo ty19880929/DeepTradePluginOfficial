@@ -4,10 +4,10 @@ events to ``lub_events``, and writes the run record to ``lub_runs``.
 Replaces the deleted framework-side ``core/strategy_runner.py``: each plugin
 manages its own run history on Plan A's pure-isolation model.
 
-v0.8 — debate mode (multi-LLM): when ``RunParams.debate`` is set, R1 + R2 +
-optional final_ranking + R3 (debate revision) all fan out across configured
-LLM providers with one worker thread per provider. Each worker uses an
-isolated ``LubRuntime`` (private DB connection + LLMManager) so concurrent
+v0.8 — debate mode (multi-LLM): when ``RunParams.debate`` is set, 强势初筛 +
+连板预测 + optional 全局重排 + 辩论修订 all fan out across configured LLM
+providers with one worker thread per provider. Each worker uses an isolated
+``LubRuntime`` (private DB connection + LLMManager) so concurrent
 ``LLMClient.complete_json`` calls don't share lock/audit-write bookkeeping.
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import traceback
 import uuid
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -39,10 +40,10 @@ from .lgb.scorer import LgbScorer
 from .pipeline import (
     DebateRoundResult,
     RoundResult,
+    run_debate_revision,
     run_final_ranking,
-    run_r1,
-    run_r2,
-    run_r3_debate,
+    run_prediction,
+    run_screening,
     select_finalists,
 )
 from .prompts import assign_peer_labels
@@ -120,8 +121,8 @@ class ProviderDebateResult:
     """Aggregated per-provider state across debate phases A and B."""
 
     provider: str
-    r1_result: RoundResult | None = None
-    r2_result: RoundResult | None = None
+    screening_result: RoundResult | None = None
+    prediction_result: RoundResult | None = None
     final_initial: FinalRankingResponse | None = None
     final_attempted: bool = False
     revision: DebateRoundResult | None = None
@@ -129,7 +130,7 @@ class ProviderDebateResult:
 
     @property
     def initial_predictions(self) -> list[ContinuationCandidate]:
-        return self.r2_result.predictions if self.r2_result else []
+        return self.prediction_result.predictions if self.prediction_result else []
 
     @property
     def revised_predictions(self) -> list[RevisedContinuationCandidate]:
@@ -169,6 +170,100 @@ class PreconditionError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Per-run plugin-local log file
+# ---------------------------------------------------------------------------
+
+
+def _plugin_logs_dir() -> Path:
+    """Return ``<framework data root>/limit_up_board/logs/`` (mkdir on use).
+
+    Sits alongside the LGB models/datasets/checkpoints dirs so all per-plugin
+    state lives under one tree. We don't reuse the framework's
+    ``~/.deeptrade/logs/deeptrade.log`` because that's a shared rotating sink;
+    the per-run file here is keyed by ``run_id`` so support copy-paste is easy.
+    """
+    from deeptrade.core import paths as _fw_paths  # noqa: PLC0415
+
+    p = _fw_paths.home_dir() / "limit_up_board" / "logs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _attach_run_logfile(run_id: str) -> tuple[logging.Handler, Path] | tuple[None, None]:
+    """Attach a per-run FileHandler to the root logger.
+
+    Returns ``(handler, log_path)`` on success; ``(None, None)`` if the file
+    can't be opened (read-only home, encoding issues, …). The caller MUST
+    detach in a ``finally`` via :func:`_detach_run_logfile`; otherwise every
+    run leaks a file descriptor + an in-memory handler that catches unrelated
+    log records from subsequent runs.
+    """
+    try:
+        log_path = _plugin_logs_dir() / f"run-{run_id}.log"
+        handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        handler.setLevel(logging.DEBUG)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s [%(levelname).1s] %(name)s: %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        # Tag so _detach_run_logfile can identify ours unambiguously even
+        # if other code touches the root logger handlers list.
+        handler._lub_run_id = run_id  # type: ignore[attr-defined]
+        root = logging.getLogger()
+        root.addHandler(handler)
+        # If the root logger's level is higher than DEBUG (default WARNING),
+        # bump it down so DEBUG / INFO records from this plugin reach the
+        # file. We restore on detach.
+        root._lub_prev_level = root.level  # type: ignore[attr-defined]
+        if root.level == logging.NOTSET or root.level > logging.INFO:
+            root.setLevel(logging.INFO)
+        return handler, log_path
+    except Exception:  # noqa: BLE001 — never block a run because logging failed
+        logger.warning("failed to attach per-run log file for %s", run_id, exc_info=True)
+        return None, None
+
+
+def _detach_run_logfile(handler: logging.Handler | None) -> None:
+    if handler is None:
+        return
+    root = logging.getLogger()
+    try:
+        root.removeHandler(handler)
+    except ValueError:
+        pass
+    prev = getattr(root, "_lub_prev_level", None)
+    if isinstance(prev, int):
+        root.setLevel(prev)
+        try:
+            delattr(root, "_lub_prev_level")
+        except AttributeError:
+            pass
+    try:
+        handler.close()
+    except Exception:  # noqa: BLE001 — best-effort
+        pass
+
+
+def _format_traceback(e: BaseException, *, limit: int = 12) -> list[str]:
+    """Render an exception's traceback as a list of stripped lines.
+
+    Used by the runner to feed each line into the renderer as a separate LOG
+    ERROR event, so the dashboard's log panel can show the stack frame-by-frame
+    instead of one wrapped blob. ``limit`` caps the number of stack frames to
+    keep the dashboard from being flooded by a deep recursion.
+    """
+    tb_text = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+    raw_lines = tb_text.splitlines()
+    if len(raw_lines) > limit * 2:
+        head = raw_lines[: limit]
+        tail = raw_lines[-limit:]
+        return head + [f"... ({len(raw_lines) - 2 * limit} more lines elided) ..."] + tail
+    return raw_lines
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -195,6 +290,11 @@ class LubRunner:
         # on_event / on_run_finish / close); see _dispatch_to_renderer for
         # the contract-isolation wrapper.
         self._renderer: EventRenderer = renderer or NullRenderer()
+        # Path of the per-run plugin-local log file (set in execute() /
+        # execute_sync_only()). ``None`` outside of a run, or when attaching
+        # the FileHandler failed (read-only home etc.); the failure mode is
+        # observable in the framework's ~/.deeptrade/logs/deeptrade.log only.
+        self._log_file_path: Path | None = None
 
     # ----- public --------------------------------------------------------
 
@@ -213,6 +313,15 @@ class LubRunner:
         # path identical to v0.4.
         self._rt.lgb_scorer = self._maybe_build_scorer(params)
 
+        # v0.6.5 — attach a per-run plugin-local FileHandler so any
+        # logger.exception(...) traceback (e.g. the bottom-of-execute catch
+        # block, debate worker failures) lands on disk. The framework's shared
+        # ~/.deeptrade/logs/deeptrade.log gets the same record from the
+        # framework-level StreamHandler+RotatingFileHandler (when
+        # setup_logging() has been called by cli.main), so the per-run file
+        # is for support copy-paste rather than primary storage.
+        log_handler, self._log_file_path = _attach_run_logfile(run_id)
+
         # v0.6 — renderer lifecycle. on_run_start is called once before any
         # event; the finally block guarantees on_run_finish + close even on
         # KeyboardInterrupt or unhandled exception (Plan §3.1, §3.6).
@@ -220,6 +329,18 @@ class LubRunner:
             run_id=run_id, params=params, debate=params.debate
         )
         try:
+            # Surface the log file path right at the top of the run so users
+            # can find it before anything goes wrong (dashboard log panel /
+            # legacy stream both pick this up).
+            if self._log_file_path is not None:
+                self._dispatch_to_renderer(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.INFO,
+                        message=f"运行日志: {self._log_file_path}",
+                        payload={"log_file": str(self._log_file_path)},
+                    )
+                )
             if params.debate:
                 outcome = self._execute_debate(run_id, params)
             else:
@@ -240,6 +361,7 @@ class LubRunner:
                 self._renderer.on_run_finish(outcome_for_render)
             finally:
                 self._renderer.close()
+                _detach_run_logfile(log_handler)
         return outcome
 
     def _maybe_build_scorer(self, params: RunParams) -> LgbScorer | None:
@@ -295,8 +417,7 @@ class LubRunner:
             terminal_error = "KeyboardInterrupt"
         except Exception as e:  # noqa: BLE001
             terminal_status = RunStatus.FAILED
-            terminal_error = f"{type(e).__name__}: {e}"
-            logger.exception("limit-up-board run %s raised", run_id)
+            terminal_error = self._handle_runtime_exception(e, run_id, "run")
 
         if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
             terminal_status = RunStatus.PARTIAL_FAILED
@@ -315,7 +436,18 @@ class LubRunner:
             self._rt, intraday=params.allow_intraday, event_cb=self._on_tushare_event
         )
 
+        log_handler, self._log_file_path = _attach_run_logfile(run_id)
+
         self._renderer.on_run_start(run_id=run_id, params=params, debate=False)
+        if self._log_file_path is not None:
+            self._dispatch_to_renderer(
+                StrategyEvent(
+                    type=EventType.LOG,
+                    level=EventLevel.INFO,
+                    message=f"运行日志: {self._log_file_path}",
+                    payload={"log_file": str(self._log_file_path)},
+                )
+            )
         self._record_run_start(run_id, params)
         events: list[StrategyEvent] = []
         terminal_status = RunStatus.SUCCESS
@@ -332,8 +464,7 @@ class LubRunner:
             terminal_error = "KeyboardInterrupt"
         except Exception as e:  # noqa: BLE001
             terminal_status = RunStatus.FAILED
-            terminal_error = f"{type(e).__name__}: {e}"
-            logger.exception("limit-up-board sync %s raised", run_id)
+            terminal_error = self._handle_runtime_exception(e, run_id, "sync")
 
         self._record_run_finish(run_id, terminal_status, terminal_error, events)
         outcome = RunOutcome(
@@ -343,6 +474,7 @@ class LubRunner:
             self._renderer.on_run_finish(outcome)
         finally:
             self._renderer.close()
+            _detach_run_logfile(log_handler)
         return outcome
 
     # ----- pipeline iteration -------------------------------------------
@@ -479,14 +611,14 @@ class LubRunner:
             yield from self._emit_empty_report(bundle, params)
             return
 
-        # Step 2 — R1
+        # Step 2 — 强势初筛
         preset = cfg.app_profile  # v0.7: per-stage tuning resolved by plugin
         # v0.5 LGB: thread the configured min_score_floor into the prompts;
         # when LGB is fully disabled we pass None so the prompt drops the
         # numeric threshold sentence (the rest of the LGB guidance survives).
         lgb_floor = lub_cfg.lgb_min_score_floor if rt.lgb_scorer is not None else None
-        r1_result = None
-        for ev, res in run_r1(
+        screening_result = None
+        for ev, res in run_screening(
             llm=self._llm,
             bundle=bundle,
             preset=preset,
@@ -494,15 +626,15 @@ class LubRunner:
         ):
             yield ev
             if res is not None:
-                r1_result = res
-        selected = r1_result.selected if r1_result else []
+                screening_result = res
+        selected = screening_result.selected if screening_result else []
         if not selected:
-            yield from self._emit_empty_report(bundle, params, reason="no R1 selected")
+            yield from self._emit_empty_report(bundle, params, reason="强势初筛后无候选股")
             return
 
-        # Step 4 — R2
-        r2_result = None
-        for ev, res in run_r2(
+        # Step 4 — 连板预测
+        prediction_result = None
+        for ev, res in run_prediction(
             llm=self._llm,
             selected=selected,
             bundle=bundle,
@@ -511,15 +643,15 @@ class LubRunner:
         ):
             yield ev
             if res is not None:
-                r2_result = res
-        predictions = r2_result.predictions if r2_result else []
+                prediction_result = res
+        predictions = prediction_result.predictions if prediction_result else []
 
-        # Step 4.5 — final_ranking when R2 was multi-batch
+        # Step 4.5 — final_ranking when 连板预测 was multi-batch
         final_obj: FinalRankingResponse | None = None
         final_ranking_attempted = False
-        if r2_result and r2_result.success_batches > 1 and predictions:
+        if prediction_result and prediction_result.success_batches > 1 and predictions:
             final_ranking_attempted = True
-            finalists = select_finalists(predictions, batch_size_hint=r2_result.batch_size or 20)
+            finalists = select_finalists(predictions, batch_size_hint=prediction_result.batch_size or 20)
             for ev, fr_obj in run_final_ranking(
                 llm=self._llm,
                 bundle=bundle,
@@ -532,9 +664,9 @@ class LubRunner:
 
         # Step 5 — finalize
         terminal_status = RunStatus.SUCCESS
-        if r1_result and r1_result.failed_batches > 0:
+        if screening_result and screening_result.failed_batches > 0:
             terminal_status = RunStatus.PARTIAL_FAILED
-        if r2_result and r2_result.failed_batches > 0:
+        if prediction_result and prediction_result.failed_batches > 0:
             terminal_status = RunStatus.PARTIAL_FAILED
         if final_ranking_attempted and final_obj is None:
             terminal_status = RunStatus.PARTIAL_FAILED
@@ -545,12 +677,12 @@ class LubRunner:
             _write_stage_results(rt, "final_ranking", final_obj.finalists)
 
         failed_batches: list[str] = []
-        if r1_result and r1_result.failed_batch_ids:
-            failed_batches.extend(f"R1#{b}" for b in r1_result.failed_batch_ids)
-        if r2_result and r2_result.failed_batch_ids:
-            failed_batches.extend(f"R2#{b}" for b in r2_result.failed_batch_ids)
+        if screening_result and screening_result.failed_batch_ids:
+            failed_batches.extend(f"初筛#{b}" for b in screening_result.failed_batch_ids)
+        if prediction_result and prediction_result.failed_batch_ids:
+            failed_batches.extend(f"预测#{b}" for b in prediction_result.failed_batch_ids)
         if final_ranking_attempted and final_obj is None:
-            failed_batches.append("final_ranking")
+            failed_batches.append("全局重排")
 
         report_path = write_report(
             rt.run_id,
@@ -581,9 +713,9 @@ class LubRunner:
     def _execute_debate(self, run_id: str, params: RunParams) -> RunOutcome:
         """Multi-LLM debate flow.
 
-        Step 0/1 stay on the main thread; R1/R2/(final_ranking) fan out across
-        providers in phase A; R3 fans out across the same providers in phase B
-        with peer outputs cross-fed and anonymised.
+        Step 0/1 stay on the main thread; 强势初筛 + 连板预测 + (final_ranking)
+        fan out across providers in phase A; 辩论修订 fans out across the same
+        providers in phase B with peer outputs cross-fed and anonymised.
         """
         from deeptrade.core import paths
 
@@ -647,11 +779,11 @@ class LubRunner:
             lub_cfg = load_config(rt.db)
             lgb_floor = lub_cfg.lgb_min_score_floor if rt.lgb_scorer is not None else None
 
-            # ----- Phase A: parallel R1 + R2 + (final_ranking) ---------------
+            # ----- Phase A: parallel 强势初筛 + 连板预测 + (final_ranking) ---
             emit(
                 rt.emit(
                     EventType.LIVE_STATUS,
-                    f"[辩论模式] Phase A — 并行执行 R1+R2 ({len(providers)} 个 LLM)",
+                    f"[辩论模式] Phase A — 并行执行 初筛+预测 ({len(providers)} 个 LLM)",
                 )
             )
             with ThreadPoolExecutor(max_workers=len(providers)) as pool:
@@ -687,14 +819,14 @@ class LubRunner:
 
             # Persist phase-A stage results
             for r in provider_results:
-                if r.r1_result and r.r1_result.selected:
+                if r.screening_result and r.screening_result.selected:
                     _write_stage_results(
-                        rt, f"r1:{r.provider}", r.r1_result.selected,
+                        rt, f"r1:{r.provider}", r.screening_result.selected,
                         llm_provider=r.provider,
                     )
-                if r.r2_result and r.r2_result.predictions:
+                if r.prediction_result and r.prediction_result.predictions:
                     _write_stage_results(
-                        rt, f"r2_initial:{r.provider}", r.r2_result.predictions,
+                        rt, f"r2_initial:{r.provider}", r.prediction_result.predictions,
                         llm_provider=r.provider,
                     )
                 if r.final_initial is not None:
@@ -710,17 +842,17 @@ class LubRunner:
                     rt.emit(
                         EventType.LOG,
                         f"[辩论模式] 有效产出 LLM 数 = {len(survivors)} < 2，"
-                        "跳过 R3 修订阶段，按现有结果出报告",
+                        "跳过辩论修订阶段，按现有结果出报告",
                         level=EventLevel.WARN,
                     )
                 )
                 terminal_status = RunStatus.PARTIAL_FAILED
             else:
-                # ----- Phase B: parallel R3 debate revisions -----------------
+                # ----- Phase B: parallel 辩论修订 -----------------------------
                 emit(
                     rt.emit(
                         EventType.LIVE_STATUS,
-                        f"[辩论模式] Phase B — 并行执行 R3 修订 ({len(survivors)} 个 LLM)",
+                        f"[辩论模式] Phase B — 并行执行 辩论修订 ({len(survivors)} 个 LLM)",
                     )
                 )
                 surviving_providers = [r.provider for r in survivors]
@@ -789,14 +921,14 @@ class LubRunner:
                 tag = r.provider
                 if r.error:
                     failed_batches.append(f"{tag}:phase_a")
-                if r.r1_result and r.r1_result.failed_batch_ids:
-                    failed_batches.extend(f"{tag}:R1#{b}" for b in r.r1_result.failed_batch_ids)
-                if r.r2_result and r.r2_result.failed_batch_ids:
-                    failed_batches.extend(f"{tag}:R2#{b}" for b in r.r2_result.failed_batch_ids)
+                if r.screening_result and r.screening_result.failed_batch_ids:
+                    failed_batches.extend(f"{tag}:初筛#{b}" for b in r.screening_result.failed_batch_ids)
+                if r.prediction_result and r.prediction_result.failed_batch_ids:
+                    failed_batches.extend(f"{tag}:预测#{b}" for b in r.prediction_result.failed_batch_ids)
                 if r.final_attempted and r.final_initial is None:
-                    failed_batches.append(f"{tag}:final_ranking")
+                    failed_batches.append(f"{tag}:全局重排")
                 if r.revision and not r.revision.success:
-                    failed_batches.append(f"{tag}:R3")
+                    failed_batches.append(f"{tag}:修订")
 
             if failed_batches:
                 terminal_status = RunStatus.PARTIAL_FAILED
@@ -831,8 +963,7 @@ class LubRunner:
             terminal_error = "KeyboardInterrupt"
         except Exception as e:  # noqa: BLE001
             terminal_status = RunStatus.FAILED
-            terminal_error = f"{type(e).__name__}: {e}"
-            logger.exception("limit-up-board debate run %s raised", run_id)
+            terminal_error = self._handle_runtime_exception(e, run_id, "debate")
 
         if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
             terminal_status = RunStatus.PARTIAL_FAILED
@@ -1014,6 +1145,66 @@ class LubRunner:
         while self._pending:
             yield self._pending.pop(0)
 
+    def _handle_runtime_exception(
+        self, e: BaseException, run_id: str, mode: str
+    ) -> str:
+        """Format a runtime exception for the outcome, surface it to the user.
+
+        v0.6.5 — previously the bottom-of-execute catch block only set
+        ``terminal_error = "ExcType: msg"`` and called ``logger.exception``.
+        With the rich dashboard owning stdout (and Python's last-resort log
+        handler going to stderr), tracebacks frequently never reached the
+        user. This helper:
+
+          1. emits each traceback line as a ``LOG ERROR`` event → the active
+             renderer's log panel surfaces them in order;
+          2. appends a single LOG event pointing at the per-run log file so
+             users have a copy-pasteable path even when the dashboard scrolls;
+          3. delegates to ``logger.exception`` so the FileHandler attached by
+             :func:`_attach_run_logfile` records the full traceback on disk.
+
+        ``mode`` distinguishes the call sites in the framework log ("run" /
+        "debate" / "sync"); the user-facing summary is the same for all
+        three.
+        """
+        summary = f"{type(e).__name__}: {e}"
+        logger.exception("limit-up-board %s %s raised", mode, run_id)
+
+        # Feed each traceback line individually so the dashboard's log ring
+        # buffer captures the stack frame-by-frame (the buffer's maxlen was
+        # bumped to 12 in v0.6.5 to make room for this).
+        try:
+            for line in _format_traceback(e):
+                if not line.strip():
+                    continue
+                self._dispatch_to_renderer(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.ERROR,
+                        message=line,
+                    )
+                )
+        except Exception:  # noqa: BLE001 — never let surfacing the error fail the run
+            logger.warning("surfacing traceback to renderer failed", exc_info=True)
+
+        # Point the user at the log file (banner / log panel both pick this
+        # up). If FileHandler attach failed earlier, ``_log_file_path`` is
+        # None and we omit the hint rather than print a misleading path.
+        if self._log_file_path is not None:
+            try:
+                self._dispatch_to_renderer(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.ERROR,
+                        message=f"完整 traceback 见 {self._log_file_path}",
+                        payload={"log_file": str(self._log_file_path)},
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return f"{summary}  (完整 traceback 见 {self._log_file_path})"
+        return summary
+
     def _dispatch_to_renderer(self, ev: StrategyEvent) -> None:
         """Hand ``ev`` to the active renderer, with contract isolation.
 
@@ -1119,9 +1310,9 @@ def _worker_phase_a(
     config: ConfigService,
     lgb_min_score_floor: float | None = 30.0,
 ) -> ProviderDebateResult:
-    """One provider's R1 + R2 + (optional) final_ranking. Tagged events are
-    attached to the returned ProviderDebateResult; the main thread will emit
-    them in completion order."""
+    """One provider's 强势初筛 + 连板预测 + (optional) final_ranking. Tagged
+    events are attached to the returned ProviderDebateResult; the main thread
+    will emit them in completion order."""
     db, wrt = open_worker_runtime(
         plugin_id, run_id, config=config, is_intraday=is_intraday
     )
@@ -1133,28 +1324,28 @@ def _worker_phase_a(
 
         events: list[StrategyEvent] = []
 
-        for ev, res in run_r1(
+        for ev, res in run_screening(
             llm=llm, bundle=bundle, preset=preset,
             lgb_min_score_floor=lgb_min_score_floor,
         ):
             events.append(ev)
             if res is not None:
-                out.r1_result = res
-        selected = out.r1_result.selected if out.r1_result else []
+                out.screening_result = res
+        selected = out.screening_result.selected if out.screening_result else []
 
         if selected:
-            for ev, res in run_r2(
+            for ev, res in run_prediction(
                 llm=llm, selected=selected, bundle=bundle, preset=preset,
                 lgb_min_score_floor=lgb_min_score_floor,
             ):
                 events.append(ev)
                 if res is not None:
-                    out.r2_result = res
+                    out.prediction_result = res
 
-        if out.r2_result and out.r2_result.success_batches > 1 and out.r2_result.predictions:
+        if out.prediction_result and out.prediction_result.success_batches > 1 and out.prediction_result.predictions:
             out.final_attempted = True
             finalists = select_finalists(
-                out.r2_result.predictions, batch_size_hint=out.r2_result.batch_size or 20
+                out.prediction_result.predictions, batch_size_hint=out.prediction_result.batch_size or 20
             )
             for ev, fr_obj in run_final_ranking(
                 llm=llm, bundle=bundle, finalists=finalists, preset=preset
@@ -1183,7 +1374,7 @@ def _worker_phase_b(
     peers: list[tuple[str, list[ContinuationCandidate]]],
     config: ConfigService,
 ) -> tuple[list[StrategyEvent], DebateRoundResult]:
-    """One provider's R3 debate revision."""
+    """One provider's 辩论修订 (peer-aware revision)."""
     db, wrt = open_worker_runtime(
         plugin_id, run_id, config=config, is_intraday=is_intraday
     )
@@ -1193,7 +1384,7 @@ def _worker_phase_b(
         )
         events: list[StrategyEvent] = []
         result: DebateRoundResult | None = None
-        for ev, res in run_r3_debate(
+        for ev, res in run_debate_revision(
             llm=llm,
             bundle=bundle,
             own_predictions=own_predictions,
@@ -1204,7 +1395,7 @@ def _worker_phase_b(
             if res is not None:
                 result = res
         if result is None:
-            result = DebateRoundResult(error="run_r3_debate yielded no terminal result")
+            result = DebateRoundResult(error="run_debate_revision yielded no terminal result")
         return events, result
     finally:
         db.close()
@@ -1251,7 +1442,7 @@ def _write_stage_results(
     *,
     llm_provider: str | None = None,
 ) -> None:
-    """Persist R1/R2/final_ranking/R3 outputs to lub_stage_results.
+    """Persist 强势初筛/连板预测/全局重排/辩论修订 outputs to lub_stage_results.
 
     In debate mode, ``stage`` is suffixed with the provider (e.g.
     ``r1:deepseek``) to keep the (run_id, stage, ts_code) PK unique across
