@@ -9,7 +9,7 @@
       "subdir": "limit_up_board",
       "tag_prefix": "limit-up-board/",
       "min_framework_version": "0.4.2",
-      "latest_version": "limit-up-board/v0.6.7"
+      "latest_version": "limit-up-board/v0.6.8"
     },
     "volume-anomaly": {
       "name": "成交量异动策略",
