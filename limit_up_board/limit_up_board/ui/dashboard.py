@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sys
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -62,9 +63,8 @@ class RichDashboardRenderer:
     """
 
     def __init__(self, *, no_color: bool = False) -> None:
-        # Console: stderr is intentionally left alone (the framework's logger
-        # writes there). The dashboard draws to stdout so it composes with
-        # the post-run ``status:`` line printed by cli.py.
+        # Console writes to stdout; the post-run ``status:`` line printed by
+        # cli.py composes naturally after Live.__exit__ restores the stream.
         self._console = Console(
             theme=EVA_THEME,
             no_color=no_color,
@@ -75,6 +75,10 @@ class RichDashboardRenderer:
         self._live: Live | None = None
         self._state = DashboardState(plugin_version=_plugin_version())
         self._closed = False
+        # v0.6.7 — root-logger stream handlers we silenced for the duration of
+        # the run. Restored in close(). Empty outside of a run.
+        # See _silence_stream_handlers / _restore_stream_handlers for why.
+        self._silenced_handlers: list[tuple[logging.Handler, int]] = []
 
     # ----- lifecycle -----------------------------------------------------
 
@@ -86,13 +90,26 @@ class RichDashboardRenderer:
         self._state.debate = debate
         if debate:
             self._state.debate_grid = DebateGrid()
+        # v0.6.7 — silence the framework's stderr StreamHandler for the run.
+        # cli.main calls deeptrade.core.logging_config.setup_logging() which
+        # attaches one; concurrent stderr writes during Live._refresh shift
+        # the cursor out from under Rich's "move up N lines" bookkeeping and
+        # leak header/panel fragments above the live region (issue surfaced
+        # in v0.6.6 after setup_logging() was wired up). The per-run
+        # FileHandler attached by runner._attach_run_logfile and the
+        # framework's RotatingFileHandler keep capturing everything to disk.
+        self._silence_stream_handlers()
         self._live = Live(
             self._render_frame(),
             console=self._console,
             refresh_per_second=8,
             transient=False,
             redirect_stdout=False,
-            redirect_stderr=False,
+            # ``redirect_stderr=True`` is a safety net: even with handlers
+            # silenced, any third-party C extension / direct ``sys.stderr``
+            # write gets serialized through Rich instead of corrupting the
+            # live region.
+            redirect_stderr=True,
         )
         self._live.__enter__()
 
@@ -121,6 +138,45 @@ class RichDashboardRenderer:
             except Exception as e:  # noqa: BLE001 — best-effort terminal restore
                 logger.warning("Live.__exit__ raised: %s", e)
             self._live = None
+        # Restore stream handler levels we silenced in on_run_start. Done
+        # AFTER Live.__exit__ so any tail-end stderr writes during teardown
+        # also stay clear of the live region.
+        self._restore_stream_handlers()
+
+    # ----- root-logger stream handler silencing --------------------------
+
+    def _silence_stream_handlers(self) -> None:
+        """Quiet stderr/stdout ``StreamHandler``s on the root logger.
+
+        ``FileHandler`` subclasses are excluded by an ``isinstance`` check so
+        the per-run + rotating disk logs keep flowing. Levels are saved into
+        ``self._silenced_handlers`` for :meth:`_restore_stream_handlers`.
+        """
+        if self._silenced_handlers:
+            # Defensive: re-entry should not double-silence.
+            return
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            if isinstance(h, logging.FileHandler):
+                continue
+            if not isinstance(h, logging.StreamHandler):
+                continue
+            stream = getattr(h, "stream", None)
+            if stream not in (sys.stderr, sys.stdout):
+                continue
+            self._silenced_handlers.append((h, h.level))
+            # CRITICAL+10 is unreachable in practice (logging.CRITICAL = 50),
+            # so this both drops INFO/WARN/ERROR records and leaves room for
+            # someone bumping the root level even higher.
+            h.setLevel(logging.CRITICAL + 10)
+
+    def _restore_stream_handlers(self) -> None:
+        for h, prev_level in self._silenced_handlers:
+            try:
+                h.setLevel(prev_level)
+            except Exception:  # noqa: BLE001 — never crash on teardown
+                logger.warning("failed to restore handler level on %r", h)
+        self._silenced_handlers = []
 
     # ----- event handlers ------------------------------------------------
 
@@ -235,13 +291,23 @@ class RichDashboardRenderer:
         latest.detail = f"✔ 全局重排完成 (in={in_tok} / out={out_tok})"
 
     def _on_validation_failed(self, ev: StrategyEvent) -> None:
+        # v0.6.7 — VALIDATION_FAILED is now ALSO surfaced in the log panel
+        # (untruncated) so the user sees the full error text; the stage
+        # stack still gets the 96-char one-liner so the progress panel
+        # doesn't blow up vertically. Banner trips error_mode in
+        # layout.render_dashboard, which widens the log window to 8/12 rows.
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._state.log_lines.append((ts, "ERROR", ev.message))
+        if self._state.banner is None:
+            self._state.banner = f"✘ {ev.message}"
+            self._state.banner_style = "status.error"
+
         latest = self._state.stages.latest_running()
         if latest is None:
             return
         payload = ev.payload if isinstance(ev.payload, dict) else {}
         batch_no = payload.get("batch_no") or payload.get("batch_id") or "?"
         label = f"批 {batch_no}: {ev.message}"
-        # Trim long messages to keep one screen line.
         if len(label) > 96:
             label = label[:93] + "…"
         self._state.stages.append_failed_batch(latest.stage_id, label)

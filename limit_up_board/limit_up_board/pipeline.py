@@ -476,6 +476,10 @@ def run_screening(
             _SetMismatchError,
             _EvidenceValidationError,
         ) as e:
+            # v0.6.7 — log full traceback to the per-run + framework log files
+            # so support copy-paste captures more than the str(e) summary that
+            # lands in the StrategyEvent.message column.
+            logger.exception("强势初筛 批 %d failed", i + 1)
             result.failed_batches += 1
             result.failed_batch_ids.append(str(i + 1))
             payload: dict[str, Any] = {"batch_no": i + 1}
@@ -662,6 +666,7 @@ def run_prediction(
             _SetMismatchError,
             _EvidenceValidationError,
         ) as e:
+            logger.exception("连板预测 批 %d failed", i + 1)
             result.failed_batches += 1
             result.failed_batch_ids.append(str(i + 1))
             payload: dict[str, Any] = {"batch_no": i + 1}
@@ -813,6 +818,7 @@ def run_final_ranking(
             },
         )
     except (LLMValidationError, LLMTransportError, _SetMismatchError) as e:
+        logger.exception("全局重排 failed")
         yield (
             StrategyEvent(
                 type=EventType.VALIDATION_FAILED,
@@ -1017,6 +1023,7 @@ def run_debate_revision(
         _SetMismatchError,
         _EvidenceValidationError,
     ) as e:
+        logger.exception("辩论修订 failed")
         result.error = f"{type(e).__name__}: {e}"
         fail_payload: dict[str, Any] = {}
         if isinstance(e, _EvidenceValidationError):
