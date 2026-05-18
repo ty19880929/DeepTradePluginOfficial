@@ -19,7 +19,7 @@
       "subdir": "volume_anomaly",
       "tag_prefix": "volume-anomaly/",
       "min_framework_version": "0.4.2",
-      "latest_version": "volume-anomaly/v0.9.4"
+      "latest_version": "volume-anomaly/v0.10.0"
     },
     "accumulation-probe-washout": {
       "name": "吸筹试盘洗盘主升浪策略",
@@ -29,7 +29,7 @@
       "subdir": "accumulation_probe_washout",
       "tag_prefix": "accumulation-probe-washout/",
       "min_framework_version": "0.4.2",
-      "latest_version": "accumulation-probe-washout/v0.1.2"
+      "latest_version": "accumulation-probe-washout/v0.2.0"
     }
   }
 }
