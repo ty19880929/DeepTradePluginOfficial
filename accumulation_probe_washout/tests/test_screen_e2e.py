@@ -150,9 +150,7 @@ def test_screen_writes_signal_history_and_watchlist(fresh_db, monkeypatch):
         tushare=tushare,
     )
     runner = ApwRunner(rt, renderer=NullRenderer())
-    outcome = runner.execute_screen(
-        ScreenParams(trade_date="20240509", allow_intraday=False)
-    )
+    outcome = runner.execute_screen(ScreenParams(trade_date="20240509"))
 
     assert outcome.status.value in {"success", "partial_failed"}, outcome.error
     # signal_history must have ≥ 0 rows (depending on score thresholds), and

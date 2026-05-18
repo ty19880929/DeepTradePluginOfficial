@@ -90,7 +90,6 @@ def _make_runner(db: Database) -> ApwRunner:
         llms=MagicMock(),
     )
     rt.run_id = "11111111-1111-1111-1111-111111111111"
-    rt.is_intraday = False
     # Seed the apw_runs row so _finish_run's UPDATE finds it.
     db.execute(
         "INSERT INTO apw_runs(run_id, mode, trade_date, is_intraday, status, "

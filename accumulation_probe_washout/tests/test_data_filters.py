@@ -116,19 +116,14 @@ class TestResolveTradeDate:
 
     def test_user_specified_T_at_calendar_tail_falls_back(self) -> None:
         cal = _calendar_through("20260515")  # last open day == T
-        T, next_T = resolve_trade_date(
-            datetime(2026, 5, 15, 20, 0, 0),
-            cal,
-            user_specified="20260515",
-        )
+        T, next_T = resolve_trade_date(cal, user_specified="20260515")
         assert T == "20260515"
         # Fallback synthesizes T+1 calendar day instead of raising.
         assert next_T == "20260516"
 
-    def test_auto_T_when_today_is_last_open_day(self) -> None:
+    def test_probe_used_when_no_user_override(self) -> None:
         cal = _calendar_through("20260515")
-        # Friday 20:00 — today is open, after close → T = today.
-        T, next_T = resolve_trade_date(datetime(2026, 5, 15, 20, 0, 0), cal)
+        T, next_T = resolve_trade_date(cal, latest_trade_date="20260515")
         assert T == "20260515"
         assert next_T == "20260516"
 
@@ -141,9 +136,7 @@ class TestResolveTradeDate:
             {"cal_date": "20260518", "is_open": 1, "pretrade_date": "20260515"},
         ]
         cal = TradeCalendar(pd.DataFrame(rows))
-        T, next_T = resolve_trade_date(
-            datetime(2026, 5, 15, 20, 0, 0), cal, user_specified="20260515"
-        )
+        T, next_T = resolve_trade_date(cal, user_specified="20260515")
         assert T == "20260515"
         assert next_T == "20260518"  # real next open, not the synthetic fallback
 

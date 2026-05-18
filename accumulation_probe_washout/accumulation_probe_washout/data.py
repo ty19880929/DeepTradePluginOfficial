@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -33,23 +33,71 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+# Anchor for the latest-published-trade-date probe. The Shanghai Composite has
+# been published every trading day since the API launched and is therefore the
+# safest market-level signal for "what's the most recent trade day Tushare has
+# data for". See limit_up_board/data.py for the same probe rationale.
+LATEST_TRADE_DATE_PROBE_INDEX = "000001.SH"
+
+
+def fetch_latest_trade_date(
+    tushare: Any,
+    *,
+    index_code: str = LATEST_TRADE_DATE_PROBE_INDEX,
+    lookback_days: int = 60,
+) -> str:
+    """Return the most recent published trade_date according to ``index_daily``.
+
+    Previously T was derived from ``datetime.now()`` + ``trade_cal``, which
+    broke whenever the machine's clock or timezone was off. T now comes from
+    market data: Tushare's ``index_daily`` publishes on each trading day's
+    close, so its ``max(trade_date)`` is the authoritative "latest trade day"
+    regardless of local time. The local clock only bounds the query window
+    (quota friendliness); grosser skew falls out of the window and raises here.
+
+    ``force_sync=True`` is mandatory: TushareClient classifies daily-family
+    APIs as ``trade_day_immutable``, so without it a stale cached window
+    would be returned after the next trading day publishes.
+    """
+    now_local = datetime.now()
+    start_date = (now_local - timedelta(days=lookback_days)).strftime("%Y%m%d")
+    end_date = (now_local + timedelta(days=1)).strftime("%Y%m%d")
+    df = tushare.call(
+        "index_daily",
+        params={"ts_code": index_code, "start_date": start_date, "end_date": end_date},
+        force_sync=True,
+    )
+    if df is None or df.empty or "trade_date" not in df.columns:
+        raise RuntimeError(
+            f"index_daily({index_code}) probe returned no rows over "
+            f"{start_date}..{end_date}; cannot resolve the latest trade date. "
+            "Pass --trade-date <YYYYMMDD> to override, or check Tushare access "
+            "(token / api permission / network)."
+        )
+    return str(df["trade_date"].astype(str).max())
+
+
 def resolve_trade_date(
-    now_dt: datetime,
     calendar: TradeCalendar,
     *,
+    latest_trade_date: str | None = None,
     user_specified: str | None = None,
-    allow_intraday: bool = False,
-    close_after: time = time(18, 0),
 ) -> tuple[str, str]:
-    if user_specified:
-        T = user_specified
-    else:
-        today = now_dt.strftime("%Y%m%d")
-        today_is_open = calendar.is_open(today)
-        if today_is_open and (now_dt.time() >= close_after or allow_intraday):
-            T = today
-        else:
-            T = calendar.pretrade_date(today)
+    """Return (T, T+1).
+
+    Exactly one of ``user_specified`` (CLI override) or ``latest_trade_date``
+    (typically from :func:`fetch_latest_trade_date`) must be supplied. T+1 is
+    the first open day strictly after T per the trade calendar.
+
+    No reliance on ``datetime.now()``: a machine with the wrong clock or
+    timezone still gets the correct T, because T is grounded in either an
+    explicit user value or published market data — never local-system time.
+    """
+    T = user_specified or latest_trade_date
+    if not T:
+        raise ValueError(
+            "resolve_trade_date requires either user_specified or latest_trade_date"
+        )
     return T, _safe_next_open(calendar, T)
 
 

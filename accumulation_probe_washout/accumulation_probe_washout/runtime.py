@@ -29,7 +29,6 @@ class ApwRuntime:
     llms: LLMManager
     plugin_id: str = PLUGIN_ID
     run_id: str | None = None
-    is_intraday: bool = False
     tushare: TushareClient | None = None
     # v0.2 reservation — LightGBM scorer slot. Always None in v0.1.
     lgb_scorer: Any | None = None
@@ -49,7 +48,7 @@ class ApwRuntime:
         return StrategyEvent(type=event_type, level=level, message=message, payload=full)
 
 
-def build_tushare_client(rt: ApwRuntime, *, intraday: bool = False, event_cb: Any = None):
+def build_tushare_client(rt: ApwRuntime, *, event_cb: Any = None):
     from deeptrade.core.tushare_client import TushareClient, TushareSDKTransport
 
     token = rt.config.get("tushare.token")
@@ -61,7 +60,6 @@ def build_tushare_client(rt: ApwRuntime, *, intraday: bool = False, event_cb: An
         TushareSDKTransport(str(token)),
         plugin_id=rt.plugin_id,
         rps=cfg.tushare_rps,
-        intraday=intraday,
         event_cb=event_cb,
     )
 
@@ -87,6 +85,5 @@ def open_worker_runtime(parent_rt: ApwRuntime, llm_provider: str | None = None) 
         llms=LLMManager(db, parent_rt.config),
         plugin_id=parent_rt.plugin_id,
         run_id=parent_rt.run_id,
-        is_intraday=parent_rt.is_intraday,
         tushare=parent_rt.tushare,
     )

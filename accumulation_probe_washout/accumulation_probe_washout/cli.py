@@ -63,7 +63,6 @@ def cmd_screen(
         None, "--max-candidates", help="上限：每轮 LLM 批次喂入的候选数量（默认读 apw_config）"
     ),
     force_sync: bool = typer.Option(False, "--force-sync"),
-    allow_intraday: bool = typer.Option(False, "--allow-intraday"),
     no_dashboard: bool = typer.Option(  # noqa: ARG001 — wired in M4
         False, "--no-dashboard",
         help="禁用动态仪表盘 (M4 起生效)。",
@@ -76,7 +75,6 @@ def cmd_screen(
     try:
         params = ScreenParams(
             trade_date=trade_date,
-            allow_intraday=allow_intraday,
             force_sync=force_sync,
             max_candidates=max_candidates,
         )
@@ -111,7 +109,6 @@ def cmd_analyze(
         None, "--prediction",
         help="只分析指定 phase 的候选股（如 launch_ready）",
     ),
-    allow_intraday: bool = typer.Option(False, "--allow-intraday"),
     no_dashboard: bool = typer.Option(False, "--no-dashboard"),
 ) -> None:
     """Read apw_watchlist → LLM → apw_stage_results."""
@@ -121,7 +118,6 @@ def cmd_analyze(
     try:
         params = AnalyzeParams(
             trade_date=trade_date,
-            allow_intraday=allow_intraday,
             max_candidates=max_candidates,
             llm_provider=llm_provider,
             prediction_filter=prediction_filter,
@@ -146,7 +142,6 @@ def cmd_run(
     max_candidates: Optional[int] = typer.Option(None, "--max-candidates"),
     force_sync: bool = typer.Option(False, "--force-sync"),
     llm_provider: Optional[str] = typer.Option(None, "--llm"),
-    allow_intraday: bool = typer.Option(False, "--allow-intraday"),
     no_dashboard: bool = typer.Option(False, "--no-dashboard"),
 ) -> None:
     """One-shot screen → analyze (用户最常用入口)."""
@@ -156,7 +151,6 @@ def cmd_run(
     try:
         params = RunParams(
             trade_date=trade_date,
-            allow_intraday=allow_intraday,
             force_sync=force_sync,
             max_candidates=max_candidates,
             llm_provider=llm_provider,

@@ -17,7 +17,7 @@ import signal
 import traceback
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -38,6 +38,7 @@ from .data import (
     fetch_daily,
     fetch_daily_basic,
     fetch_index_daily,
+    fetch_latest_trade_date,
     fetch_moneyflow,
     fetch_realized_prices,
     fetch_stock_basic,
@@ -64,7 +65,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ScreenParams:
     trade_date: str | None = None
-    allow_intraday: bool = False
     force_sync: bool = False
     max_candidates: int | None = None
 
@@ -72,7 +72,6 @@ class ScreenParams:
 @dataclass
 class AnalyzeParams:
     trade_date: str | None = None
-    allow_intraday: bool = False
     max_candidates: int | None = None
     llm_provider: str | None = None  # --llm <provider>
     prediction_filter: str | None = None  # e.g. "launch_ready"
@@ -82,7 +81,6 @@ class AnalyzeParams:
 class RunParams:
     """run = screen → analyze."""
     trade_date: str | None = None
-    allow_intraday: bool = False
     force_sync: bool = False
     max_candidates: int | None = None
     llm_provider: str | None = None
@@ -173,6 +171,8 @@ class ApwRunner:
         run_id = str(uuid.uuid4())
         self.rt.run_id = run_id
         now = datetime.now(timezone.utc)
+        # ``is_intraday`` column retained for migration-immutability; always
+        # FALSE now that the intraday opt-in flag is gone.
         self.rt.db.execute(
             """
             INSERT INTO apw_runs
@@ -184,7 +184,7 @@ class ApwRunner:
                 mode,
                 trade_date,
                 RunStatus.RUNNING.value,
-                self.rt.is_intraday,
+                False,
                 now,
                 json.dumps(_dc_to_dict(params), ensure_ascii=False),
             ],
@@ -298,9 +298,7 @@ class ApwRunner:
 
         # ---- trade date resolution
         if self.rt.tushare is None:
-            self.rt.tushare = build_tushare_client(
-                self.rt, intraday=params.allow_intraday
-            )
+            self.rt.tushare = build_tushare_client(self.rt)
 
         tushare = self.rt.tushare
         now_utc = datetime.now(timezone.utc)
@@ -313,14 +311,11 @@ class ApwRunner:
         cal_df = fetch_trade_cal(tushare, start=cal_start, end=cal_end)
         calendar = TradeCalendar(cal_df)
 
+        latest = None if params.trade_date else fetch_latest_trade_date(tushare)
         T, _ = resolve_trade_date(
-            datetime.now(),
             calendar,
+            latest_trade_date=latest,
             user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
-        )
-        self.rt.is_intraday = params.allow_intraday and calendar.is_open(T) and (
-            datetime.now().time() < time(18, 0)
         )
 
         if _owns_run:
@@ -591,7 +586,7 @@ class ApwRunner:
         max_h = max(horizons) if horizons else 10
 
         if self.rt.tushare is None:
-            self.rt.tushare = build_tushare_client(self.rt, intraday=False)
+            self.rt.tushare = build_tushare_client(self.rt)
         tushare = self.rt.tushare
 
         # Pick the trade_date range — D3 default keeps only meaningful phases.
@@ -812,9 +807,7 @@ class ApwRunner:
         """
         # ---- resolve T once so both sub-stages key off the same trade day
         if self.rt.tushare is None:
-            self.rt.tushare = build_tushare_client(
-                self.rt, intraday=params.allow_intraday
-            )
+            self.rt.tushare = build_tushare_client(self.rt)
         tushare = self.rt.tushare
         now_utc = datetime.now(timezone.utc)
         cal_start = (now_utc.replace(day=1)
@@ -822,14 +815,11 @@ class ApwRunner:
         cal_end = (now_utc + timedelta(days=90)).strftime("%Y%m%d")
         cal_df = fetch_trade_cal(tushare, start=cal_start, end=cal_end)
         calendar = TradeCalendar(cal_df)
+        latest = None if params.trade_date else fetch_latest_trade_date(tushare)
         T, _ = resolve_trade_date(
-            datetime.now(),
             calendar,
+            latest_trade_date=latest,
             user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
-        )
-        self.rt.is_intraday = params.allow_intraday and calendar.is_open(T) and (
-            datetime.now().time() < time(18, 0)
         )
 
         run_id = self._start_run("run", T, params)
@@ -838,7 +828,6 @@ class ApwRunner:
             # Pin T into the sub-params so screen/analyze resolve to the same day.
             screen_params = ScreenParams(
                 trade_date=T,
-                allow_intraday=params.allow_intraday,
                 force_sync=params.force_sync,
                 max_candidates=params.max_candidates,
             )
@@ -859,7 +848,6 @@ class ApwRunner:
 
             analyze_params = AnalyzeParams(
                 trade_date=T,
-                allow_intraday=params.allow_intraday,
                 max_candidates=params.max_candidates,
                 llm_provider=params.llm_provider,
             )
@@ -909,9 +897,7 @@ class ApwRunner:
 
         # ---- date resolution (mirrors VA — read calendar for next_trade_date)
         if self.rt.tushare is None:
-            self.rt.tushare = build_tushare_client(
-                self.rt, intraday=params.allow_intraday
-            )
+            self.rt.tushare = build_tushare_client(self.rt)
         tushare = self.rt.tushare
         now_utc = datetime.now(timezone.utc)
         cal_start = (now_utc.replace(day=1)
@@ -920,11 +906,11 @@ class ApwRunner:
         cal_df = fetch_trade_cal(tushare, start=cal_start, end=cal_end)
         calendar = TradeCalendar(cal_df)
 
+        latest = None if params.trade_date else fetch_latest_trade_date(tushare)
         T, next_T = resolve_trade_date(
-            datetime.now(),
             calendar,
+            latest_trade_date=latest,
             user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
         )
 
         if _owns_run:
