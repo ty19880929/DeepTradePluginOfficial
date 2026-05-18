@@ -20,6 +20,16 @@
       "tag_prefix": "volume-anomaly/",
       "min_framework_version": "0.4.2",
       "latest_version": "volume-anomaly/v0.9.3"
+    },
+    "accumulation-probe-washout": {
+      "name": "吸筹试盘洗盘主升浪策略",
+      "type": "strategy",
+      "description": "沪深主板吸筹建仓、天量试盘、洗盘震仓后的主升浪启动预测",
+      "repo": "ty19880929/DeepTradePluginOfficial",
+      "subdir": "accumulation_probe_washout",
+      "tag_prefix": "accumulation-probe-washout/",
+      "min_framework_version": "0.4.2",
+      "latest_version": "accumulation-probe-washout/v0.1.0"
     }
   }
 }

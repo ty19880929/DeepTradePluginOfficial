@@ -1,0 +1,75 @@
+"""Renderer fallback + dashboard smoke — T4.5, T4.6, T4.9."""
+
+from __future__ import annotations
+
+import os
+from unittest.mock import patch
+
+import pytest
+
+from accumulation_probe_washout.ui import choose_renderer
+from accumulation_probe_washout.ui.dashboard import RichDashboardRenderer
+from accumulation_probe_washout.ui.legacy import LegacyStreamRenderer
+
+
+class TestChooseRenderer:
+    def test_no_dashboard_flag_forces_legacy(self):
+        r = choose_renderer(no_dashboard=True, mode="screen")
+        assert isinstance(r, LegacyStreamRenderer)
+
+    def test_ci_env_forces_legacy(self):
+        with patch.dict(os.environ, {"CI": "1"}, clear=False):
+            r = choose_renderer(no_dashboard=False, mode="screen")
+            assert isinstance(r, LegacyStreamRenderer)
+
+    def test_deeptrade_no_dashboard_env_forces_legacy(self):
+        with patch.dict(os.environ, {"DEEPTRADE_NO_DASHBOARD": "1"}, clear=False):
+            r = choose_renderer(no_dashboard=False, mode="run")
+            assert isinstance(r, LegacyStreamRenderer)
+
+    def test_term_dumb_forces_legacy(self):
+        with patch.dict(os.environ, {"TERM": "dumb"}, clear=False):
+            r = choose_renderer(no_dashboard=False, mode="screen")
+            assert isinstance(r, LegacyStreamRenderer)
+
+    def test_non_tty_forces_legacy(self):
+        # In pytest, sys.stdout.isatty() is False by default.
+        r = choose_renderer(no_dashboard=False, mode="screen")
+        assert isinstance(r, LegacyStreamRenderer)
+
+
+class TestRichDashboardSmoke:
+    """RichDashboardRenderer should at least render its layout without raising."""
+
+    def test_renders_initial_layout(self):
+        from rich.console import Console
+
+        r = RichDashboardRenderer(mode="screen", console=Console(record=True))
+        # _render must produce something Group-like (rich Renderable)
+        out = r._render()
+        # rich's Group has __rich_console__
+        assert hasattr(out, "__rich_console__") or hasattr(out, "__rich__") or hasattr(out, "renderables")
+
+    def test_funnel_appears_after_data_sync_payload(self):
+        from rich.console import Console
+        from deeptrade.plugins_api.events import EventLevel, EventType, StrategyEvent
+
+        r = RichDashboardRenderer(mode="screen", console=Console(record=True))
+        # Without starting Live, simulate the apply path.
+        r._header = "header"
+        ev = StrategyEvent(
+            type=EventType.DATA_SYNC_FINISHED,
+            level=EventLevel.INFO,
+            message="ok",
+            payload={
+                "n_main_board": 1000,
+                "n_after_st_susp": 950,
+                "n_after_liquidity": 800,
+                "n_after_accumulation": 200,
+                "n_after_probe": 100,
+                "n_after_washout": 50,
+                "n_after_launch_ready": 10,
+            },
+        )
+        r.on_event(ev)
+        assert r.funnel_payload.get("n_after_launch_ready") == 10

@@ -1,0 +1,65 @@
+plugin_id: accumulation-probe-washout
+name: 吸筹试盘洗盘主升浪策略
+version: 0.1.0
+type: strategy
+api_version: "1"
+entrypoint: accumulation_probe_washout.plugin:AccumulationProbeWashoutPlugin
+description: 沪深主板吸筹建仓、天量试盘、洗盘震仓后的主升浪启动预测
+author: DeepTrade
+
+# v0.4.0 框架起：插件自行声明非框架自带的运行时依赖（PEP 508）。
+# D1：首版即引入 pyarrow 与 VA 对齐，为 v0.2 lgb 快照复用做准备。
+dependencies:
+  - "tushare>=1.4"
+  - "pandas>=2.2,<3"
+  - "pyarrow>=15"
+
+permissions:
+  tushare_apis:
+    required:
+      - stock_basic
+      - trade_cal
+      - daily
+      - daily_basic
+      - stock_st
+      - moneyflow
+    optional:
+      - suspend_d
+      - index_daily
+      - limit_list_d
+      - limit_cpt_list
+      - top_list
+      - adj_factor
+  llm: true
+  llm_tools: false
+
+migrations:
+  - version: "20260601_001"
+    file: migrations/20260601_001_init.sql
+    checksum: "sha256:d89172fb8de27d209888cb4d79d2e581b4c52a59b40745fcede2b31caee36704"
+
+# 框架 v0.4+ 会从 plugin_id 推导默认前缀；此处显式声明匹配实际表名。
+table_prefix: apw_
+
+tables:
+  - name: apw_watchlist
+    description: 当前待观察标的（PK=ts_code，一只股票一行）
+    purge_on_uninstall: true
+  - name: apw_signal_history
+    description: 每日吸筹试盘洗盘筛选命中明细
+    purge_on_uninstall: true
+  - name: apw_stage_results
+    description: LLM 主升浪启动分析结果
+    purge_on_uninstall: true
+  - name: apw_runs
+    description: 本插件 run 历史（替代框架 strategy_runs）
+    purge_on_uninstall: true
+  - name: apw_events
+    description: 本插件 run 事件流（替代框架 strategy_events）
+    purge_on_uninstall: true
+  - name: apw_realized_returns
+    description: 事后 T+N 实际收益（PK=signal_date+ts_code）
+    purge_on_uninstall: true
+  - name: apw_config
+    description: 本插件用户可调设置
+    purge_on_uninstall: true
