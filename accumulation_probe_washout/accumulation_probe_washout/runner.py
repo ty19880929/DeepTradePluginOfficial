@@ -383,22 +383,45 @@ class ApwRunner:
             else:
                 index_missing = ["index_daily"]
 
-            # ---- Liquidity filter on T-day amount
+            # ---- Liquidity filter on T-day amount, then market-cap band.
+            # circ_mv comes from daily_basic in 万元 → convert to 亿元 to compare
+            # against cfg.min_circ_mv_yi / max_circ_mv_yi (round-2 P3 — the
+            # band was exposed in settings but had no effect on the universe).
             day_amount = _amount_on_date(quotes, T)
+            day_circ_mv_yi = _circ_mv_yi_on_date(basic_extra, T)
             liquidity_mask = uni["ts_code"].map(
                 lambda c: day_amount.get(c, 0.0) >= cfg.min_amount_yi
             )
             after_liquidity = uni[liquidity_mask].reset_index(drop=True)
             n_after_liquidity = len(after_liquidity)
 
+            def _in_mv_band(code: str) -> bool:
+                cm = day_circ_mv_yi.get(code)
+                # Missing daily_basic for this code on T → exclude to honour
+                # the contract (and avoid feeding through a candidate whose
+                # basic.circ_mv_yi would be 0).
+                if cm is None:
+                    return False
+                if cm < cfg.min_circ_mv_yi:
+                    return False
+                if cfg.max_circ_mv_yi > 0 and cm > cfg.max_circ_mv_yi:
+                    return False
+                return True
+
+            mv_mask = after_liquidity["ts_code"].map(_in_mv_band)
+            after_mv = after_liquidity[mv_mask].reset_index(drop=True)
+            n_after_mv = len(after_mv)
+
             self._emit(
                 EventType.DATA_SYNC_FINISHED,
-                f"数据同步完成: 主板池={n_main_board}, ST/停牌后={n_after_st_susp}, 流动性后={n_after_liquidity}",
+                f"数据同步完成: 主板池={n_main_board}, ST/停牌后={n_after_st_susp}, "
+                f"流动性后={n_after_liquidity}, 市值后={n_after_mv}",
                 payload={
                     "n_total": int(n_total),
                     "n_main_board": int(n_main_board),
                     "n_after_st_susp": int(n_after_st_susp),
                     "n_after_liquidity": int(n_after_liquidity),
+                    "n_after_mv": int(n_after_mv),
                 },
             )
 
@@ -423,7 +446,7 @@ class ApwRunner:
             n_after_launch_ready = 0
 
             hits: list[dict[str, Any]] = []
-            for _, row in after_liquidity.iterrows():
+            for _, row in after_mv.iterrows():
                 code = row["ts_code"]
                 qdf = quotes_by_code.get(code, pd.DataFrame())
                 if qdf.empty:
@@ -453,6 +476,7 @@ class ApwRunner:
                 launch = compute_launch_setup(
                     qdf, probe, wash, cfg,
                     index_df=index_df if not index_df.empty else None,
+                    mf_df=mfd if not mfd.empty else None,
                 )
                 phase = derive_phase(acc, probe, wash, launch, cfg)
                 if phase == APWPhase.LAUNCH_READY:
@@ -912,16 +936,21 @@ class ApwRunner:
             run_id = self.rt.run_id
 
         try:
-            # ---- read watchlist (≥ washing_after_probe by construction)
+            # ---- read watchlist (≥ washing_after_probe by construction).
+            # Only rows refreshed by today's screen (last_seen_date = T) are
+            # eligible; stale rows from prior trade days would otherwise be
+            # re-analysed and persisted under the current T (review round 2 P1).
             self._emit(EventType.STEP_STARTED, "Step 1: 读取 watchlist", payload={"step": 1})
             rows = self.rt.db.fetchall(
                 """
                 SELECT ts_code, name, phase, raw_candidate_json
                 FROM apw_watchlist
                 WHERE phase IN ('washing_after_probe', 'launch_ready')
+                  AND last_seen_date = ?
                 ORDER BY launch_setup_score DESC NULLS LAST,
                          washout_score DESC NULLS LAST
-                """
+                """,
+                [T],
             )
             candidates: list[dict[str, Any]] = []
             for row in rows or []:
@@ -942,6 +971,24 @@ class ApwRunner:
             )
 
             if not candidates:
+                # Probe whether stale rows exist so standalone analyze callers
+                # know they may need to run screen first today.
+                stale_row = self.rt.db.fetchone(
+                    """
+                    SELECT COUNT(*) FROM apw_watchlist
+                    WHERE phase IN ('washing_after_probe', 'launch_ready')
+                      AND last_seen_date <> ?
+                    """,
+                    [T],
+                )
+                n_stale = int(stale_row[0]) if stale_row else 0
+                if n_stale > 0:
+                    self._emit(
+                        EventType.LOG,
+                        f"watchlist 当日候选为 0 (T={T})；存在 {n_stale} 条非当日行，"
+                        "请先运行 screen 刷新当日命中。",
+                        level=EventLevel.WARN,
+                    )
                 if _owns_run:
                     self._finish_run(
                         RunStatus.SUCCESS,
@@ -1214,6 +1261,31 @@ def _amount_on_date(quotes: pd.DataFrame, trade_date: str) -> dict[str, float]:
         amt = float(r.get("amount", 0.0) or 0.0)
         # daily.amount is in 千元 → divide by 100000 to get 亿元
         out[r["ts_code"]] = amt / 100000.0
+    return out
+
+
+def _circ_mv_yi_on_date(
+    basic_extra: pd.DataFrame, trade_date: str
+) -> dict[str, float]:
+    """tushare daily_basic.circ_mv is in 万元 — convert to 亿元 (÷10000).
+
+    Returns ``{}`` if basic_extra is missing the column entirely (older
+    Tushare snapshots), letting the caller decide how to degrade.
+    """
+    if basic_extra is None or basic_extra.empty:
+        return {}
+    if "circ_mv" not in basic_extra.columns:
+        return {}
+    sub = basic_extra[basic_extra["trade_date"].astype(str) == trade_date]
+    out: dict[str, float] = {}
+    for _, r in sub.iterrows():
+        cm = r.get("circ_mv")
+        if cm is None or pd.isna(cm):
+            continue
+        try:
+            out[r["ts_code"]] = float(cm) / 10000.0
+        except (TypeError, ValueError):
+            continue
     return out
 
 

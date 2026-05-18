@@ -53,6 +53,10 @@ class ApwConfig:
     # ---- launch ----
     launch_setup_score_min: float = 55.0
     launch_current_volume_ratio_5d_min: float = 1.2
+    # Last N trade days used to compute current_moneyflow_net_yi (亿元) — fed
+    # into capital_score in compute_launch_setup. 3 ≈ current + last 2 sessions,
+    # which damps single-day spike noise while staying close to "now".
+    launch_moneyflow_days: int = 3
     # Baseline index for relative_strength_20d (HS300 by default; CSI500 =
     # 000905.SH is the other common choice). Empty string disables the index
     # adjustment and falls back to raw 20-day stock return.

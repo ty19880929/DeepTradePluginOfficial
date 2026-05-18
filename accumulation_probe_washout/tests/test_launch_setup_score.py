@@ -94,6 +94,116 @@ class TestRelativeStrength:
         assert result["relative_strength_20d"] is None
 
 
+class TestCurrentMoneyflow:
+    """Round-2 P2-A — current_moneyflow_net_yi must reflect ``mf_df`` and steer
+    capital_score; previously the field was hard-coded ``None`` and the score
+    was stuck at a neutral 50 regardless of input."""
+
+    def _mf_df(
+        self, *, n: int, daily_wan: float, col: str = "net_mf_amount"
+    ) -> pd.DataFrame:
+        base_date = pd.Timestamp("2024-01-01")
+        return pd.DataFrame({
+            "ts_code": ["600000.SH"] * n,
+            "trade_date": [
+                (base_date + pd.Timedelta(days=i)).strftime("%Y%m%d")
+                for i in range(n)
+            ],
+            col: [daily_wan] * n,
+        })
+
+    def test_positive_inflow_sets_field_and_lifts_capital_score(
+        self, default_cfg: ApwConfig
+    ) -> None:
+        qdf = make_quotes(pattern="flat", n=130)
+        # 1 亿/天 净流入 × 3 天 = 3 亿 → capital_score = 50 + 3 * 20 = 110 → clip 100
+        mf = self._mf_df(n=130, daily_wan=10000.0)  # 10000 万 = 1 亿
+        wash = {"washout_days": 0}
+
+        baseline = compute_launch_setup(qdf, None, wash, default_cfg)
+        with_mf = compute_launch_setup(qdf, None, wash, default_cfg, mf_df=mf)
+
+        assert with_mf["current_moneyflow_net_yi"] == 3.0
+        assert baseline["current_moneyflow_net_yi"] is None
+        # capital_score lift propagates into launch_setup_score (weight 0.20):
+        # ΔScore ≥ 0.20 * (100 - 50) = 10.
+        assert with_mf["launch_setup_score"] > baseline["launch_setup_score"] + 5.0
+
+    def test_negative_outflow_drops_capital_score(
+        self, default_cfg: ApwConfig
+    ) -> None:
+        qdf = make_quotes(pattern="flat", n=130)
+        # -1 亿/天 × 3 天 = -3 亿 → capital_score = 50 + (-3) * 20 = -10 → clip 0
+        mf = self._mf_df(n=130, daily_wan=-10000.0)
+        wash = {"washout_days": 0}
+
+        baseline = compute_launch_setup(qdf, None, wash, default_cfg)
+        with_mf = compute_launch_setup(qdf, None, wash, default_cfg, mf_df=mf)
+
+        assert with_mf["current_moneyflow_net_yi"] == -3.0
+        # Capital score drops by ~50 → ΔScore ≤ -0.20 * 50 = -10
+        assert with_mf["launch_setup_score"] < baseline["launch_setup_score"] - 5.0
+
+    def test_alt_net_amount_column_supported(self, default_cfg: ApwConfig) -> None:
+        qdf = make_quotes(pattern="flat", n=130)
+        mf = self._mf_df(n=130, daily_wan=10000.0, col="net_amount")
+        wash = {"washout_days": 0}
+        result = compute_launch_setup(qdf, None, wash, default_cfg, mf_df=mf)
+        assert result["current_moneyflow_net_yi"] == 3.0
+
+    def test_missing_mf_keeps_field_none_and_neutral_score(
+        self, default_cfg: ApwConfig
+    ) -> None:
+        qdf = make_quotes(pattern="flat", n=130)
+        wash = {"washout_days": 0}
+
+        none_result = compute_launch_setup(qdf, None, wash, default_cfg, mf_df=None)
+        empty_result = compute_launch_setup(
+            qdf, None, wash, default_cfg, mf_df=pd.DataFrame()
+        )
+        # Column name we don't recognise — treated as missing.
+        bad_col = pd.DataFrame({
+            "trade_date": ["20240101"], "ts_code": ["600000.SH"], "other": [1.0],
+        })
+        bad_result = compute_launch_setup(qdf, None, wash, default_cfg, mf_df=bad_col)
+
+        for r in (none_result, empty_result, bad_result):
+            assert r["current_moneyflow_net_yi"] is None
+
+        # All three reduce to the same neutral score.
+        assert (
+            none_result["launch_setup_score"]
+            == empty_result["launch_setup_score"]
+            == bad_result["launch_setup_score"]
+        )
+
+    def test_respects_launch_moneyflow_days_window(
+        self, default_cfg: ApwConfig
+    ) -> None:
+        """Only the last ``cfg.launch_moneyflow_days`` rows count."""
+        qdf = make_quotes(pattern="flat", n=130)
+        rows = []
+        base_date = pd.Timestamp("2024-01-01")
+        # 10 historic days of +5 亿/天 + 3 final days of +1 亿/天
+        for i in range(10):
+            rows.append({
+                "ts_code": "600000.SH",
+                "trade_date": (base_date + pd.Timedelta(days=i)).strftime("%Y%m%d"),
+                "net_mf_amount": 50000.0,  # 5 亿
+            })
+        for i in range(10, 13):
+            rows.append({
+                "ts_code": "600000.SH",
+                "trade_date": (base_date + pd.Timedelta(days=i)).strftime("%Y%m%d"),
+                "net_mf_amount": 10000.0,  # 1 亿
+            })
+        mf = pd.DataFrame(rows)
+        wash = {"washout_days": 0}
+        result = compute_launch_setup(qdf, None, wash, default_cfg, mf_df=mf)
+        # tail(3) → 3 × 1 亿 = 3 亿
+        assert result["current_moneyflow_net_yi"] == 3.0
+
+
 class TestBreakWashoutHigh:
     """P1-2 regression — washout_high must exclude the current trade day."""
 

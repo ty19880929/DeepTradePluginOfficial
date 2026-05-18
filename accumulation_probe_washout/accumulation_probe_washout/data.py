@@ -326,10 +326,6 @@ def detect_probe_day(
     if tail.empty:
         return None
 
-    # Rolling stats over the broader base window for vol_rank_pct_60d.
-    base_tail = df.tail(base_lookback).reset_index(drop=True)
-    base_vols = base_tail["vol"].astype(float).values
-
     # D2: scan latest → earliest, return first qualifier.
     candidates = tail.iloc[::-1]
     for _, row in candidates.iterrows():
@@ -354,7 +350,13 @@ def detect_probe_day(
         vol_ratio_5d = vol / avg5
         vol_ratio_20d = vol / avg20
 
-        # vol_rank_pct_60d: percentile within base window.
+        # vol_rank_pct_60d: percentile within the base window ending AT (and
+        # including) the candidate probe day. Slicing relative to ``pos`` keeps
+        # later-day volumes out of the comparison; before round-2 P2 we used
+        # ``df.tail(base_lookback)`` which leaked future sessions into the
+        # ranking and made historic probes look weaker as the run progressed.
+        base_start = max(0, pos - base_lookback + 1)
+        base_vols = df.iloc[base_start : pos + 1]["vol"].astype(float).values
         rank_pct = float((base_vols < vol).sum()) / max(1, len(base_vols)) * 100.0
 
         turnover_rate = float(row.get("turnover_rate", 0.0) or 0.0)
@@ -640,8 +642,17 @@ def compute_launch_setup(
     cfg: ApwConfig,
     *,
     index_df: pd.DataFrame | None = None,
+    mf_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
-    """Score launch-readiness at the latest row in window_df."""
+    """Score launch-readiness at the latest row in window_df.
+
+    ``mf_df`` (moneyflow) is optional — when supplied the net inflow over the
+    last ``cfg.launch_moneyflow_days`` trade days (亿元, from
+    ``net_mf_amount`` / ``net_amount`` in 万元) is attached as
+    ``current_moneyflow_net_yi`` and folded into ``capital_score``; otherwise
+    that field stays ``None`` and ``capital_score`` falls back to a neutral 50
+    (round-2 P2 — was previously hard-coded ``None`` regardless of input).
+    """
     if window_df.empty:
         return {
             "launch_setup_score": 0.0,
@@ -729,7 +740,31 @@ def compute_launch_setup(
         else:
             gap = -close_to_probe_high_pct  # positive gap from below
             near_probe_score = max(0.0, 100.0 - gap * 10.0)
-    capital_score = 50.0  # neutral default — moneyflow filled later if present
+    # capital_score from moneyflow over the last ``launch_moneyflow_days``
+    # sessions. mf_df missing / empty / column-less → neutral 50 and the field
+    # stays None so the runner's missing_data aggregator can flag it (acc-level
+    # 'moneyflow' tag covers per-stock empty mf_df).
+    current_mf_net_yi: float | None = None
+    if mf_df is not None and not mf_df.empty:
+        col = (
+            "net_mf_amount"
+            if "net_mf_amount" in mf_df.columns
+            else ("net_amount" if "net_amount" in mf_df.columns else None)
+        )
+        if col is not None:
+            recent_mf = mf_df.sort_values("trade_date").tail(
+                max(1, cfg.launch_moneyflow_days)
+            )
+            if not recent_mf.empty:
+                current_mf_net_yi = round(
+                    float(recent_mf[col].astype(float).sum()) / 10000.0, 4
+                )
+    if current_mf_net_yi is None:
+        capital_score = 50.0
+    else:
+        # Same scaling as compute_washout's mf_keep_score so the two dimensions
+        # share calibration: ±2.5 亿 net flow ≈ ±50 score points.
+        capital_score = max(0.0, min(100.0, 50.0 + current_mf_net_yi * 20.0))
     # rs20 None → neutral 50 (no index data to score against).
     rs_score = (
         max(0.0, min(100.0, 50.0 + rs20 * 2.0)) if rs20 is not None else 50.0
@@ -750,7 +785,7 @@ def compute_launch_setup(
         "break_washout_high": break_washout_high,
         "current_volume_ratio_5d": round(vr5, 3),
         "current_volume_ratio_20d": round(vr20, 3),
-        "current_moneyflow_net_yi": None,
+        "current_moneyflow_net_yi": current_mf_net_yi,
         "above_ma5": above5,
         "above_ma10": above10,
         "above_ma20": above20,
