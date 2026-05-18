@@ -75,9 +75,12 @@ class RichDashboardRenderer:
         self, *, status: RunStatus, error: str | None, summary: dict[str, Any]
     ) -> None:
         if self._live is not None:
-            self.log_lines.append(f"=== run finished: {status.value}")
-            if error:
-                self.log_lines.append(f"error: {error}")
+            if status.value == "cancelled":
+                self.log_lines.append("=== ⏹ 运行已取消：用户手动中断")
+            else:
+                self.log_lines.append(f"=== run finished: {status.value}")
+                if error:
+                    self.log_lines.append(f"error: {error}")
             self._live.update(self._render())
             self._live.stop()
             self._live = None

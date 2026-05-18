@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ from deeptrade.core.run_status import RunStatus
 from deeptrade.plugins_api.events import EventLevel, EventType, StrategyEvent
 
 from .calendar import TradeCalendar
+from .cancellation import cancel_requested
 from .config import ApwConfig, ApwConfigStore
 from .data import (
     compute_accumulation,
@@ -224,6 +226,68 @@ class ApwRunner:
             self.renderer.on_run_finished(status=status, error=error, summary=summary or {})
         except Exception:  # noqa: BLE001
             logger.exception("renderer crashed on run_finished; ignoring")
+
+    # ---- cancel surfacing ---------------------------------------------------
+
+    def _emit_cancelled_log(self) -> None:
+        """Push two short LOG events explaining the user cancel.
+
+        Replaces the line-by-line traceback fan-out for cancel-class
+        outcomes. WARN level (not ERROR) — "user intent, not failure".
+        """
+        for msg in ("用户手动中断运行，正在停止当前任务", "运行已取消"):
+            try:
+                self._emit(EventType.LOG, msg, level=EventLevel.WARN)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _shielded_finish_run(
+        self,
+        status: RunStatus,
+        *,
+        error: str | None = None,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
+        """Run :meth:`_finish_run` with SIGINT temporarily ignored.
+
+        Without this, a user mashing Ctrl+C during the finally window can
+        skip the ``UPDATE apw_runs SET status = ...`` write and strand the
+        row at ``RunStatus.RUNNING``. Off main thread / embedded falls
+        through unshielded; the prior behaviour was the same.
+        """
+        prev = None
+        installed = False
+        try:
+            prev = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            installed = True
+        except (ValueError, OSError):
+            installed = False
+        try:
+            self._finish_run(status, error=error, summary=summary)
+        finally:
+            if installed and prev is not None:
+                try:
+                    signal.signal(signal.SIGINT, prev)
+                except (ValueError, OSError):
+                    pass
+
+    def _make_cancel_outcome(
+        self, run_id: str, mode: str, _owns_run: bool
+    ) -> "RunOutcome":
+        """Build a CANCELLED RunOutcome and persist the run row (shielded).
+
+        Used by every ``except KeyboardInterrupt`` branch in this runner.
+        Mirrors the same call shape as the original failure branches so
+        callers don't need to change return semantics.
+        """
+        logger.info("apw %s %s cancelled by user", mode, run_id)
+        self._emit_cancelled_log()
+        if _owns_run:
+            self._shielded_finish_run(RunStatus.CANCELLED, error="用户手动中断")
+        return RunOutcome(
+            run_id=run_id, status=RunStatus.CANCELLED, error="用户手动中断"
+        )
 
     # ---- screen (M2) ----
 
@@ -476,12 +540,20 @@ class ApwRunner:
             if _owns_run:
                 self._finish_run(RunStatus.SUCCESS, summary=summary)
             return RunOutcome(run_id=run_id, status=RunStatus.SUCCESS, summary=summary)
+        except KeyboardInterrupt:
+            return self._make_cancel_outcome(run_id, "screen", _owns_run)
         except Exception as exc:  # noqa: BLE001
+            if cancel_requested():
+                logger.info(
+                    "apw screen %s cancelled (derived %s: %s)",
+                    run_id, type(exc).__name__, exc,
+                )
+                return self._make_cancel_outcome(run_id, "screen", _owns_run)
             tb = traceback.format_exc()
             self._emit(EventType.LOG, f"run failed: {exc}", level=EventLevel.ERROR,
                        payload={"traceback": tb})
             if _owns_run:
-                self._finish_run(RunStatus.FAILED, error=str(exc))
+                self._shielded_finish_run(RunStatus.FAILED, error=str(exc))
             return RunOutcome(run_id=run_id, status=RunStatus.FAILED, error=str(exc))
 
     # ---- evaluate (M5) ----
@@ -658,11 +730,19 @@ class ApwRunner:
             }
             self._finish_run(RunStatus.SUCCESS, summary=summary)
             return RunOutcome(run_id=run_id, status=RunStatus.SUCCESS, summary=summary)
+        except KeyboardInterrupt:
+            return self._make_cancel_outcome(run_id, "evaluate", True)
         except Exception as exc:  # noqa: BLE001
+            if cancel_requested():
+                logger.info(
+                    "apw evaluate %s cancelled (derived %s: %s)",
+                    run_id, type(exc).__name__, exc,
+                )
+                return self._make_cancel_outcome(run_id, "evaluate", True)
             tb = traceback.format_exc()
             self._emit(EventType.LOG, f"evaluate failed: {exc}",
                        level=EventLevel.ERROR, payload={"traceback": tb})
-            self._finish_run(RunStatus.FAILED, error=str(exc))
+            self._shielded_finish_run(RunStatus.FAILED, error=str(exc))
             return RunOutcome(run_id=run_id, status=RunStatus.FAILED, error=str(exc))
 
     def _upsert_realized_return(self, row: dict[str, Any]) -> None:
@@ -775,7 +855,15 @@ class ApwRunner:
                 error=analyze_outcome.error,
                 summary=summary,
             )
+        except KeyboardInterrupt:
+            return self._make_cancel_outcome(run_id, "run", True)
         except Exception as exc:  # noqa: BLE001
+            if cancel_requested():
+                logger.info(
+                    "apw run %s cancelled (derived %s: %s)",
+                    run_id, type(exc).__name__, exc,
+                )
+                return self._make_cancel_outcome(run_id, "run", True)
             tb = traceback.format_exc()
             self._emit(
                 EventType.LOG,
@@ -783,7 +871,7 @@ class ApwRunner:
                 level=EventLevel.ERROR,
                 payload={"traceback": tb},
             )
-            self._finish_run(RunStatus.FAILED, error=str(exc))
+            self._shielded_finish_run(RunStatus.FAILED, error=str(exc))
             return RunOutcome(run_id=run_id, status=RunStatus.FAILED, error=str(exc))
 
     # ---- analyze (M3) ----
@@ -930,12 +1018,20 @@ class ApwRunner:
             if _owns_run:
                 self._finish_run(status, summary=summary)
             return RunOutcome(run_id=run_id, status=status, summary=summary)
+        except KeyboardInterrupt:
+            return self._make_cancel_outcome(run_id, "analyze", _owns_run)
         except Exception as exc:  # noqa: BLE001
+            if cancel_requested():
+                logger.info(
+                    "apw analyze %s cancelled (derived %s: %s)",
+                    run_id, type(exc).__name__, exc,
+                )
+                return self._make_cancel_outcome(run_id, "analyze", _owns_run)
             tb = traceback.format_exc()
             self._emit(EventType.LOG, f"analyze failed: {exc}",
                        level=EventLevel.ERROR, payload={"traceback": tb})
             if _owns_run:
-                self._finish_run(RunStatus.FAILED, error=str(exc))
+                self._shielded_finish_run(RunStatus.FAILED, error=str(exc))
             return RunOutcome(run_id=run_id, status=RunStatus.FAILED, error=str(exc))
 
     def _upsert_stage_result(

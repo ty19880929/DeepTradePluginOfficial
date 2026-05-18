@@ -12,6 +12,7 @@ Subcommands (in v0.1):
 
 from __future__ import annotations
 
+import sys
 from typing import Optional
 
 import typer
@@ -20,7 +21,9 @@ from deeptrade.core import paths
 from deeptrade.core.config import ConfigService
 from deeptrade.core.db import Database
 from deeptrade.core.llm_manager import LLMManager
+from deeptrade.core.run_status import RunStatus
 
+from .cancellation import install_sigint_marker
 from .runner import AnalyzeParams, ApwRunner, EvaluateParams, RunParams, ScreenParams
 from .runtime import ApwRuntime
 from .ui.legacy import LegacyStreamRenderer
@@ -80,6 +83,9 @@ def cmd_screen(
         renderer = choose_renderer(no_dashboard=no_dashboard, mode="screen")
         outcome = ApwRunner(rt, renderer=renderer).execute_screen(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value not in {"success", "partial_failed"}:
@@ -123,6 +129,9 @@ def cmd_analyze(
         renderer = choose_renderer(no_dashboard=no_dashboard, mode="analyze")
         outcome = ApwRunner(rt, renderer=renderer).execute_analyze(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value not in {"success", "partial_failed"}:
@@ -155,6 +164,9 @@ def cmd_run(
         renderer = choose_renderer(no_dashboard=no_dashboard, mode="run")
         outcome = ApwRunner(rt, renderer=renderer).execute_run(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value not in {"success", "partial_failed"}:
@@ -190,6 +202,9 @@ def cmd_evaluate(
         # would mislead for a multi-day backfill loop.
         outcome = ApwRunner(rt, renderer=LegacyStreamRenderer()).execute_evaluate(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value not in {"success", "partial_failed"}:
@@ -328,12 +343,20 @@ def main(argv: list[str]) -> int:
     return the exit code from app(...) directly (and ALSO surface
     typer.Exit if raised before invoke completes).
     """
+    # v0.1.1 — install the process-wide SIGINT marker before any runner work
+    # so derived exceptions (DuckDB InterruptException, requests SSL break,
+    # …) that bubble out of a Ctrl+C'd run can be reclassified as CANCELLED
+    # instead of FAILED. See cancellation.py for the contract.
+    install_sigint_marker()
     try:
         rc = app(args=argv, standalone_mode=False)
     except typer.Exit as e:
         return int(e.exit_code)
     except SystemExit as e:
         return int(e.code or 0)
+    except KeyboardInterrupt:
+        sys.stderr.write("\n⏹ 用户手动中断，已停止当前策略执行。\n")
+        return 130
     if isinstance(rc, int):
         return rc
     return 0

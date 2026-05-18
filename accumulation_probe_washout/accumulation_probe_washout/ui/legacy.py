@@ -58,7 +58,9 @@ class LegacyStreamRenderer:
         error: str | None,
         summary: dict[str, Any],
     ) -> None:
-        if error:
+        if status.value == "cancelled":
+            typer.echo("  ⏹ 用户手动中断，已停止当前策略执行。")
+        elif error:
             typer.echo(f"  ✘ run finished: {status.value} — {error}")
         else:
             typer.echo(f"  ✓ run finished: {status.value}")
