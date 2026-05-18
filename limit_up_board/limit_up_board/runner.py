@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import traceback
 import uuid
 from collections.abc import Iterable
@@ -33,6 +34,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from deeptrade.core.llm_client import LLMClient
 
 from .calendar import TradeCalendar
+from .cancellation import cancel_requested
 from .config import LubConfig, load_config
 from .data import Round1Bundle, collect_round1, resolve_trade_date
 from .lgb.audit import record_predictions as _record_lgb_predictions
@@ -436,15 +438,25 @@ class LubRunner:
                     seen_validation_failed = True
         except KeyboardInterrupt:
             terminal_status = RunStatus.CANCELLED
-            terminal_error = "KeyboardInterrupt"
+            terminal_error = "用户手动中断"
+            self._emit_cancelled_log()
         except Exception as e:  # noqa: BLE001
-            terminal_status = RunStatus.FAILED
-            terminal_error = self._handle_runtime_exception(e, run_id, "run")
+            if cancel_requested():
+                terminal_status = RunStatus.CANCELLED
+                terminal_error = "用户手动中断"
+                logger.info(
+                    "limit-up-board run %s cancelled (derived %s: %s)",
+                    run_id, type(e).__name__, e,
+                )
+                self._emit_cancelled_log()
+            else:
+                terminal_status = RunStatus.FAILED
+                terminal_error = self._handle_runtime_exception(e, run_id, "run")
 
         if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
             terminal_status = RunStatus.PARTIAL_FAILED
 
-        self._record_run_finish(run_id, terminal_status, terminal_error, events)
+        self._shielded_record_run_finish(run_id, terminal_status, terminal_error, events)
         return RunOutcome(
             run_id=run_id, status=terminal_status, error=terminal_error, seen_events=events
         )
@@ -483,12 +495,22 @@ class LubRunner:
                 self._dispatch_to_renderer(ev)
         except KeyboardInterrupt:
             terminal_status = RunStatus.CANCELLED
-            terminal_error = "KeyboardInterrupt"
+            terminal_error = "用户手动中断"
+            self._emit_cancelled_log()
         except Exception as e:  # noqa: BLE001
-            terminal_status = RunStatus.FAILED
-            terminal_error = self._handle_runtime_exception(e, run_id, "sync")
+            if cancel_requested():
+                terminal_status = RunStatus.CANCELLED
+                terminal_error = "用户手动中断"
+                logger.info(
+                    "limit-up-board sync %s cancelled (derived %s: %s)",
+                    run_id, type(e).__name__, e,
+                )
+                self._emit_cancelled_log()
+            else:
+                terminal_status = RunStatus.FAILED
+                terminal_error = self._handle_runtime_exception(e, run_id, "sync")
 
-        self._record_run_finish(run_id, terminal_status, terminal_error, events)
+        self._shielded_record_run_finish(run_id, terminal_status, terminal_error, events)
         outcome = RunOutcome(
             run_id=run_id, status=terminal_status, error=terminal_error, seen_events=events
         )
@@ -982,15 +1004,25 @@ class LubRunner:
 
         except KeyboardInterrupt:
             terminal_status = RunStatus.CANCELLED
-            terminal_error = "KeyboardInterrupt"
+            terminal_error = "用户手动中断"
+            self._emit_cancelled_log()
         except Exception as e:  # noqa: BLE001
-            terminal_status = RunStatus.FAILED
-            terminal_error = self._handle_runtime_exception(e, run_id, "debate")
+            if cancel_requested():
+                terminal_status = RunStatus.CANCELLED
+                terminal_error = "用户手动中断"
+                logger.info(
+                    "limit-up-board debate %s cancelled (derived %s: %s)",
+                    run_id, type(e).__name__, e,
+                )
+                self._emit_cancelled_log()
+            else:
+                terminal_status = RunStatus.FAILED
+                terminal_error = self._handle_runtime_exception(e, run_id, "debate")
 
         if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
             terminal_status = RunStatus.PARTIAL_FAILED
 
-        self._record_run_finish(run_id, terminal_status, terminal_error, events)
+        self._shielded_record_run_finish(run_id, terminal_status, terminal_error, events)
         return RunOutcome(
             run_id=run_id,
             status=terminal_status,
@@ -1191,6 +1223,61 @@ class LubRunner:
     def _drain_pending(self) -> Iterable[StrategyEvent]:
         while self._pending:
             yield self._pending.pop(0)
+
+    def _emit_cancelled_log(self) -> None:
+        """Push two short LOG events explaining the user cancel.
+
+        Replaces the line-by-line traceback fan-out of
+        :meth:`_handle_runtime_exception` for cancel-class outcomes. WARN
+        level (not ERROR) so the dashboard renders these in amber rather
+        than red, matching the "user intent, not failure" semantic.
+        Renderer failures are swallowed — the run is already ending.
+        """
+        for msg in ("用户手动中断运行，正在停止当前任务", "运行已取消"):
+            try:
+                self._dispatch_to_renderer(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.WARN,
+                        message=msg,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _shielded_record_run_finish(
+        self,
+        run_id: str,
+        terminal_status: RunStatus,
+        terminal_error: str | None,
+        events: list[StrategyEvent],
+    ) -> None:
+        """Run ``_record_run_finish`` with SIGINT temporarily ignored.
+
+        Without this, a user mashing Ctrl+C during the finally block can
+        skip the ``UPDATE lub_runs SET status = ...`` write and strand the
+        row at ``RunStatus.RUNNING``. The shield is the whole UPDATE — a
+        sub-millisecond window — after which SIGINT semantics are restored
+        immediately. If signal manipulation isn't available (off main
+        thread / embedded interpreter), we run unshielded; the prior
+        behaviour was the same.
+        """
+        prev = None
+        installed = False
+        try:
+            prev = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            installed = True
+        except (ValueError, OSError):
+            installed = False
+        try:
+            self._record_run_finish(run_id, terminal_status, terminal_error, events)
+        finally:
+            if installed and prev is not None:
+                try:
+                    signal.signal(signal.SIGINT, prev)
+                except (ValueError, OSError):
+                    pass
 
     def _handle_runtime_exception(
         self, e: BaseException, run_id: str, mode: str

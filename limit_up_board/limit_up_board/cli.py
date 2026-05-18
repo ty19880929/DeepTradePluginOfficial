@@ -31,9 +31,11 @@ from deeptrade.core import paths
 from deeptrade.core.config import ConfigService
 from deeptrade.core.db import Database
 from deeptrade.core.llm_manager import LLMManager
+from deeptrade.core.run_status import RunStatus
 from deeptrade.plugins_api import render_exception
 
 from .calendar import TradeCalendar
+from .cancellation import install_sigint_marker
 from .config import LubConfig, list_for_show, load_config, save_config, validate_config
 from .lgb import checkpoint as lgb_checkpoint
 from .lgb import paths as lgb_paths
@@ -182,6 +184,9 @@ def cmd_run(
         runner = LubRunner(rt, renderer=renderer)
         outcome = runner.execute(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value not in {"success", "partial_failed"}:
@@ -214,6 +219,9 @@ def cmd_sync(
         runner = LubRunner(rt, renderer=renderer)
         outcome = runner.execute_sync_only(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value != "success":
@@ -1291,6 +1299,12 @@ def main(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 — logging setup never blocks a run
         pass
 
+    # v0.6.9 — install the process-wide SIGINT marker before any runner work
+    # so derived exceptions (DuckDB InterruptException, requests SSL break,
+    # …) that bubble out of a Ctrl+C'd run can be reclassified as CANCELLED
+    # instead of FAILED. See cancellation.py for the contract.
+    install_sigint_marker()
+
     try:
         app(argv, standalone_mode=False)
         return 0
@@ -1302,7 +1316,7 @@ def main(argv: list[str]) -> int:
         except (TypeError, ValueError):
             return 1
     except KeyboardInterrupt:
-        sys.stderr.write("\n✘ cancelled by user\n")
+        sys.stderr.write("\n⏹ 用户手动中断，已停止当前策略执行。\n")
         return 130
     except PreconditionError as e:
         sys.stderr.write(f"✘ {e}\n")

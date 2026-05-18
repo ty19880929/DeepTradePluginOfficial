@@ -283,10 +283,11 @@ class TestU4Cancelled:
         )
         outcome = MagicMock()
         outcome.status = RunStatus.CANCELLED
-        outcome.error = "KeyboardInterrupt"
+        outcome.error = "用户手动中断"
         r.on_run_finish(outcome)
         assert r._state.banner is not None
-        assert "CANCELLED" in r._state.banner
+        assert "运行已取消" in r._state.banner
+        assert "用户手动中断" in r._state.banner
         # Running stage was force-failed.
         st2 = r._state.stages.get("2")
         assert st2 is not None

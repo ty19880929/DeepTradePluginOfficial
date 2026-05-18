@@ -44,7 +44,16 @@ class LegacyStreamRenderer:
         print(f"  {glyph} [{ev.type.value}] {ev.message}", flush=True)
 
     def on_run_finish(self, outcome: RunOutcome) -> None:
-        return None
+        # v0.6.9 — single trailing line for user-cancelled runs. The CLI's
+        # ``status: cancelled`` line still prints (and is the stable parse
+        # surface), but a human-readable trailer here keeps the legacy
+        # stream coherent when the dashboard isn't available (--no-dashboard
+        # / CI / non-TTY). Real failures stay silent — they already get
+        # surfaced via _handle_runtime_exception's LOG ERROR events.
+        from deeptrade.core.run_status import RunStatus  # local import: avoid cycles
+
+        if outcome.status == RunStatus.CANCELLED:
+            print("  ⏹ 用户手动中断，已停止当前策略执行。", flush=True)
 
     def close(self) -> None:
         return None
