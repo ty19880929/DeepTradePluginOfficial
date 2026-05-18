@@ -21,7 +21,6 @@ import uuid
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,7 +35,12 @@ if TYPE_CHECKING:  # pragma: no cover
 from .calendar import TradeCalendar
 from .cancellation import cancel_requested
 from .config import LubConfig, load_config
-from .data import Round1Bundle, collect_round1, resolve_trade_date
+from .data import (
+    Round1Bundle,
+    collect_round1,
+    fetch_latest_trade_date,
+    resolve_trade_date,
+)
 from .lgb.audit import record_predictions as _record_lgb_predictions
 from .lgb.scorer import LgbScorer
 from .pipeline import (
@@ -97,7 +101,6 @@ def _settings_log_event(rt: LubRuntime, lub_cfg: LubConfig) -> StrategyEvent:
 @dataclass
 class RunParams:
     trade_date: str | None = None
-    allow_intraday: bool = False
     force_sync: bool = False
     daily_lookback: int = 30
     moneyflow_lookback: int = 5
@@ -110,11 +113,6 @@ class RunParams:
     # v0.5 LGB 开关：用户传 --no-lgb 时设为 False（一次性覆盖 LubConfig.lgb_enabled）。
     # PR-0.3 仅落字段，pipeline 接入在 PR-2.2。
     lgb_enabled: bool = True
-    # P0-3 (v0.6.4) — 标记 LGB 是否被 intraday 模式自动禁用。仅由 CLI 在
-    # ``allow_intraday and not force_lgb`` 时置 True，让 runner 输出 LOG 事件。
-    # 与 `lgb_enabled=False` 同时为 True 时含义为：本来想跑 LGB（``--no-lgb`` 没传），
-    # 但因 intraday 时点风险被自动禁用。
-    intraday_lgb_auto_disabled: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -307,9 +305,8 @@ class LubRunner:
     def execute(self, params: RunParams) -> RunOutcome:
         run_id = str(uuid.uuid4())
         self._rt.run_id = run_id
-        self._rt.is_intraday = params.allow_intraday
         self._rt.tushare = build_tushare_client(
-            self._rt, intraday=params.allow_intraday, event_cb=self._on_tushare_event
+            self._rt, event_cb=self._on_tushare_event
         )
 
         # v0.5 — construct the LGB scorer once per run. Loading is lazy (first
@@ -465,9 +462,8 @@ class LubRunner:
         """Data-only path: same lifecycle as execute() but yields via _iter_sync."""
         run_id = str(uuid.uuid4())
         self._rt.run_id = run_id
-        self._rt.is_intraday = params.allow_intraday
         self._rt.tushare = build_tushare_client(
-            self._rt, intraday=params.allow_intraday, event_cb=self._on_tushare_event
+            self._rt, event_cb=self._on_tushare_event
         )
 
         log_handler, self._log_file_path = _attach_run_logfile(run_id)
@@ -526,17 +522,19 @@ class LubRunner:
     def _iter_sync(self, params: RunParams) -> Iterable[StrategyEvent]:
         """Data-only iteration (no LLM stages)."""
         rt = self._rt
-        cfg = rt.config.get_app_config()
 
         yield rt.emit(EventType.STEP_STARTED, "Step 0: resolve trade date")
         cal_df = rt.tushare.call("trade_cal")  # type: ignore[union-attr]
         cal = TradeCalendar(cal_df)
+        latest = (
+            None
+            if params.trade_date
+            else fetch_latest_trade_date(rt.tushare)  # type: ignore[arg-type]
+        )
         T, T1 = resolve_trade_date(
-            datetime.now(),
             cal,
+            latest_trade_date=latest,
             user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
-            close_after=cfg.app_close_after if cfg is not None else time(18, 0),
         )
         yield rt.emit(
             EventType.STEP_FINISHED,
@@ -560,7 +558,6 @@ class LubRunner:
             max_close_yuan=lub_cfg.max_close_yuan,
             min_float_mv_yi=lub_cfg.min_float_mv_yi,
             force_sync=params.force_sync,
-            intraday=params.allow_intraday,
         )
         yield from self._drain_pending()
         yield rt.emit(
@@ -574,31 +571,19 @@ class LubRunner:
         rt = self._rt
         cfg = rt.config.get_app_config()
 
-        # P0-3 — intraday 模式自动禁用 LGB 时，先 emit 一条 LOG 让用户在事件流 /
-        # dashboard / `lub_events` 表中看到这一行为决策的原因。
-        if params.intraday_lgb_auto_disabled:
-            yield rt.emit(
-                EventType.LOG,
-                "intraday 模式自动禁用 LGB（训练样本为日终语义，盘中评分等于分布偏移）；"
-                "需保留请加 `--force-lgb` 显式覆盖。",
-                level=EventLevel.WARN,
-            )
-
         # Step 0
         yield rt.emit(EventType.STEP_STARTED, "Step 0: resolve trade date")
         cal_df = rt.tushare.call("trade_cal")  # type: ignore[union-attr]
         cal = TradeCalendar(cal_df)
-        now = datetime.now()
-        T, T1 = resolve_trade_date(
-            now,
-            cal,
-            user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
-            close_after=cfg.app_close_after if cfg is not None else time(18, 0),
+        latest = (
+            None
+            if params.trade_date
+            else fetch_latest_trade_date(rt.tushare)  # type: ignore[arg-type]
         )
-        today_str = now.strftime("%Y%m%d")
-        auto_resolved_to_today_after_close = (
-            params.trade_date is None and not params.allow_intraday and T == today_str
+        T, T1 = resolve_trade_date(
+            cal,
+            latest_trade_date=latest,
+            user_specified=params.trade_date,
         )
         yield rt.emit(
             EventType.STEP_FINISHED,
@@ -623,7 +608,6 @@ class LubRunner:
                 min_float_mv_yi=lub_cfg.min_float_mv_yi,
                 force_sync=params.force_sync,
                 lgb_scorer=rt.lgb_scorer,
-                intraday=params.allow_intraday,
             )
         except TushareUnauthorizedError as e:
             yield rt.emit(
@@ -643,13 +627,6 @@ class LubRunner:
                 "lgb_scored": sum(1 for c in bundle.candidates if c.get("lgb_score") is not None),
             },
         )
-
-        if not bundle.candidates and auto_resolved_to_today_after_close:
-            raise RuntimeError(
-                f"limit_list_d({T}) returned 0 rows after close_after — tushare "
-                "data may not be published yet. Try again later, or use "
-                "`--trade-date <YYYYMMDD>` to specify a known historical day."
-            )
 
         if not bundle.candidates:
             yield from self._emit_empty_report(bundle, params)
@@ -731,7 +708,6 @@ class LubRunner:
         report_path = write_report(
             rt.run_id,
             status=terminal_status,
-            is_intraday=params.allow_intraday,
             bundle=bundle,
             selected=selected,
             predictions=predictions,
@@ -786,17 +762,6 @@ class LubRunner:
 
         seen_validation_failed = False
         try:
-            # P0-3 — intraday 自动禁用 LGB 时给用户 surface 一条 WARN，确保在 debate
-            # 路径下也能在事件流 / 仪表盘 / `lub_events` 表里看到这条决策原因。
-            if params.intraday_lgb_auto_disabled:
-                emit(
-                    rt.emit(
-                        EventType.LOG,
-                        "intraday 模式自动禁用 LGB（训练样本为日终语义，盘中评分"
-                        "等于分布偏移）；需保留请加 `--force-lgb` 显式覆盖。",
-                        level=EventLevel.WARN,
-                    )
-                )
             emit(
                 rt.emit(
                     EventType.LOG,
@@ -840,7 +805,6 @@ class LubRunner:
                         rt.plugin_id,
                         run_id,
                         reports_dir,
-                        params.allow_intraday,
                         rt.config,
                         lgb_floor,
                     ): provider
@@ -911,7 +875,6 @@ class LubRunner:
                             rt.plugin_id,
                             run_id,
                             reports_dir,
-                            params.allow_intraday,
                             r.initial_predictions,
                             [
                                 (
@@ -981,7 +944,6 @@ class LubRunner:
             report_path = write_report(
                 run_id,
                 status=terminal_status,
-                is_intraday=params.allow_intraday,
                 bundle=bundle,
                 selected=[],  # main report tables are replaced by debate sections
                 predictions=[],
@@ -1081,22 +1043,19 @@ class LubRunner:
         self, params: RunParams, emit: Any
     ) -> Round1Bundle | None:
         rt = self._rt
-        cfg = rt.config.get_app_config()
 
         emit(rt.emit(EventType.STEP_STARTED, "Step 0: resolve trade date"))
         cal_df = rt.tushare.call("trade_cal")  # type: ignore[union-attr]
         cal = TradeCalendar(cal_df)
-        now = datetime.now()
-        T, T1 = resolve_trade_date(
-            now,
-            cal,
-            user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
-            close_after=cfg.app_close_after if cfg is not None else time(18, 0),
+        latest = (
+            None
+            if params.trade_date
+            else fetch_latest_trade_date(rt.tushare)  # type: ignore[arg-type]
         )
-        today_str = now.strftime("%Y%m%d")
-        auto_resolved_to_today_after_close = (
-            params.trade_date is None and not params.allow_intraday and T == today_str
+        T, T1 = resolve_trade_date(
+            cal,
+            latest_trade_date=latest,
+            user_specified=params.trade_date,
         )
         # P3-2: 回填 lub_runs.trade_date —— _record_run_start 时 params.trade_date 可能为 None
         # （CLI 未传 --trade-date），导致表里落了 ""，对 history / report join 不友好。
@@ -1127,7 +1086,6 @@ class LubRunner:
                 min_float_mv_yi=lub_cfg.min_float_mv_yi,
                 force_sync=params.force_sync,
                 lgb_scorer=rt.lgb_scorer,
-                intraday=params.allow_intraday,
             )
         except TushareUnauthorizedError as e:
             emit(
@@ -1155,12 +1113,6 @@ class LubRunner:
             )
         )
 
-        if not bundle.candidates and auto_resolved_to_today_after_close:
-            raise RuntimeError(
-                f"limit_list_d({T}) returned 0 rows after close_after — tushare "
-                "data may not be published yet. Try again later, or use "
-                "`--trade-date <YYYYMMDD>` to specify a known historical day."
-            )
         if not bundle.candidates:
             for ev in self._emit_empty_report(bundle, params):
                 emit(ev)
@@ -1197,7 +1149,6 @@ class LubRunner:
         report_path = write_report(
             rt.run_id,
             status=RunStatus.SUCCESS,
-            is_intraday=params.allow_intraday,
             bundle=bundle,
             selected=[],
             predictions=[],
@@ -1371,6 +1322,8 @@ class LubRunner:
     # ----- DB helpers ---------------------------------------------------
 
     def _record_run_start(self, run_id: str, params: RunParams) -> None:
+        # ``is_intraday`` column is retained for migration-immutability; we
+        # always write FALSE now that the intraday opt-in flag is gone.
         self._rt.db.execute(
             "INSERT INTO lub_runs(run_id, trade_date, status, is_intraday, started_at, "
             "params_json) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
@@ -1378,7 +1331,7 @@ class LubRunner:
                 run_id,
                 params.trade_date or "",
                 RunStatus.RUNNING.value,
-                params.allow_intraday,
+                False,
                 json.dumps(params.__dict__, ensure_ascii=False),
             ),
         )
@@ -1440,16 +1393,13 @@ def _worker_phase_a(
     plugin_id: str,
     run_id: str,
     reports_dir: Path,
-    is_intraday: bool,
     config: ConfigService,
     lgb_min_score_floor: float | None = 30.0,
 ) -> ProviderDebateResult:
     """One provider's 强势初筛 + 连板预测 + (optional) final_ranking. Tagged
     events are attached to the returned ProviderDebateResult; the main thread
     will emit them in completion order."""
-    db, wrt = open_worker_runtime(
-        plugin_id, run_id, config=config, is_intraday=is_intraday
-    )
+    db, wrt = open_worker_runtime(plugin_id, run_id, config=config)
     out = ProviderDebateResult(provider=provider)
     try:
         llm = wrt.llms.get_client(
@@ -1503,15 +1453,12 @@ def _worker_phase_b(
     plugin_id: str,
     run_id: str,
     reports_dir: Path,
-    is_intraday: bool,
     own_predictions: list[ContinuationCandidate],
     peers: list[tuple[str, list[ContinuationCandidate]]],
     config: ConfigService,
 ) -> tuple[list[StrategyEvent], DebateRoundResult]:
     """One provider's 辩论修订 (peer-aware revision)."""
-    db, wrt = open_worker_runtime(
-        plugin_id, run_id, config=config, is_intraday=is_intraday
-    )
+    db, wrt = open_worker_runtime(plugin_id, run_id, config=config)
     try:
         llm = wrt.llms.get_client(
             provider, plugin_id=plugin_id, run_id=run_id, reports_dir=reports_dir

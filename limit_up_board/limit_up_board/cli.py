@@ -84,7 +84,6 @@ def _open_runtime() -> tuple[Database, LubRuntime]:
 @app.command("run")
 def cmd_run(
     trade_date: str | None = typer.Option(None, "--trade-date", help="YYYYMMDD"),
-    allow_intraday: bool = typer.Option(False, "--allow-intraday"),
     force_sync: bool = typer.Option(False, "--force-sync"),
     daily_lookback: int = typer.Option(30, "--daily-lookback"),
     moneyflow_lookback: int = typer.Option(5, "--moneyflow-lookback"),
@@ -118,14 +117,6 @@ def cmd_run(
             "初筛/预测 prompt 仍能跑通。等价于 LubConfig.lgb_enabled=false 的一次性覆盖。"
         ),
     ),
-    force_lgb: bool = typer.Option(
-        False,
-        "--force-lgb",
-        help=(
-            "intraday 模式下强制启用 LGB 评分（默认自动禁用）。"
-            "训练样本是日终语义，盘中评分等于分布偏移；仅在你明确接受这一偏差时使用。"
-        ),
-    ),
     no_dashboard: bool = typer.Option(
         False,
         "--no-dashboard",
@@ -156,24 +147,17 @@ def cmd_run(
             typer.echo("✘ --llm 解析后为空")
             raise typer.Exit(2)
 
-    # P0-3 (v0.6.4) — intraday 模式下默认禁用 LGB：训练样本是日终语义（pre_close /
-    # 收盘后聚合等），盘中评分等于分布偏移；用户需 `--force-lgb` 显式接受。
-    intraday_auto_disable = allow_intraday and not no_lgb and not force_lgb
-    effective_lgb_enabled = (not no_lgb) and (force_lgb or not allow_intraday)
-
     db, rt = _open_runtime()
     try:
         params = RunParams(
             trade_date=trade_date,
-            allow_intraday=allow_intraday,
             force_sync=force_sync,
             daily_lookback=daily_lookback,
             moneyflow_lookback=moneyflow_lookback,
             debate=debate,
             debate_llms=debate_llms_list,
             llm_provider=llm_provider,
-            lgb_enabled=effective_lgb_enabled,
-            intraday_lgb_auto_disabled=intraday_auto_disable,
+            lgb_enabled=not no_lgb,
         )
         # v0.6 — pick a renderer. ``choose_renderer`` returns the rich
         # dashboard only when stdout is an interactive terminal and none of
@@ -200,7 +184,6 @@ def cmd_run(
 @app.command("sync")
 def cmd_sync(
     trade_date: str | None = typer.Option(None, "--trade-date", help="YYYYMMDD"),
-    allow_intraday: bool = typer.Option(False, "--allow-intraday"),
     force_sync: bool = typer.Option(False, "--force-sync"),
     daily_lookback: int = typer.Option(30, "--daily-lookback"),
     moneyflow_lookback: int = typer.Option(5, "--moneyflow-lookback"),
@@ -210,7 +193,6 @@ def cmd_sync(
     try:
         params = RunParams(
             trade_date=trade_date,
-            allow_intraday=allow_intraday,
             force_sync=force_sync,
             daily_lookback=daily_lookback,
             moneyflow_lookback=moneyflow_lookback,

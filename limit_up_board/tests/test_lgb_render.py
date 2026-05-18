@@ -134,7 +134,6 @@ def test_summary_md_includes_lgb_model_id_header() -> None:
     bundle = _make_bundle(with_lgb=True)
     md = render_summary_md(
         status=RunStatus.SUCCESS,
-        is_intraday=False,
         bundle=bundle,
         selected=_make_selected(),
         predictions=_make_predictions(),
@@ -147,7 +146,6 @@ def test_summary_md_disabled_when_no_model() -> None:
     bundle = _make_bundle(with_lgb=False)
     md = render_summary_md(
         status=RunStatus.SUCCESS,
-        is_intraday=False,
         bundle=bundle,
         selected=_make_selected(),
         predictions=_make_predictions(),
@@ -160,7 +158,6 @@ def test_summary_md_r1_table_has_lgb_column() -> None:
     bundle = _make_bundle(with_lgb=True)
     md = render_summary_md(
         status=RunStatus.SUCCESS,
-        is_intraday=False,
         bundle=bundle,
         selected=_make_selected(),
         predictions=_make_predictions(),
@@ -176,7 +173,6 @@ def test_summary_md_r2_table_has_lgb_column() -> None:
     bundle = _make_bundle(with_lgb=True)
     md = render_summary_md(
         status=RunStatus.SUCCESS,
-        is_intraday=False,
         bundle=bundle,
         selected=_make_selected(),
         predictions=_make_predictions(),
@@ -198,7 +194,6 @@ def test_write_report_round2_json_includes_lgb_fields(tmp_path: Path) -> None:
     write_report(
         run_id="00000000-0000-0000-0000-000000000bbb",
         status=RunStatus.SUCCESS,
-        is_intraday=False,
         bundle=bundle,
         selected=_make_selected(),
         predictions=_make_predictions(),
@@ -219,7 +214,6 @@ def test_write_report_round2_json_lgb_none_when_disabled(tmp_path: Path) -> None
     write_report(
         run_id="00000000-0000-0000-0000-000000000ccc",
         status=RunStatus.SUCCESS,
-        is_intraday=False,
         bundle=bundle,
         selected=_make_selected(),
         predictions=_make_predictions(),
@@ -321,7 +315,6 @@ def test_distribution_section_in_summary_md() -> None:
     bundle = _make_bundle(with_lgb=True)
     md = render_summary_md(
         status=RunStatus.SUCCESS,
-        is_intraday=False,
         bundle=bundle,
         selected=_make_selected(),
         predictions=_make_predictions(),

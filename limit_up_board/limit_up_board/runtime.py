@@ -47,7 +47,6 @@ class LubRuntime:
     llms: LLMManager
     plugin_id: str = PLUGIN_ID
     run_id: str | None = None
-    is_intraday: bool = False
     tushare: TushareClient | None = None
     lgb_scorer: LgbScorer | None = None
 
@@ -74,7 +73,6 @@ class LubRuntime:
 def build_tushare_client(
     rt: LubRuntime,
     *,
-    intraday: bool = False,
     event_cb: Any = None,
 ) -> TushareClient:
     """Construct a TushareClient bound to this plugin."""
@@ -90,7 +88,6 @@ def build_tushare_client(
         transport,
         plugin_id=rt.plugin_id,
         rps=cfg.tushare_rps,
-        intraday=intraday,
         event_cb=event_cb,
     )
 
@@ -100,7 +97,6 @@ def open_worker_runtime(
     run_id: str,
     *,
     config: ConfigService,
-    is_intraday: bool = False,
     lgb_scorer: LgbScorer | None = None,
 ) -> tuple[Database, LubRuntime]:
     """Construct an isolated runtime for a debate-mode worker thread.
@@ -143,7 +139,6 @@ def open_worker_runtime(
         llms=LLMManager(db, config),
         plugin_id=plugin_id,
         run_id=run_id,
-        is_intraday=is_intraday,
         lgb_scorer=lgb_scorer,
     )
     return db, rt

@@ -2,8 +2,6 @@
 
 DESIGN §12.8.3 + the v0.3.1 banner / S5 rules:
     * partial_failed / failed / cancelled  → red banner at top of summary.md
-    * is_intraday=True                     → yellow `INTRADAY MODE` banner
-    * Both stack
     * round2_predictions.json contains ALL 连板预测 outputs (with batch_local_rank)
     * round2_final_ranking.json only emitted when 连板预测 was multi-batch
 """
@@ -40,7 +38,6 @@ logger = logging.getLogger(__name__)
 def render_banners(
     *,
     status: RunStatus,
-    is_intraday: bool,
     failed_batch_ids: list[str] | None = None,
 ) -> str:
     """Top-of-report banner stack — markdown blockquote style.
@@ -59,16 +56,6 @@ def render_banners(
         parts.append(f"> {marker}")
         if status == RunStatus.PARTIAL_FAILED and failed_batch_ids:
             parts.append(f"> 失败批次：`{', '.join(failed_batch_ids)}`（详见 `llm_calls.jsonl`）")
-    if is_intraday:
-        parts.append("> ⚠ **INTRADAY MODE** — 数据可能不完整，仅供盘中观察，不可与日终结果混用")
-        # P0-3 — 列出未达 close 时点不稳定 / 可能为空的字段，让用户在解读报告时
-        # 自行降低相关字段的可信度（runner 也会自动禁用 LGB —— 详见 lub_events）。
-        parts.append(
-            "> 未达 close 时下列字段可能为空 / 动态："
-            "`daily.amount`、`daily_basic.turnover_rate`、`moneyflow.*`、"
-            "`top_list`、`top_inst`、`cyq_perf`、`limit_step`；LGB 评分默认自动禁用"
-            "（如需保留请加 `--force-lgb`）。"
-        )
     return "\n".join(parts) + ("\n\n" if parts else "")
 
 
@@ -80,7 +67,6 @@ def render_banners(
 def render_summary_md(
     *,
     status: RunStatus,
-    is_intraday: bool,
     bundle: Round1Bundle,
     selected: list[StrongCandidate],
     predictions: list[ContinuationCandidate],
@@ -88,15 +74,12 @@ def render_summary_md(
     failed_batch_ids: list[str] | None = None,
 ) -> str:
     """Build the full summary.md content."""
-    out = [
-        render_banners(status=status, is_intraday=is_intraday, failed_batch_ids=failed_batch_ids)
-    ]
+    out = [render_banners(status=status, failed_batch_ids=failed_batch_ids)]
     out.append("# 打板策略报告\n")
     out.append(
         f"- trade_date: **{bundle.trade_date}**\n"
         f"- next_trade_date: **{bundle.next_trade_date}**\n"
         f"- status: `{status.value}`\n"
-        f"- intraday: `{is_intraday}`\n"
         f"- lgb_model_id: {_lgb_model_id_repr(bundle)}\n"
     )
 
@@ -177,7 +160,6 @@ def write_report(
     run_id: str,
     *,
     status: RunStatus,
-    is_intraday: bool,
     bundle: Round1Bundle,
     selected: list[StrongCandidate],
     predictions: list[ContinuationCandidate],
@@ -201,7 +183,6 @@ def write_report(
     if debate_results:
         md = render_debate_summary_md(
             status=status,
-            is_intraday=is_intraday,
             bundle=bundle,
             results=debate_results,
             failed_batch_ids=failed_batch_ids,
@@ -209,7 +190,6 @@ def write_report(
     else:
         md = render_summary_md(
             status=status,
-            is_intraday=is_intraday,
             bundle=bundle,
             selected=selected,
             predictions=predictions,
@@ -263,7 +243,6 @@ def write_report(
         "trade_date": bundle.trade_date,
         "next_trade_date": bundle.next_trade_date,
         "status": status.value,
-        "is_intraday": is_intraday,
         "candidates": bundle.candidates,
         "market_summary": bundle.market_summary,
         "sector_strength": asdict(bundle.sector_strength),
@@ -355,7 +334,6 @@ def _glyph(pred: str | None) -> str:
 def render_debate_summary_md(
     *,
     status: RunStatus,
-    is_intraday: bool,
     bundle: Round1Bundle,
     results: list[ProviderDebateResult],
     failed_batch_ids: list[str] | None = None,
@@ -372,14 +350,13 @@ def render_debate_summary_md(
       §5 各 LLM 的 revision_summary
     """
     out: list[str] = [
-        render_banners(status=status, is_intraday=is_intraday, failed_batch_ids=failed_batch_ids)
+        render_banners(status=status, failed_batch_ids=failed_batch_ids)
     ]
     out.append("# 打板策略报告（多 LLM 辩论）\n")
     out.append(
         f"- trade_date: **{bundle.trade_date}**\n"
         f"- next_trade_date: **{bundle.next_trade_date}**\n"
         f"- status: `{status.value}`\n"
-        f"- intraday: `{is_intraday}`\n"
         f"- providers: {', '.join(f'`{r.provider}`' for r in results)}\n"
         f"- lgb_model_id: {_lgb_model_id_repr(bundle)}\n"
     )
@@ -596,7 +573,6 @@ def render_terminal_summary(
     trade_date = snap.get("trade_date", "?")
     next_trade_date = snap.get("next_trade_date", "?")
     status = snap.get("status", "unknown")
-    is_intraday = bool(snap.get("is_intraday", False))
     candidates = snap.get("candidates", [])
     close_lookup = {c.get("ts_code"): c.get("close_yuan") for c in candidates}
     n_total = len(candidates)
@@ -611,14 +587,6 @@ def render_terminal_summary(
             "cancelled": "CANCELLED — 用户中断",
         }.get(status, status)
         console.print(Panel(banner_label, style=banner_style, border_style="panel.border.error"))
-    if is_intraday:
-        console.print(
-            Panel(
-                "INTRADAY MODE — 数据可能不完整，仅供盘中观察",
-                style="headline.alert",
-                border_style="panel.border.warn",
-            )
-        )
 
     # ----- Header line -----------------------------------------------------
     mode_tag = "辩论" if debate_mode else ""

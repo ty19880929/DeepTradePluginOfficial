@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
@@ -42,39 +42,77 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+# Anchor for the latest-published-trade-date probe. The Shanghai Composite
+# has been published every trading day since the API launched and is therefore
+# the safest market-level signal for "what's the most recent trade day Tushare
+# has data for".
+LATEST_TRADE_DATE_PROBE_INDEX = "000001.SH"
+
+
+def fetch_latest_trade_date(
+    tushare: TushareClient,
+    *,
+    index_code: str = LATEST_TRADE_DATE_PROBE_INDEX,
+    lookback_days: int = 60,
+) -> str:
+    """Return the most recent published trade_date according to ``index_daily``.
+
+    The strategy used to derive T from ``datetime.now()`` + ``trade_cal``;
+    that broke whenever the machine's clock or timezone was off. Now T is
+    sourced from market data instead — Tushare's ``index_daily`` is published
+    on each trading day's close, so its ``max(trade_date)`` is the authoritative
+    "latest available trade day" regardless of local time.
+
+    The local clock is still consulted to bound the query window
+    (``[now-lookback_days, now+1d]``) — but only as a quota-friendly window
+    bound. As long as the clock is within ``lookback_days`` of reality the
+    probe returns the true latest trade_date; grosser skew falls out of the
+    window and raises here, which is the correct failure mode (much better
+    than silently anchoring T to a wrong "today").
+
+    ``force_sync=True`` is mandatory: TushareClient classifies daily-family
+    APIs as ``trade_day_immutable``, so without it a stale cached window
+    would be returned after the next trading day publishes.
+    """
+    now_local = datetime.now()
+    start_date = (now_local - timedelta(days=lookback_days)).strftime("%Y%m%d")
+    end_date = (now_local + timedelta(days=1)).strftime("%Y%m%d")
+    df = tushare.call(
+        "index_daily",
+        params={"ts_code": index_code, "start_date": start_date, "end_date": end_date},
+        force_sync=True,
+    )
+    if df is None or df.empty or "trade_date" not in df.columns:
+        raise RuntimeError(
+            f"index_daily({index_code}) probe returned no rows over "
+            f"{start_date}..{end_date}; cannot resolve the latest trade date. "
+            "Pass --trade-date <YYYYMMDD> to override, or check Tushare access "
+            "(token / api permission / network)."
+        )
+    return str(df["trade_date"].astype(str).max())
+
+
 def resolve_trade_date(
-    now_dt: datetime,
     calendar: TradeCalendar,
     *,
+    latest_trade_date: str | None = None,
     user_specified: str | None = None,
-    allow_intraday: bool = False,
-    close_after: time = time(18, 0),
 ) -> tuple[str, str]:
-    """Return (T, T+1) per DESIGN §12.2.
+    """Return (T, T+1).
 
-    T defaults to the most recent CLOSED trade day:
-      * if today is open AND now ≥ close_after  → today
-      * if today is open AND allow_intraday      → today (with intraday banner)
-      * else                                     → pretrade_date(today)
+    Exactly one of ``user_specified`` (CLI override) or ``latest_trade_date``
+    (typically from :func:`fetch_latest_trade_date`) must be supplied. T+1 is
+    the first open day strictly after T per the trade calendar.
 
-    T+1 is the first open day strictly after T.
+    No reliance on ``datetime.now()``: a machine with the wrong clock or
+    timezone still gets the correct T, because T is grounded in either an
+    explicit user value or published market data — never local-system time.
     """
-    if user_specified:
-        T = user_specified
-        return T, calendar.next_open(T)
-
-    today = now_dt.strftime("%Y%m%d")
-    today_is_open = calendar.is_open(today)
-
-    if today_is_open and (now_dt.time() >= close_after or allow_intraday):
-        T = today
-    elif today_is_open:
-        # Today is a trade day but it's intraday and user has not opted in.
-        T = calendar.pretrade_date(today)
-    else:
-        # Non-trading day (weekend/holiday). Walk back.
-        T = calendar.pretrade_date(today)
-
+    T = user_specified or latest_trade_date
+    if not T:
+        raise ValueError(
+            "resolve_trade_date requires either user_specified or latest_trade_date"
+        )
     return T, calendar.next_open(T)
 
 
@@ -420,7 +458,6 @@ def collect_round1(
     min_float_mv_yi: float = 0.0,
     force_sync: bool = False,
     lgb_scorer: LgbScorer | None = None,
-    intraday: bool = False,
 ) -> Round1Bundle:
     """Assemble the 强势初筛 input bundle.
 
@@ -442,16 +479,6 @@ def collect_round1(
     """
     bundle = Round1Bundle(trade_date=trade_date, next_trade_date=next_trade_date)
     data_unavailable: list[str] = []
-
-    # P0-3 — intraday 路径下，许多日终聚合字段在 close 之前要么未结算（amount /
-    # turnover_rate / moneyflow），要么 Tushare 返回为空（top_list / cyq_perf /
-    # limit_step）。把这条作为一个统一 marker 写入 data_unavailable，让 LLM /
-    # render 都能识别"哪些字段在当前时点本来就不可靠"。
-    if intraday:
-        data_unavailable.append(
-            "intraday_unstable: daily.amount, daily_basic.turnover_rate, "
-            "moneyflow.*, top_list, top_inst, cyq_perf, limit_step"
-        )
 
     # 1. main board pool
     stock_basic = tushare.call("stock_basic", force_sync=force_sync)
