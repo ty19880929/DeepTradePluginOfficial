@@ -25,8 +25,10 @@ from deeptrade.core import paths
 from deeptrade.core.config import ConfigService
 from deeptrade.core.db import Database
 from deeptrade.core.llm_manager import LLMManager
+from deeptrade.core.run_status import RunStatus
 from deeptrade.plugins_api import render_exception
 
+from .cancellation import install_sigint_marker
 from .lgb import cleanup as lgb_cleanup
 from .lgb import paths as lgb_paths
 from .lgb import registry as lgb_registry
@@ -151,6 +153,9 @@ def cmd_screen(
             typer.echo(
                 f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}"
             )
+            if outcome.status == RunStatus.CANCELLED:
+                typer.echo("message: 用户手动中断，已停止当前策略执行。")
+                raise typer.Exit(130)
             if outcome.error:
                 typer.echo(f"error: {outcome.error}")
             if outcome.status.value != "success":
@@ -175,6 +180,9 @@ def cmd_screen(
         renderer = choose_renderer(no_dashboard=no_dashboard)
         outcome = VaRunner(rt, renderer=renderer).execute_screen(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value not in {"success", "partial_failed"}:
@@ -218,6 +226,9 @@ def cmd_analyze(
         renderer = choose_renderer(no_dashboard=no_dashboard)
         outcome = VaRunner(rt, renderer=renderer).execute_analyze(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value not in {"success", "partial_failed"}:
@@ -243,6 +254,9 @@ def cmd_prune(
         # no --no-dashboard flag is exposed and choose_renderer() is bypassed.
         outcome = VaRunner(rt, renderer=LegacyStreamRenderer()).execute_prune(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value != "success":
@@ -284,6 +298,9 @@ def cmd_evaluate(
         # no --no-dashboard flag is exposed and choose_renderer() is bypassed.
         outcome = VaRunner(rt, renderer=LegacyStreamRenderer()).execute_evaluate(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
         if outcome.error:
             typer.echo(f"error: {outcome.error}")
         if outcome.status.value not in {"success", "partial_failed"}:
@@ -1458,6 +1475,12 @@ def main(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 — logging setup never blocks a run
         pass
 
+    # v0.9.4 — install the process-wide SIGINT marker before any runner work
+    # so derived exceptions (DuckDB InterruptException, requests SSL break,
+    # …) that bubble out of a Ctrl+C'd run can be reclassified as CANCELLED
+    # instead of FAILED. See cancellation.py for the contract.
+    install_sigint_marker()
+
     try:
         app(argv, standalone_mode=False)
         return 0
@@ -1469,7 +1492,7 @@ def main(argv: list[str]) -> int:
         except (TypeError, ValueError):
             return 1
     except KeyboardInterrupt:
-        sys.stderr.write("\n✘ cancelled by user\n")
+        sys.stderr.write("\n⏹ 用户手动中断，已停止当前策略执行。\n")
         return 130
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(render_exception(e) + "\n")

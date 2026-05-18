@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import traceback
 import uuid
 from collections.abc import Iterable
@@ -21,6 +22,7 @@ from deeptrade.core.tushare_client import TushareUnauthorizedError
 from deeptrade.plugins_api.events import EventLevel, EventType, StrategyEvent
 
 from .calendar import TradeCalendar
+from .cancellation import cancel_requested
 from .data import (
     EVALUATE_DEFAULT_LOOKBACK_DAYS,
     EVALUATE_HORIZONS,
@@ -360,19 +362,29 @@ class VaRunner:
                         seen_validation_failed = True
             except KeyboardInterrupt:
                 terminal_status = RunStatus.CANCELLED
-                terminal_error = "KeyboardInterrupt"
+                terminal_error = "用户手动中断"
+                self._emit_cancelled_log()
             except Exception as e:  # noqa: BLE001
-                terminal_status = RunStatus.FAILED
-                terminal_error = self._handle_runtime_exception(
-                    e, run_id, mode
-                )
+                if cancel_requested():
+                    terminal_status = RunStatus.CANCELLED
+                    terminal_error = "用户手动中断"
+                    logger.info(
+                        "volume-anomaly %s run %s cancelled (derived %s: %s)",
+                        mode, run_id, type(e).__name__, e,
+                    )
+                    self._emit_cancelled_log()
+                else:
+                    terminal_status = RunStatus.FAILED
+                    terminal_error = self._handle_runtime_exception(
+                        e, run_id, mode
+                    )
 
             if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
                 terminal_status = RunStatus.PARTIAL_FAILED
 
             outcome.status = terminal_status
             outcome.error = terminal_error
-            self._record_run_finish(run_id, terminal_status, terminal_error, events)
+            self._shielded_record_run_finish(run_id, terminal_status, terminal_error, events)
         finally:
             try:
                 self._renderer.on_run_finish(outcome)
@@ -380,6 +392,62 @@ class VaRunner:
                 self._renderer.close()
                 _detach_run_logfile(log_handler)
         return outcome
+
+    # ----- cancel surfacing ---------------------------------------------
+
+    def _emit_cancelled_log(self) -> None:
+        """Push two short LOG events explaining the user cancel.
+
+        Replaces the line-by-line traceback fan-out of
+        :meth:`_handle_runtime_exception` for cancel-class outcomes. WARN
+        level (not ERROR) so the dashboard renders these in amber rather
+        than red, matching the "user intent, not failure" semantic.
+        Renderer failures are swallowed — the run is already ending.
+        """
+        for msg in ("用户手动中断运行，正在停止当前任务", "运行已取消"):
+            try:
+                self._dispatch_to_renderer(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.WARN,
+                        message=msg,
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _shielded_record_run_finish(
+        self,
+        run_id: str,
+        terminal_status: RunStatus,
+        terminal_error: str | None,
+        events: list[StrategyEvent],
+    ) -> None:
+        """Run ``_record_run_finish`` with SIGINT temporarily ignored.
+
+        Without this, a user mashing Ctrl+C during the finally block can
+        skip the ``UPDATE va_runs SET status = ...`` write and strand the
+        row at ``RunStatus.RUNNING``. The shield is the whole UPDATE — a
+        sub-millisecond window — after which SIGINT semantics are restored
+        immediately. Off main thread / embedded interpreters fall through
+        unshielded; the prior behaviour was the same.
+        """
+        prev = None
+        installed = False
+        try:
+            prev = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            installed = True
+        except (ValueError, OSError):
+            installed = False
+        try:
+            self._record_run_finish(run_id, terminal_status, terminal_error, events)
+        finally:
+            if installed and prev is not None:
+                try:
+                    signal.signal(signal.SIGINT, prev)
+                except (ValueError, OSError):
+                    pass
 
     # ----- error surfacing ----------------------------------------------
 

@@ -421,7 +421,7 @@ class RichDashboardRenderer:
         from deeptrade.core.run_status import RunStatus
 
         if outcome.status == RunStatus.CANCELLED:
-            self._state.banner = "⏹ CANCELLED — 用户中断"
+            self._state.banner = "⏹ 运行已取消：用户手动中断"
             self._state.banner_style = "status.error"
             latest = self._state.stages.latest_running()
             if latest is not None:
