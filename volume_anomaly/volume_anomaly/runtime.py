@@ -30,7 +30,6 @@ class VaRuntime:
     llms: LLMManager
     plugin_id: str = PLUGIN_ID
     run_id: str | None = None
-    is_intraday: bool = False
     tushare: TushareClient | None = None
     # v0.7 (PR-2.2) — optional LightGBM scorer. Constructed lazily in the
     # analyze runner; None when LGB is disabled via VaLgbConfig.lgb_enabled
@@ -56,7 +55,7 @@ class VaRuntime:
         return StrategyEvent(type=event_type, level=level, message=message, payload=full)
 
 
-def build_tushare_client(rt: VaRuntime, *, intraday: bool = False, event_cb: Any = None):
+def build_tushare_client(rt: VaRuntime, *, event_cb: Any = None):
     from deeptrade.core.tushare_client import TushareClient, TushareSDKTransport
 
     token = rt.config.get("tushare.token")
@@ -68,7 +67,6 @@ def build_tushare_client(rt: VaRuntime, *, intraday: bool = False, event_cb: Any
         TushareSDKTransport(str(token)),
         plugin_id=rt.plugin_id,
         rps=cfg.tushare_rps,
-        intraday=intraday,
         event_cb=event_cb,
     )
 

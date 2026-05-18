@@ -106,7 +106,6 @@ def _make_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         def __init__(self, db_handle: Database) -> None:
             self.plugin_id = "volume-anomaly"
             self.run_id: str | None = None
-            self.is_intraday = False
             self.tushare = None
             self.llms = None
             self.db = db_handle
@@ -123,7 +122,7 @@ def _make_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     rt = _Rt(db)
 
-    def _fake_build_tushare_client(_rt, *, intraday, event_cb):  # noqa: ARG001
+    def _fake_build_tushare_client(_rt, *, event_cb):  # noqa: ARG001
         return _StubTushareForBackfill(cal_df)
 
     monkeypatch.setattr(
@@ -431,20 +430,6 @@ def test_cli_backfill_history_rejects_inverted_range() -> None:
     res = runner.invoke(
         app,
         ["screen", "--backfill-history", "--start", "20260605", "--end", "20260601"],
-    )
-    assert res.exit_code != 0
-
-
-def test_cli_backfill_history_rejects_intraday_combo() -> None:
-    from typer.testing import CliRunner
-
-    from volume_anomaly.cli import app
-
-    runner = CliRunner()
-    res = runner.invoke(
-        app,
-        ["screen", "--backfill-history", "--start", "20260601", "--end",
-         "20260605", "--allow-intraday"],
     )
     assert res.exit_code != 0
 

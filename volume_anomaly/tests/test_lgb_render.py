@@ -62,7 +62,6 @@ def test_summary_includes_lgb_model_id_when_loaded(tmp_path: Path) -> None:
     write_analyze_report(
         run_id="r1",
         status=RunStatus.SUCCESS,
-        is_intraday=False,
         bundle=bundle,
         predictions=[_pred("000001.SZ", 1), _pred("000002.SZ", 2)],
         market_context_summary=None,
@@ -87,7 +86,6 @@ def test_summary_renders_disabled_when_no_model(tmp_path: Path) -> None:
     write_analyze_report(
         run_id="r2",
         status=RunStatus.SUCCESS,
-        is_intraday=False,
         bundle=bundle,
         predictions=[_pred("000001.SZ")],
         market_context_summary=None,

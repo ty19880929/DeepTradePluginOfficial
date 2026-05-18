@@ -79,7 +79,6 @@ def _open_runtime() -> tuple[Database, VaRuntime]:
 @app.command("screen")
 def cmd_screen(
     trade_date: Optional[str] = typer.Option(None, "--trade-date", help="YYYYMMDD"),
-    allow_intraday: bool = typer.Option(False, "--allow-intraday"),
     force_sync: bool = typer.Option(False, "--force-sync"),
     backfill_history: bool = typer.Option(
         False,
@@ -133,9 +132,6 @@ def cmd_screen(
         if trade_date is not None:
             typer.echo("✘ --trade-date is incompatible with --backfill-history")
             raise typer.Exit(2)
-        if allow_intraday:
-            typer.echo("✘ --allow-intraday is incompatible with --backfill-history")
-            raise typer.Exit(2)
         db, rt = _open_runtime()
         try:
             bh_params = BackfillHistoryParams(
@@ -174,9 +170,7 @@ def cmd_screen(
 
     db, rt = _open_runtime()
     try:
-        params = ScreenParams(
-            trade_date=trade_date, allow_intraday=allow_intraday, force_sync=force_sync
-        )
+        params = ScreenParams(trade_date=trade_date, force_sync=force_sync)
         renderer = choose_renderer(no_dashboard=no_dashboard)
         outcome = VaRunner(rt, renderer=renderer).execute_screen(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
@@ -195,7 +189,6 @@ def cmd_screen(
 @app.command("analyze")
 def cmd_analyze(
     trade_date: Optional[str] = typer.Option(None, "--trade-date", help="YYYYMMDD"),
-    allow_intraday: bool = typer.Option(False, "--allow-intraday"),
     force_sync: bool = typer.Option(False, "--force-sync"),
     no_lgb: bool = typer.Option(
         False,
@@ -219,7 +212,6 @@ def cmd_analyze(
     try:
         params = AnalyzeParams(
             trade_date=trade_date,
-            allow_intraday=allow_intraday,
             force_sync=force_sync,
             lgb_enabled=not no_lgb,
         )
@@ -244,12 +236,11 @@ def cmd_prune(
         DEFAULT_PRUNE_DAYS, "--days", help="Drop watchlist rows tracked for ≥ N days (0 = all)."
     ),
     trade_date: Optional[str] = typer.Option(None, "--trade-date", help="YYYYMMDD"),
-    allow_intraday: bool = typer.Option(False, "--allow-intraday"),
 ) -> None:
     """Drop watchlist rows whose tracked age ≥ N calendar days."""
     db, rt = _open_runtime()
     try:
-        params = PruneParams(trade_date=trade_date, allow_intraday=allow_intraday, days=days)
+        params = PruneParams(trade_date=trade_date, days=days)
         # Plan §3.4.2 / §7 P-7 — prune is intentionally a legacy-only path;
         # no --no-dashboard flag is exposed and choose_renderer() is bypassed.
         outcome = VaRunner(rt, renderer=LegacyStreamRenderer()).execute_prune(params)
@@ -281,14 +272,12 @@ def cmd_evaluate(
         help="Re-evaluate rows already marked 'complete'.",
     ),
     force_sync: bool = typer.Option(False, "--force-sync"),
-    allow_intraday: bool = typer.Option(False, "--allow-intraday"),
 ) -> None:
     """Compute T+N realized returns for past anomaly hits (writes va_realized_returns)."""
     db, rt = _open_runtime()
     try:
         params = EvaluateParams(
             trade_date=trade_date,
-            allow_intraday=allow_intraday,
             lookback_days=lookback_days,
             backfill_all=backfill_all,
             force_recompute=force_recompute,

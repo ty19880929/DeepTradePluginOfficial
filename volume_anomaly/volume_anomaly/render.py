@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 def render_banners(
     *,
     status: RunStatus,
-    is_intraday: bool,
     failed_batch_ids: list[str] | None = None,
 ) -> str:
     parts: list[str] = []
@@ -47,8 +46,6 @@ def render_banners(
         parts.append(f"> {marker}")
         if status == RunStatus.PARTIAL_FAILED and failed_batch_ids:
             parts.append(f"> 失败批次：`{', '.join(failed_batch_ids)}`（详见 `llm_calls.jsonl`）")
-    if is_intraday:
-        parts.append("> ⚠ **INTRADAY MODE** — 数据可能不完整，仅供盘中观察，不可与日终结果混用")
     return "\n".join(parts) + ("\n\n" if parts else "")
 
 
@@ -61,7 +58,6 @@ def write_screen_report(
     run_id: str,
     *,
     status: RunStatus,
-    is_intraday: bool,
     result: ScreenResult,
     n_new: int,
     n_updated: int,
@@ -72,13 +68,12 @@ def write_screen_report(
     root.mkdir(parents=True, exist_ok=True)
 
     rules = result.rules
-    md = [render_banners(status=status, is_intraday=is_intraday)]
+    md = [render_banners(status=status)]
     md.append("# 成交量异动策略 — 异动筛选\n")
     md.append(
         f"- mode: **screen**\n"
         f"- trade_date: **{result.trade_date}**\n"
         f"- status: `{status.value}`\n"
-        f"- intraday: `{is_intraday}`\n"
     )
     md.append(_render_rules_md(rules))
     upper_shadow_label = (
@@ -197,7 +192,6 @@ def write_analyze_report(
     run_id: str,
     *,
     status: RunStatus,
-    is_intraday: bool,
     bundle: AnalyzeBundle,
     predictions: list[VATrendCandidate],
     market_context_summary: str | None,
@@ -222,14 +216,13 @@ def write_analyze_report(
         if isinstance(c, dict)
     }
 
-    md = [render_banners(status=status, is_intraday=is_intraday, failed_batch_ids=failed_batch_ids)]
+    md = [render_banners(status=status, failed_batch_ids=failed_batch_ids)]
     md.append("# 成交量异动策略 — 走势分析\n")
     md.append(
         f"- mode: **analyze**\n"
         f"- trade_date: **{bundle.trade_date}**\n"
         f"- next_trade_date: **{bundle.next_trade_date}**\n"
         f"- status: `{status.value}`\n"
-        f"- intraday: `{is_intraday}`\n"
         f"- 待追踪池规模: **{len(bundle.candidates)}**\n"
         f"- LLM 输出预测数: **{len(predictions)}**\n"
         f"- lgb_model_id: `{bundle.lgb_model_id or 'disabled'}`\n"
@@ -314,7 +307,6 @@ def write_analyze_report(
         "trade_date": bundle.trade_date,
         "next_trade_date": bundle.next_trade_date,
         "status": status.value,
-        "is_intraday": is_intraday,
         "candidates": bundle.candidates,
         "market_summary": bundle.market_summary,
         "sector_strength": {
@@ -355,7 +347,7 @@ def write_prune_report(
     root = (reports_root or paths.reports_dir()) / str(run_id)
     root.mkdir(parents=True, exist_ok=True)
 
-    md = [render_banners(status=status, is_intraday=False)]
+    md = [render_banners(status=status)]
     md.append("# 成交量异动策略 — 剔除已追踪 N 日标的\n")
     md.append(
         f"- mode: **prune**\n"

@@ -13,7 +13,6 @@ import traceback
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +37,7 @@ from .data import (
     collect_analyze_bundle,
     fetch_anomaly_dates_within_lookback,
     fetch_completed_realized_keys,
+    fetch_latest_trade_date,
     prune_watchlist,
     resolve_trade_date,
     screen_anomalies,
@@ -67,7 +67,6 @@ DEFAULT_PRUNE_DAYS = 30
 @dataclass
 class ScreenParams:
     trade_date: str | None = None
-    allow_intraday: bool = False
     force_sync: bool = False
     screen_rules: dict[str, Any] | None = None
 
@@ -75,7 +74,6 @@ class ScreenParams:
 @dataclass
 class AnalyzeParams:
     trade_date: str | None = None
-    allow_intraday: bool = False
     force_sync: bool = False
     # v0.7 (PR-0.3): one-shot LGB disable. Persistent default lives in
     # VaLgbConfig.lgb_enabled (va_config table). PR-0.3 carries the flag
@@ -87,7 +85,6 @@ class AnalyzeParams:
 @dataclass
 class PruneParams:
     trade_date: str | None = None
-    allow_intraday: bool = False
     days: int = DEFAULT_PRUNE_DAYS
 
 
@@ -95,7 +92,6 @@ class PruneParams:
 class EvaluateParams:
     """v0.4.0 P1-3 — evaluate mode: compute T+N realised returns for past hits."""
     trade_date: str | None = None
-    allow_intraday: bool = False
     lookback_days: int = EVALUATE_DEFAULT_LOOKBACK_DAYS
     backfill_all: bool = False         # F12 — when True, ignore lookback_days
     force_recompute: bool = False      # re-evaluate rows that are already 'complete'
@@ -284,7 +280,6 @@ class VaRunner:
     ) -> RunOutcome:
         run_id = str(uuid.uuid4())
         self._rt.run_id = run_id
-        self._rt.is_intraday = bool(getattr(params, "allow_intraday", False))
         self._record_run_start(run_id, mode, params)
 
         events: list[StrategyEvent] = []
@@ -512,20 +507,18 @@ class VaRunner:
 
     def _iter_screen(self, params: ScreenParams) -> Iterable[StrategyEvent]:
         rt = self._rt
-        rt.tushare = build_tushare_client(
-            rt, intraday=params.allow_intraday, event_cb=self._on_tushare_event
-        )
-        cfg = rt.config.get_app_config()
+        rt.tushare = build_tushare_client(rt, event_cb=self._on_tushare_event)
 
         yield rt.emit(EventType.STEP_STARTED, "Step 0: 核对交易日期")
         cal_df = rt.tushare.call("trade_cal")
         cal = TradeCalendar(cal_df)
+        latest = (
+            None if params.trade_date else fetch_latest_trade_date(rt.tushare)
+        )
         T, T1 = resolve_trade_date(
-            datetime.now(),
             cal,
+            latest_trade_date=latest,
             user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
-            close_after=cfg.app_close_after if cfg is not None else time(18, 0),
         )
         yield rt.emit(
             EventType.STEP_FINISHED,
@@ -573,7 +566,6 @@ class VaRunner:
         report_path = write_screen_report(
             rt.run_id,
             status=RunStatus.SUCCESS,
-            is_intraday=params.allow_intraday,
             result=result,
             n_new=n_new,
             n_updated=n_updated,
@@ -596,9 +588,7 @@ class VaRunner:
 
     def _iter_analyze(self, params: AnalyzeParams) -> Iterable[StrategyEvent]:
         rt = self._rt
-        rt.tushare = build_tushare_client(
-            rt, intraday=params.allow_intraday, event_cb=self._on_tushare_event
-        )
+        rt.tushare = build_tushare_client(rt, event_cb=self._on_tushare_event)
         from deeptrade.core import paths
 
         provider_name = pick_llm_provider(rt)
@@ -636,12 +626,13 @@ class VaRunner:
         yield rt.emit(EventType.STEP_STARTED, "Step 0: 核对交易日期")
         cal_df = rt.tushare.call("trade_cal")
         cal = TradeCalendar(cal_df)
+        latest = (
+            None if params.trade_date else fetch_latest_trade_date(rt.tushare)
+        )
         T, T1 = resolve_trade_date(
-            datetime.now(),
             cal,
+            latest_trade_date=latest,
             user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
-            close_after=cfg.app_close_after if cfg is not None else time(18, 0),
         )
         yield rt.emit(
             EventType.STEP_FINISHED,
@@ -735,7 +726,6 @@ class VaRunner:
         report_path = write_analyze_report(
             rt.run_id,
             status=terminal_status,
-            is_intraday=params.allow_intraday,
             bundle=bundle,
             predictions=predictions,
             market_context_summary=market_ctx_summary,
@@ -762,7 +752,6 @@ class VaRunner:
         report_path = write_analyze_report(
             rt.run_id,
             status=RunStatus.SUCCESS,
-            is_intraday=params.allow_intraday,
             bundle=bundle,
             predictions=[],
             market_context_summary=None,
@@ -779,10 +768,7 @@ class VaRunner:
 
     def _iter_prune(self, params: PruneParams) -> Iterable[StrategyEvent]:
         rt = self._rt
-        rt.tushare = build_tushare_client(
-            rt, intraday=params.allow_intraday, event_cb=self._on_tushare_event
-        )
-        cfg = rt.config.get_app_config()
+        rt.tushare = build_tushare_client(rt, event_cb=self._on_tushare_event)
 
         if params.days < 0:
             raise ValueError(f"days must be ≥ 0, got {params.days}")
@@ -790,12 +776,13 @@ class VaRunner:
         yield rt.emit(EventType.STEP_STARTED, "Step 0: 核对当前交易日")
         cal_df = rt.tushare.call("trade_cal")
         cal = TradeCalendar(cal_df)
+        latest = (
+            None if params.trade_date else fetch_latest_trade_date(rt.tushare)
+        )
         today, _ = resolve_trade_date(
-            datetime.now(),
             cal,
+            latest_trade_date=latest,
             user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
-            close_after=cfg.app_close_after if cfg is not None else time(18, 0),
         )
         yield rt.emit(
             EventType.STEP_FINISHED, f"Step 0: today={today}", payload={"today": today}
@@ -839,20 +826,18 @@ class VaRunner:
 
     def _iter_evaluate(self, params: EvaluateParams) -> Iterable[StrategyEvent]:
         rt = self._rt
-        rt.tushare = build_tushare_client(
-            rt, intraday=params.allow_intraday, event_cb=self._on_tushare_event
-        )
-        cfg = rt.config.get_app_config()
+        rt.tushare = build_tushare_client(rt, event_cb=self._on_tushare_event)
 
         yield rt.emit(EventType.STEP_STARTED, "Step 0: 核对当前交易日")
         cal_df = rt.tushare.call("trade_cal")
         cal = TradeCalendar(cal_df)
+        latest = (
+            None if params.trade_date else fetch_latest_trade_date(rt.tushare)
+        )
         today, _ = resolve_trade_date(
-            datetime.now(),
             cal,
+            latest_trade_date=latest,
             user_specified=params.trade_date,
-            allow_intraday=params.allow_intraday,
-            close_after=cfg.app_close_after if cfg is not None else time(18, 0),
         )
         yield rt.emit(
             EventType.STEP_FINISHED,
@@ -1031,9 +1016,7 @@ class VaRunner:
         backfill is a training-corpus bootstrap, not live tracking.
         """
         rt = self._rt
-        rt.tushare = build_tushare_client(
-            rt, intraday=False, event_cb=self._on_tushare_event
-        )
+        rt.tushare = build_tushare_client(rt, event_cb=self._on_tushare_event)
 
         yield rt.emit(
             EventType.STEP_STARTED,
@@ -1214,6 +1197,8 @@ class VaRunner:
     # ----- DB helpers ----------------------------------------------------
 
     def _record_run_start(self, run_id: str, mode: str, params: Any) -> None:
+        # ``is_intraday`` column retained for migration-immutability; always
+        # FALSE now that the intraday opt-in flag is gone.
         self._rt.db.execute(
             "INSERT INTO va_runs(run_id, mode, trade_date, status, is_intraday, started_at, "
             "params_json) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
@@ -1222,7 +1207,7 @@ class VaRunner:
                 mode,
                 getattr(params, "trade_date", None) or "",
                 RunStatus.RUNNING.value,
-                bool(getattr(params, "allow_intraday", False)),
+                False,
                 json.dumps(params.__dict__, ensure_ascii=False, default=str),
             ),
         )

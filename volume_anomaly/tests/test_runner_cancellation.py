@@ -83,7 +83,6 @@ class _CapturingRenderer:
 class _ScreenParams:
     def __init__(self) -> None:
         self.trade_date = "20260612"
-        self.allow_intraday = False
         self.force_sync = False
 
 
