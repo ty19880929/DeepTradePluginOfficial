@@ -923,12 +923,14 @@ def _prediction_row_from_selected(
         "r1_themes": [],
         "r1_rationale": sc.rationale,
     }
-    # Flatten list-valued source fields to scalar siblings so the LLM can cite
-    # them in EvidenceItem.value (which is scalar-only: str|int|float|None).
-    seats = row.pop("lhb_famous_seats", None)
-    seats_list = seats if isinstance(seats, list) else []
-    row["lhb_famous_seats_count"] = len(seats_list)
-    row["lhb_famous_seats_text"] = "; ".join(str(s) for s in seats_list)
+    # v0.8.0 — ``lhb_famous_seats_count`` / ``lhb_famous_seats_text`` 现在由
+    # ``_build_candidate_rows`` 在 R1 阶段就一并写好（替换原数组 ``lhb_famous_seats``），
+    # 无需在 R2 阶段重新派生。保留兼容代码以应对旧 bundle 缓存。
+    if "lhb_famous_seats_count" not in row:
+        seats = row.pop("lhb_famous_seats", None)
+        seats_list = seats if isinstance(seats, list) else []
+        row["lhb_famous_seats_count"] = len(seats_list)
+        row["lhb_famous_seats_text"] = "; ".join(str(s) for s in seats_list)
     return row
 
 

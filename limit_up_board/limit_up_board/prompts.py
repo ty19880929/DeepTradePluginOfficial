@@ -78,10 +78,18 @@ def _screening_system_with(lgb_block: str) -> str:
 【分析维度】
 - 封板强度：first_time / last_time / open_times / fd_amount_yi / limit_amount_yi / fd_amount_ratio（封单/成交额，>10% 为强势封板）
 - 板块强度：参考下方【板块强度摘要】(注意 sector_strength_source；可信度 limit_cpt_list > lu_desc_aggregation > industry_fallback)
+- 题材内相对地位（v0.8 新增）：sec_intra_rank_by_limit_times（同题材内连板数排名，1=最高）、
+  sec_first_to_limit_flag（是否同题材最早封板，1=是）、sec_is_height_board（是否同题材高度板，1=是）、
+  sec_fd_amount_rank_pct（同题材封单强度分位，越大越强）。
 - 梯队地位：limit_times / up_stat
-- 量价：pct_chg / amount_yi / turnover_ratio / amplitude_pct（振幅过大警惕分歧炸板）
+- 量价：pct_chg / amount_yi / turnover_ratio / amplitude_pct（振幅过大警惕分歧炸板）；
+  max_upper_shadow_ratio_5d_pct（近 5 日最大上影占收盘价比，>3% 警惕冲高回落）。
 - 形态：ma5 / ma10 / ma20 / ma_bull_aligned（多头排列时增强）
 - 历史基因：up_count_30d（近 30 日涨停次数）/ up_stat
+- 资金流摘要（v0.8 新增，替代原 prev_moneyflow 数组）：mf_net_t_yi（T 日净流入亿）、
+  mf_net_5d_sum_yi、mf_consecutive_positive_days、mf_net_to_amount_pct（净流入/成交额归一化，
+  > 3% 为偏强）、mf_large_order_strength_pct（大单+超大单买入/成交额）、mf_divergence_flag
+  （=1 表示大单买入强但净流入 ≤ 0，警惕主力分歧）。
 - 市场情绪：参考下方【市场摘要】中 limit_step_trend / yesterday_failure_rate / yesterday_winners_today
 {lgb_block}
 {_SCREENING_CYQ_LHB_BLOCK}
@@ -239,10 +247,15 @@ _PREDICTION_SYSTEM_TEMPLATE = """\
 
 【判断重点】
 - 是否处于主线强势板块（参考输入【板块强度摘要】section；sector_strength_source 越靠 limit_cpt_list 越权威）。
-- 是否为板块龙头或具备空间板地位（参考 limit_step 全市场最高连板数）。
-- 封板质量是否支持次日溢价 (fd_amount_yi、fd_amount_ratio、open_times、first_time)。
-- 资金近 5 日是否持续确认。
-- 风险：高位加速 / 连续一字 / 流动性不足。
+- 是否为板块龙头或具备空间板地位（参考 limit_step 全市场最高连板数）；候选行的
+  sec_intra_rank_by_limit_times=1 / sec_is_height_board=1 / sec_first_to_limit_flag=1
+  都是同题材龙头/高度板的硬证据。
+- 封板质量是否支持次日溢价 (fd_amount_yi、fd_amount_ratio、open_times、first_time、
+  sec_fd_amount_rank_pct)。
+- 资金近 5 日是否持续确认：参考 mf_consecutive_positive_days（连续净流入天数）、
+  mf_net_5d_sum_yi（5 日净流入合计，亿）、mf_net_to_amount_pct（T 日净流入/成交额，归一化）。
+  关注 mf_divergence_flag=1（大单买入强但当日净流入 ≤ 0，主力可能在分歧出货）。
+- 风险：高位加速 / 连续一字 / 流动性不足 / max_upper_shadow_ratio_5d_pct 过大（冲高回落）。
 - 市场亏钱效应（market_summary.yesterday_failure_rate.interpretation == 'high'）下，
   所有 confidence 自动下调一档（high → medium，medium → low），rationale 需明示。
 - 涨停梯队拉升（market_summary.limit_step_trend.interpretation == 'spectrum_lifting'）下,

@@ -363,6 +363,12 @@ class TestBuildFeatureFrameHappyPath:
         assert row["f_mf_buy_elg_pct_t"] == pytest.approx(0.025)
         # 全部为正 → consecutive_pos_days = 5（窗口上限）
         assert row["f_mf_net_consecutive_pos_days"] == 5.0
+        # v0.8.0 P1-3 — net_to_amount_pct: 1500 万 × 1e4 / 2e8 × 100 = 7.5%
+        assert row["f_mf_net_to_amount_pct"] == pytest.approx(7.5)
+        # v0.8.0 P1-3 — large_order_strength: (800+500) × 1e4 / 2e8 × 100 = 6.5%
+        assert row["f_mf_large_order_strength_pct"] == pytest.approx(6.5)
+        # v0.8.0 P1-3 — divergence_flag: 大单买入强但净流入正 → 不触发 (=0)
+        assert row["f_mf_divergence_flag"] == 0.0
 
     def test_chip_block(self, df_full: pd.DataFrame) -> None:
         row = df_full.iloc[0]
@@ -383,8 +389,14 @@ class TestBuildFeatureFrameHappyPath:
         assert row["f_sec_strength_source_rank"] == 1.0
         # 当批只有 1 只 candidate，industry='电子' → up_count = 1
         assert row["f_sec_today_industry_up_count"] == 1.0
-        # ratio: 1/1 = 1
-        assert row["f_sec_today_industry_up_ratio"] == pytest.approx(1.0)
+        # v0.8.0 P1-1 — 同题材只有 1 只候选时它就是龙头：rank=1, first=1, height=1。
+        # fd_amount 唯一 → 分位 100。
+        assert row["f_sec_intra_rank_by_limit_times"] == 1.0
+        assert row["f_sec_first_to_limit_flag"] == 1.0
+        assert row["f_sec_is_height_board"] == 1.0
+        assert row["f_sec_fd_amount_rank_pct"] == pytest.approx(100.0)
+        # v0.8.0 P2-1 — 原本恒为 1.0 的 ratio 列已被删除。
+        assert "f_sec_today_industry_up_ratio" not in df_full.columns
 
     def test_market_block(self, df_full: pd.DataFrame) -> None:
         row = df_full.iloc[0]
@@ -511,6 +523,109 @@ class TestEdgeAndNaN:
         assert c_row["f_sec_today_industry_up_count"] == 1.0
         # rank = 2 (lu_desc_aggregation)
         assert a_row["f_sec_strength_source_rank"] == 2.0
+
+    def test_intra_industry_position_resolves_leader(self) -> None:
+        """v0.8.0 P1-1 — 同题材内多候选时排名 / 最早封板 / 高度板 / fd 分位都要正确。"""
+        leader = _full_candidate(
+            ts_code="L.SZ", industry="电子", industry_basic="电子",
+            limit_times=3, first_time="09:25:00", fd_amount=5e8,
+        )
+        runner = _full_candidate(
+            ts_code="R.SZ", industry="电子", industry_basic="电子",
+            limit_times=2, first_time="09:32:00", fd_amount=3e8,
+        )
+        laggard = _full_candidate(
+            ts_code="X.SZ", industry="电子", industry_basic="电子",
+            limit_times=1, first_time="10:15:00", fd_amount=1e8,
+        )
+        # 另一个题材的孤板，sanity check
+        solo = _full_candidate(
+            ts_code="S.SZ", industry="医药", industry_basic="医药",
+            limit_times=1, first_time="09:30:00", fd_amount=2e8,
+        )
+        df = build_feature_frame(
+            candidates_df=_make_candidates([leader, runner, laggard, solo]),
+            daily_by_code={},
+            daily_basic_by_code={},
+            moneyflow_by_code={},
+            cyq_by_code={},
+            lhb_rollup={},
+            sector_strength=None,
+            market_summary={},
+            trade_date="20260530",
+        )
+        # Leader: rank=1, first_to_limit=1, height=1, fd 100 分位
+        L = df.loc["L.SZ"]
+        assert L["f_sec_intra_rank_by_limit_times"] == 1.0
+        assert L["f_sec_first_to_limit_flag"] == 1.0
+        assert L["f_sec_is_height_board"] == 1.0
+        assert L["f_sec_fd_amount_rank_pct"] == pytest.approx(100.0)
+        # Runner: rank=2, 不是最早 / 不是最高
+        R = df.loc["R.SZ"]
+        assert R["f_sec_intra_rank_by_limit_times"] == 2.0
+        assert R["f_sec_first_to_limit_flag"] == 0.0
+        assert R["f_sec_is_height_board"] == 0.0
+        # fd 排第二 → 3/3 * 100? No—升序排名 2/3*100 ≈ 66.67
+        assert R["f_sec_fd_amount_rank_pct"] == pytest.approx(2 / 3 * 100)
+        # Laggard: rank=3, fd 最低（1/3 * 100 ≈ 33.33）
+        X = df.loc["X.SZ"]
+        assert X["f_sec_intra_rank_by_limit_times"] == 3.0
+        assert X["f_sec_fd_amount_rank_pct"] == pytest.approx(1 / 3 * 100)
+        # Solo industry 仍然是 1/1/1/100（自己就是龙头）
+        S = df.loc["S.SZ"]
+        assert S["f_sec_intra_rank_by_limit_times"] == 1.0
+        assert S["f_sec_first_to_limit_flag"] == 1.0
+        assert S["f_sec_is_height_board"] == 1.0
+        assert S["f_sec_fd_amount_rank_pct"] == pytest.approx(100.0)
+
+    def test_mf_divergence_flag_triggers(self) -> None:
+        """v0.8.0 P1-3 — 大单买入强但净流入 ≤ 0 → divergence_flag=1。"""
+        cand = _full_candidate(amount=2e8)  # 2 亿元成交额
+        # 大单 + 超大单买入合计 1500 万元 → 7.5% of amount，超 5% 阈值
+        # 净流入 -500 万元 → 转亿 = -0.05
+        moneyflow = [
+            {
+                "ts_code": cand["ts_code"],
+                "trade_date": "20260530",
+                "net_mf_amount": -500.0,
+                "buy_lg_amount": 1000.0,
+                "buy_elg_amount": 500.0,
+                "sell_lg_amount": 0.0,
+                "sell_elg_amount": 0.0,
+            }
+        ]
+        df = build_feature_frame(
+            candidates_df=_make_candidates([cand]),
+            daily_by_code={},
+            daily_basic_by_code={},
+            moneyflow_by_code={cand["ts_code"]: moneyflow},
+            cyq_by_code={},
+            lhb_rollup={},
+            sector_strength=None,
+            market_summary={},
+            trade_date="20260530",
+        )
+        row = df.iloc[0]
+        assert row["f_mf_divergence_flag"] == 1.0
+        assert row["f_mf_large_order_strength_pct"] == pytest.approx(7.5)
+        assert row["f_mf_net_t_yi"] == pytest.approx(-0.05)
+        assert row["f_mf_net_to_amount_pct"] == pytest.approx(-2.5)
+
+    def test_max_upper_shadow_ratio_5d_picks_max(self) -> None:
+        """v0.8.0 P1-2 — 5 日内最大上影占收盘价比。"""
+        from limit_up_board.lgb.features import max_upper_shadow_ratio_5d
+
+        rows = [
+            # day 1: shadow = 12 - max(10, 11) = 1 → 1/11 ≈ 9.09%
+            {"high": 12.0, "open": 10.0, "close": 11.0},
+            # day 2: shadow = 15 - max(13, 12) = 2 → 2/12 ≈ 16.67%（最大）
+            {"high": 15.0, "open": 13.0, "close": 12.0},
+            # day 3: shadow = 10 - max(11, 10) = -1 → 0
+            {"high": 10.0, "open": 11.0, "close": 10.0},
+        ]
+        out = max_upper_shadow_ratio_5d(rows)
+        assert out is not None
+        assert out == pytest.approx(16.6667, rel=1e-3)
 
     def test_idempotent_under_repeat(self) -> None:
         cand = _full_candidate()

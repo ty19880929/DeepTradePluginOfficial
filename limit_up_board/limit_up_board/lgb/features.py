@@ -41,9 +41,18 @@ from ..data import SectorStrength
 # Schema declaration — bump when列定义变更，旧模型必须重训
 # ---------------------------------------------------------------------------
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2  # v0.8.0 评审响应——见 lightgbm_design.md §SCHEMA-v2
 
 # 列顺序就是 LightGBM 的特征序——LgbScorer.load 时会按此顺序对齐。
+#
+# v0.8.0 评审响应变更（FEATURE_NAMES 强制 schema_version 1 → 2）：
+#   * 新增 ``f_vol_max_upper_shadow_ratio_5d``（P1-2 prev_daily 摘要补强）
+#   * 新增 ``f_mf_net_to_amount_pct`` / ``f_mf_large_order_strength`` /
+#     ``f_mf_divergence_flag``（P1-3 资金流派生因子，归一化 + 分歧标签）
+#   * 新增 ``f_sec_intra_rank_by_limit_times`` /
+#     ``f_sec_first_to_limit_flag`` / ``f_sec_is_height_board`` /
+#     ``f_sec_fd_amount_rank_pct``（P1-1 题材内相对地位）
+#   * 删除 ``f_sec_today_industry_up_ratio``（P2-1，恒为 1.0 的低区分度列）
 FEATURE_NAMES: list[str] = [
     # ---- 涨停板属性 ----
     "f_lim_open_times",
@@ -66,6 +75,7 @@ FEATURE_NAMES: list[str] = [
     "f_vol_close_to_pre_close_pct",
     "f_vol_amount_ratio_5d",
     "f_vol_turnover_rate_ratio_5d",
+    "f_vol_max_upper_shadow_ratio_5d",  # v0.8.0 P1-2
     # ---- 动量 ----
     "f_mom_close_to_ma5_bias",
     "f_mom_close_to_ma10_bias",
@@ -81,6 +91,9 @@ FEATURE_NAMES: list[str] = [
     "f_mf_buy_lg_pct_t",
     "f_mf_buy_elg_pct_t",
     "f_mf_net_consecutive_pos_days",
+    "f_mf_net_to_amount_pct",         # v0.8.0 P1-3 强度归一化
+    "f_mf_large_order_strength_pct",  # v0.8.0 P1-3 (lg+elg) / amount × 100
+    "f_mf_divergence_flag",           # v0.8.0 P1-3 大单买入强 + 总净流入弱
     # ---- 筹码 ----
     "f_chip_winner_pct",
     "f_chip_top10_concentration",
@@ -90,10 +103,13 @@ FEATURE_NAMES: list[str] = [
     "f_lhb_net_buy_yi",
     "f_lhb_inst_count",
     "f_lhb_famous_seats_count",
-    # ---- 板块 ----
+    # ---- 板块 (P1-1 题材内相对地位) ----
     "f_sec_strength_source_rank",
     "f_sec_today_industry_up_count",
-    "f_sec_today_industry_up_ratio",
+    "f_sec_intra_rank_by_limit_times",  # v0.8.0 P1-1 同题材连板数排名（1-based）
+    "f_sec_first_to_limit_flag",        # v0.8.0 P1-1 是否同题材最早封板
+    "f_sec_is_height_board",            # v0.8.0 P1-1 是否同题材高度板
+    "f_sec_fd_amount_rank_pct",         # v0.8.0 P1-1 同题材封单强度分位
     # ---- 市场环境 ----
     "f_mkt_total_limit_up",
     "f_mkt_max_height",
@@ -107,9 +123,13 @@ FEATURE_NAMES: list[str] = [
 ]
 
 # `f_lhb_appeared` 已经是 0/1 显式编码——不再 NaN。
+# v0.8.0 新增的几个 0/1 标志位同样填 0.0（缺失 = 未触发）。
 # 其余列遇缺失就保留 NaN，让模型自己学到 missingness 信号。
 NA_FILLERS: dict[str, float] = {
     "f_lhb_appeared": 0.0,
+    "f_mf_divergence_flag": 0.0,
+    "f_sec_first_to_limit_flag": 0.0,
+    "f_sec_is_height_board": 0.0,
 }
 
 # 板块强度来源 → 权威性排名（越小越权威）。
@@ -312,7 +332,11 @@ def _vol_block(
     daily_rows: list[dict[str, Any]],
     daily_basic_rows: list[dict[str, Any]],
 ) -> dict[str, float | None]:
-    """量价 (9 个)。"""
+    """量价 (10 个)。
+
+    v0.8.0 P1-2 — 新增 ``f_vol_max_upper_shadow_ratio_5d``：近 5 日 (high - max(close, open))
+    / close × 100 的最大值，作为冲高回落 / 上影长度的代理；负值（上影 ≤ 0）clip 到 0。
+    """
     close = _to_float(row.get("close"))
     pre_close = _to_float(daily_rows[-1].get("pre_close")) if daily_rows else None
     pct_chg = _to_float(row.get("pct_chg"))
@@ -365,6 +389,9 @@ def _vol_block(
             turnover_rate_5d_mean = sum(prev_5) / len(prev_5)
     turnover_ratio_5d = _safe_div(turnover_rate_t, turnover_rate_5d_mean)
 
+    # v0.8.0 P1-2 — 近 5 日最大上影占收盘价比（冲高回落代理）。
+    max_upper_shadow_pct_5d = max_upper_shadow_ratio_5d(daily_rows)
+
     return {
         "f_vol_pct_chg_t": _clip_ratio(pct_chg),
         "f_vol_amplitude_pct": _clip_ratio(amplitude),
@@ -378,7 +405,35 @@ def _vol_block(
         "f_vol_close_to_pre_close_pct": _clip_ratio(close_to_pre),
         "f_vol_amount_ratio_5d": _clip_ratio(amount_ratio_5d),
         "f_vol_turnover_rate_ratio_5d": _clip_ratio(turnover_ratio_5d),
+        "f_vol_max_upper_shadow_ratio_5d": _clip_ratio(max_upper_shadow_pct_5d),
     }
+
+
+def max_upper_shadow_ratio_5d(daily_rows: list[dict[str, Any]]) -> float | None:
+    """近 5 日 ``(high - max(open, close)) / close * 100`` 的最大值。
+
+    评审 P1-2：作为冲高回落 / 上影长度的代理摘要字段。``daily_rows`` 不足 5
+    天 / close=0 → None。Negative shadows (open/close ≥ high) clip 到 0。
+    Exported so ``data._build_candidate_rows`` can reuse the same definition
+    in the LLM candidate payload — keeping LGB feature and prompt summary
+    consistent.
+    """
+    if len(daily_rows) < 1:
+        return None
+    window = daily_rows[-5:]
+    out: list[float] = []
+    for r in window:
+        high = _to_float(r.get("high"))
+        open_ = _to_float(r.get("open"))
+        close = _to_float(r.get("close"))
+        if high is None or close is None or close <= 0:
+            continue
+        body_top = max(o for o in (open_, close) if o is not None) if open_ is not None else close
+        shadow = max(0.0, high - body_top)
+        out.append(shadow / close * 100)
+    if not out:
+        return None
+    return max(out)
 
 
 def _mom_block(
@@ -442,22 +497,32 @@ def _mf_block(
     candidate_row: dict[str, Any],
     daily_rows: list[dict[str, Any]],
 ) -> dict[str, float | None]:
-    """资金流 (5 个)。
+    """资金流 (8 个).
 
     单位说明（见 ``data.FIELD_UNITS_RAW``）：
       * moneyflow.* 金额均为 ``万元``；
       * limit_list_d.amount 单位 ``元``（来自当日候选行 ``candidate_row``）；
       * daily.amount 单位 ``千元`` （来自历史窗口）；
     比率计算时统一换算到 元 后再除。
+
+    v0.8.0 P1-3 新增 3 个派生：
+      * ``f_mf_net_to_amount_pct``      — 净流入 / T 日成交额 × 100（强度归一化）
+      * ``f_mf_large_order_strength``   — (大单买 + 超大单买) / T 日成交额 × 100
+      * ``f_mf_divergence_flag``        — 大单买入强（>5%）但净流入 ≤ 0 时置 1，
+                                          反映「主力净流入与大单买入分歧」（评审 P1-3）
     """
+    empty = {
+        "f_mf_net_t_yi": None,
+        "f_mf_net_5d_sum_yi": None,
+        "f_mf_buy_lg_pct_t": None,
+        "f_mf_buy_elg_pct_t": None,
+        "f_mf_net_consecutive_pos_days": None,
+        "f_mf_net_to_amount_pct": None,
+        "f_mf_large_order_strength_pct": None,
+        "f_mf_divergence_flag": 0.0,
+    }
     if not moneyflow_rows:
-        return {
-            "f_mf_net_t_yi": None,
-            "f_mf_net_5d_sum_yi": None,
-            "f_mf_buy_lg_pct_t": None,
-            "f_mf_buy_elg_pct_t": None,
-            "f_mf_net_consecutive_pos_days": None,
-        }
+        return empty
 
     last = moneyflow_rows[-1]
     net_wan = _to_float(last.get("net_mf_amount"))
@@ -487,6 +552,31 @@ def _mf_block(
             return None
         return _clip_ratio(buy_wan * 1e4 / amount_yuan)
 
+    buy_lg_pct = _pct(buy_lg_wan)
+    buy_elg_pct = _pct(buy_elg_wan)
+
+    # 强度归一化：净流入 / 成交额（消除市值大小差异；同样使用 万元 → 元）。
+    net_to_amount_pct: float | None = None
+    if net_wan is not None and amount_yuan:
+        net_to_amount_pct = _clip_ratio(net_wan * 1e4 / amount_yuan * 100)
+
+    # (大单买 + 超大单买) / 成交额 — 主力买入强度。
+    large_order_strength: float | None = None
+    if amount_yuan and (buy_lg_wan is not None or buy_elg_wan is not None):
+        lg = buy_lg_wan or 0.0
+        elg = buy_elg_wan or 0.0
+        large_order_strength = _clip_ratio((lg + elg) * 1e4 / amount_yuan * 100)
+
+    # 分歧标签：大单 + 超大单买入强（≥5% of amount）但当日净流入 ≤ 0。
+    divergence_flag = 0.0
+    if (
+        large_order_strength is not None
+        and large_order_strength >= 5.0
+        and net_t_yi is not None
+        and net_t_yi <= 0
+    ):
+        divergence_flag = 1.0
+
     consec_pos = 0
     for r in reversed(moneyflow_rows[-5:]):
         net = _to_float(r.get("net_mf_amount"))
@@ -499,9 +589,12 @@ def _mf_block(
     return {
         "f_mf_net_t_yi": net_t_yi,
         "f_mf_net_5d_sum_yi": net_5d_sum_yi,
-        "f_mf_buy_lg_pct_t": _pct(buy_lg_wan),
-        "f_mf_buy_elg_pct_t": _pct(buy_elg_wan),
+        "f_mf_buy_lg_pct_t": buy_lg_pct,
+        "f_mf_buy_elg_pct_t": buy_elg_pct,
         "f_mf_net_consecutive_pos_days": consec_pos_f,
+        "f_mf_net_to_amount_pct": net_to_amount_pct,
+        "f_mf_large_order_strength_pct": large_order_strength,
+        "f_mf_divergence_flag": divergence_flag,
     }
 
 
@@ -555,23 +648,97 @@ def _resolve_industry(row: pd.Series) -> str | None:
     return None
 
 
-def _industry_aggregates(candidates_df: pd.DataFrame) -> dict[str, tuple[int, int]]:
-    """Return ``{industry: (today_up_count, candidate_total_in_industry)}``.
+def _industry_aggregates(candidates_df: pd.DataFrame) -> dict[str, int]:
+    """Return ``{industry: today_up_count}``.
 
-    候选股本身就是当日涨停标的——所以 today_up_count == 同行业候选数；total 同理。
-    设计 §4.2 表中 today_industry_up_ratio = 同行业涨停 / 同行业 candidate 总数：
-    在当前 limit-up-board 上下文里这一对值相等，比率恒为 1.0。这是设计原意
-    （所有候选都已经涨停，比率反映该行业在当日涨停板里的份额——已经由
-    today_industry_up_count 体现）；保留 ratio 列是为给后续扩展 candidates_df 留
-    口子（例如未来纳入"接近涨停但未封"标的时，分子分母会分离）。
+    候选股本身就是当日涨停标的——所以 today_up_count == 同行业候选数。
+    v0.8.0 P2-1 — 移除原本的 ratio (恒为 1.0)；只保留 count，更细的相对地位由
+    :func:`industry_intra_position` 单独派生。
     """
-    out: dict[str, tuple[int, int]] = {}
+    out: dict[str, int] = {}
     if candidates_df.empty:
         return out
     industries = candidates_df.apply(_resolve_industry, axis=1)
     for ind in industries.dropna():
-        cur = out.get(ind, (0, 0))
-        out[ind] = (cur[0] + 1, cur[1] + 1)
+        out[ind] = out.get(ind, 0) + 1
+    return out
+
+
+def industry_intra_position(
+    candidates_df: pd.DataFrame,
+) -> dict[str, dict[str, float | None]]:
+    """Per-candidate intra-industry ranking signals (v0.8.0 P1-1).
+
+    Returns ``{ts_code: {
+        "rank_by_limit_times": int,         # 1-based, descending by limit_times
+        "first_to_limit_flag": 0.0/1.0,     # 是否同题材最早封板 (first_time 最小)
+        "is_height_board": 0.0/1.0,         # limit_times == industry max
+        "fd_amount_rank_pct": float,        # 同题材 fd_amount 分位 [0, 100]
+                                            # 100 = 最强；只有 1 人时记 100
+    }}``.
+
+    Single-candidate industries → flags 都置 1.0（自己就是龙头），rank_pct=100。
+    Industry 无法识别 → 全部 None。
+    """
+    out: dict[str, dict[str, float | None]] = {}
+    if candidates_df.empty:
+        return out
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for _, row in candidates_df.iterrows():
+        ind = _resolve_industry(row)
+        if ind is None:
+            ts = str(row.get("ts_code") or "")
+            if ts:
+                out[ts] = {
+                    "rank_by_limit_times": None,
+                    "first_to_limit_flag": None,
+                    "is_height_board": None,
+                    "fd_amount_rank_pct": None,
+                }
+            continue
+        groups.setdefault(ind, []).append(
+            {
+                "ts_code": str(row.get("ts_code") or ""),
+                "limit_times": _to_float(row.get("limit_times")) or 0.0,
+                "first_time": _parse_time_to_seconds(row.get("first_time")),
+                "fd_amount": _to_float(row.get("fd_amount")),
+            }
+        )
+    for ind, members in groups.items():
+        # rank by limit_times desc (higher is stronger)
+        sorted_members = sorted(
+            members, key=lambda m: m["limit_times"], reverse=True
+        )
+        max_lt = sorted_members[0]["limit_times"]
+        # first_time min wins (None → +inf so it loses)
+        valid_first = [m for m in members if m["first_time"] is not None]
+        earliest_first = (
+            min(m["first_time"] for m in valid_first) if valid_first else None
+        )
+        # fd_amount percentile rank (higher = stronger).
+        with_fd = [m for m in members if m["fd_amount"] is not None]
+        fd_sorted = sorted(with_fd, key=lambda m: m["fd_amount"] or 0.0)
+        fd_rank: dict[str, float] = {}
+        if fd_sorted:
+            n = len(fd_sorted)
+            # 1-based ascending rank → percentile = rank / n * 100
+            for idx, m in enumerate(fd_sorted, start=1):
+                fd_rank[m["ts_code"]] = idx / n * 100.0
+
+        for idx, m in enumerate(sorted_members, start=1):
+            ts = m["ts_code"]
+            out[ts] = {
+                "rank_by_limit_times": float(idx),
+                "first_to_limit_flag": (
+                    1.0
+                    if (m["first_time"] is not None and m["first_time"] == earliest_first)
+                    else 0.0
+                ),
+                "is_height_board": (
+                    1.0 if m["limit_times"] >= max_lt and max_lt > 0 else 0.0
+                ),
+                "fd_amount_rank_pct": fd_rank.get(ts),
+            }
     return out
 
 
@@ -673,6 +840,7 @@ def build_feature_frame(
 
     market_summary = market_summary or {}
     industry_agg = _industry_aggregates(candidates_df)
+    intra_position = industry_intra_position(candidates_df)  # v0.8.0 P1-1
 
     if sector_strength is not None:
         source_rank = float(_SECTOR_SOURCE_RANK.get(sector_strength.source, 3))
@@ -713,17 +881,16 @@ def build_feature_frame(
         feat.update(_chip_block(cyq))
         feat.update(_lhb_block(lhb))
 
-        # sector
+        # sector — v0.8.0 P1-1 题材内相对地位
         industry = _resolve_industry(candidate)
-        if industry is None or industry not in industry_agg:
-            up_cnt, total_cnt = 0, 0
-        else:
-            up_cnt, total_cnt = industry_agg[industry]
+        up_cnt = industry_agg.get(industry, 0) if industry is not None else 0
         feat["f_sec_strength_source_rank"] = source_rank
         feat["f_sec_today_industry_up_count"] = float(up_cnt) if up_cnt else None
-        feat["f_sec_today_industry_up_ratio"] = (
-            _clip_ratio(up_cnt / total_cnt) if total_cnt else None
-        )
+        intra = intra_position.get(ts) or {}
+        feat["f_sec_intra_rank_by_limit_times"] = intra.get("rank_by_limit_times")
+        feat["f_sec_first_to_limit_flag"] = intra.get("first_to_limit_flag")
+        feat["f_sec_is_height_board"] = intra.get("is_height_board")
+        feat["f_sec_fd_amount_rank_pct"] = intra.get("fd_amount_rank_pct")
 
         # market (constant per batch)
         feat.update(market_block)

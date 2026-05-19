@@ -1194,21 +1194,30 @@ def _build_candidate_rows(
     top_list_df: pd.DataFrame | None = None,
     top_inst_df: pd.DataFrame | None = None,
     cyq_perf_df: pd.DataFrame | None = None,
-    daily_lookback: int = 30,
-    moneyflow_lookback: int = 5,
+    daily_lookback: int = 30,  # noqa: ARG001 — v0.8.0 P1-2 删除 prev_daily 后保留签名以兼容
+    moneyflow_lookback: int = 5,  # noqa: ARG001 — v0.8.0 P1-3 同上
     lhb_api_empty: bool = False,
     lhb_api_unavailable: bool = False,
 ) -> list[dict[str, Any]]:
-    """Project candidates to a list of dicts with raw + normalized fields + history.
+    """Project candidates to a list of dicts with raw + normalized fields + summary derivations.
 
-    B1.2 additions:
-        prev_daily        — last N daily rows: [(date, close, pct_chg, vol), ...]
-        prev_moneyflow    — last N moneyflow rows: [(date, net_mf_yi, buy_lg_yi, buy_elg_yi)]
-        turnover_rate, volume_ratio, circ_mv_yi   — from daily_basic on T
+    v0.8.0 评审响应（LLM 噪音收敛 — P1-2 / P1-3 / P1-1）：
+      * 删除 ``prev_daily`` / ``prev_moneyflow`` 原始数组（评审：让 LLM 自行从 30
+        日明细归纳趋势的稳定性不如代码侧摘要；同时拉高 token 与注意力噪音）。
+      * 新增 prev_daily 派生摘要：``max_upper_shadow_ratio_5d_pct`` 等（评审 P1-2）。
+      * 新增资金流派生摘要：``mf_net_5d_sum_yi`` / ``mf_consecutive_positive_days`` /
+        ``mf_net_to_amount_pct`` / ``mf_large_order_strength_pct`` /
+        ``mf_divergence_flag``（评审 P1-3，与 LGB 同名 feature 同步派生，确保
+        prompt 与模型口径一致）。
+      * 新增题材内相对地位：``sec_intra_rank_by_limit_times`` /
+        ``sec_first_to_limit_flag`` / ``sec_is_height_board`` /
+        ``sec_fd_amount_rank_pct``（评审 P1-1）。
 
     All numeric fields go through normalize_to_yi/wan with FIELD_UNITS_RAW for
     correct unit conversion (B3.1 / M6 fix).
     """
+    from .lgb.features import industry_intra_position, max_upper_shadow_ratio_5d  # noqa: PLC0415
+
     if ths_df is not None and not ths_df.empty:
         ths_lookup = ths_df.set_index("ts_code").to_dict(orient="index")
     else:
@@ -1219,6 +1228,8 @@ def _build_candidate_rows(
     moneyflow_by_code = _index_by_code(moneyflow_df)
     lhb_rollup = _build_lhb_rollup(top_list_df, top_inst_df)
     cyq_lookup = _build_cyq_lookup(cyq_perf_df)
+    # v0.8.0 P1-1 — batch-level 题材内相对地位（同 LGB feature 派生口径）
+    intra_position = industry_intra_position(candidates_df)
 
     out: list[dict[str, Any]] = []
     for row in candidates_df.itertuples(index=False):
@@ -1252,49 +1263,62 @@ def _build_candidate_rows(
             rec["limit_up_suc_rate"] = round2(ths.get("limit_up_suc_rate"))
             rec["free_float_yi"] = normalize_to_yi("free_float", ths.get("free_float"))
 
-        # B1.2 history attachments
+        # v0.8.0 P1-2 — daily 历史改为摘要字段（不再 dump prev_daily 数组）
         d_hist = daily_by_code.get(ts_code, [])
         if d_hist:
-            rec["prev_daily"] = [
-                {
-                    "date": r.get("trade_date"),
-                    "close": round2(r.get("close")),
-                    "pct_chg": round2(r.get("pct_chg")),
-                    "vol": _opt_int(r.get("vol")),
-                }
-                for r in d_hist[-daily_lookback:]
-            ]
             rec["amplitude_pct"] = _amplitude_pct(d_hist[-1])
             rec.update(_ma_metrics(_trailing_closes(d_hist)))
             rec["up_count_30d"] = _up_count_30d(d_hist)
+            rec["max_upper_shadow_ratio_5d_pct"] = round2(max_upper_shadow_ratio_5d(d_hist))
         else:
             rec["amplitude_pct"] = None
             rec["ma5"] = rec["ma10"] = rec["ma20"] = None
             rec["ma_bull_aligned"] = None
             rec["up_count_30d"] = None
+            rec["max_upper_shadow_ratio_5d_pct"] = None
+
         db_hist = daily_basic_by_code.get(ts_code, [])
         if db_hist:
             latest = db_hist[-1]
             rec["turnover_rate"] = round2(latest.get("turnover_rate"))
             rec["volume_ratio"] = round2(latest.get("volume_ratio"))
             rec["circ_mv_yi"] = normalize_to_yi("circ_mv", latest.get("circ_mv"))
+
+        # v0.8.0 P1-3 — 资金流改为摘要派生（不再 dump prev_moneyflow 数组）
         mf_hist = moneyflow_by_code.get(ts_code, [])
-        if mf_hist:
-            rec["prev_moneyflow"] = [
-                {
-                    "date": r.get("trade_date"),
-                    "net_mf_yi": normalize_to_yi("net_mf_amount", r.get("net_mf_amount")),
-                    "buy_lg_yi": normalize_to_yi("buy_lg_amount", r.get("buy_lg_amount")),
-                    "buy_elg_yi": normalize_to_yi("buy_elg_amount", r.get("buy_elg_amount")),
-                }
-                for r in mf_hist[-moneyflow_lookback:]
-            ]
+        rec.update(
+            _moneyflow_summary(
+                mf_hist,
+                amount_yuan=_to_float(amount_raw),
+                daily_amount_qian=(
+                    _to_float(d_hist[-1].get("amount")) if d_hist else None
+                ),
+            )
+        )
+
+        # v0.8.0 P1-1 — 题材内相对地位（同 LGB feature 派生口径）
+        intra = intra_position.get(ts_code) or {}
+        rec["sec_intra_rank_by_limit_times"] = _opt_int(intra.get("rank_by_limit_times"))
+        rec["sec_first_to_limit_flag"] = _opt_int(intra.get("first_to_limit_flag"))
+        rec["sec_is_height_board"] = _opt_int(intra.get("is_height_board"))
+        rec["sec_fd_amount_rank_pct"] = (
+            round2(intra.get("fd_amount_rank_pct"))
+            if intra.get("fd_amount_rank_pct") is not None
+            else None
+        )
+
         # B1 LHB roll-up — null when candidate didn't make the day's top_list
         # (合法事实，不进 missing_data，由 LLM 通过 null 判断"未上榜")
+        # v0.8.0 P1-3 — 数组字段 ``lhb_famous_seats`` 已被替换为标量伴生字段
+        # ``lhb_famous_seats_count`` / ``lhb_famous_seats_text``，以匹配 prompt 的
+        # evidence.value 标量约束（旧实现在 R2 阶段才转换，导致 R1 prompt 引用
+        # lhb_famous_seats_count 会被 evidence validator 拦截）。
         lhb = lhb_rollup.get(ts_code, {})
         rec["lhb_net_buy_yi"] = lhb.get("lhb_net_buy_yi")
         rec["lhb_inst_count"] = lhb.get("lhb_inst_count")
-        rec["lhb_famous_seats"] = lhb.get("lhb_famous_seats") or []
+        seats_list = lhb.get("lhb_famous_seats") or []
+        rec["lhb_famous_seats_count"] = int(len(seats_list))
+        rec["lhb_famous_seats_text"] = "; ".join(str(s) for s in seats_list)
         # P1-3 — 三态显式标记数据质量，让 LLM 区分「未上榜（事实）」与「接口异常」
         if lhb_api_unavailable:
             rec["lhb_data_quality"] = "api_unavailable"
@@ -1315,6 +1339,85 @@ def _build_candidate_rows(
             cyq.get("cyq_avg_cost_yuan"),
         )
         out.append(rec)
+    return out
+
+
+def _moneyflow_summary(
+    moneyflow_rows: list[dict[str, Any]],
+    *,
+    amount_yuan: float | None,
+    daily_amount_qian: float | None,
+) -> dict[str, Any]:
+    """Build the v0.8.0 P1-3 moneyflow summary attached to candidate rows.
+
+    Returns the 5 scalar fields the LLM prompt now references in lieu of the
+    deprecated ``prev_moneyflow`` array. Field semantics match the LGB
+    feature派生 in :func:`limit_up_board.lgb.features._mf_block` so the
+    prompt and the booster see the same numbers — when their decisions
+    disagree it is genuine signal, not unit mismatch.
+
+    Unit conventions (see ``FIELD_UNITS_RAW``):
+      * moneyflow.* 金额单位 ``万元``
+      * limit_list_d.amount 单位 ``元``
+      * daily.amount 单位 ``千元``
+    """
+    out: dict[str, Any] = {
+        "mf_net_t_yi": None,
+        "mf_net_5d_sum_yi": None,
+        "mf_consecutive_positive_days": None,
+        "mf_net_to_amount_pct": None,
+        "mf_large_order_strength_pct": None,
+        "mf_divergence_flag": 0,
+    }
+    if not moneyflow_rows:
+        return out
+
+    # Resolve T-day amount in yuan once.
+    amt_yuan = amount_yuan
+    if amt_yuan is None and daily_amount_qian is not None:
+        amt_yuan = daily_amount_qian * 1e3
+
+    last = moneyflow_rows[-1]
+    net_wan = _to_float(last.get("net_mf_amount"))
+    out["mf_net_t_yi"] = None if net_wan is None else round(net_wan / 1e4, 4)
+
+    if len(moneyflow_rows) >= 5:
+        vals = [_to_float(r.get("net_mf_amount")) for r in moneyflow_rows[-5:]]
+        if all(v is not None for v in vals):
+            out["mf_net_5d_sum_yi"] = round(
+                sum(v for v in vals if v is not None) / 1e4, 4
+            )
+
+    consec_pos = 0
+    for r in reversed(moneyflow_rows[-5:]):
+        net = _to_float(r.get("net_mf_amount"))
+        if net is not None and net > 0:
+            consec_pos += 1
+        else:
+            break
+    out["mf_consecutive_positive_days"] = consec_pos
+
+    if amt_yuan and net_wan is not None:
+        out["mf_net_to_amount_pct"] = round(net_wan * 1e4 / amt_yuan * 100, 2)
+
+    buy_lg_wan = _to_float(last.get("buy_lg_amount"))
+    buy_elg_wan = _to_float(last.get("buy_elg_amount"))
+    if amt_yuan and (buy_lg_wan is not None or buy_elg_wan is not None):
+        lg = buy_lg_wan or 0.0
+        elg = buy_elg_wan or 0.0
+        out["mf_large_order_strength_pct"] = round((lg + elg) * 1e4 / amt_yuan * 100, 2)
+
+    # Divergence: large+xlarge buys ≥ 5% of amount yet net flow ≤ 0.
+    strength = out["mf_large_order_strength_pct"]
+    net_t_yi = out["mf_net_t_yi"]
+    if (
+        strength is not None
+        and strength >= 5.0
+        and net_t_yi is not None
+        and net_t_yi <= 0
+    ):
+        out["mf_divergence_flag"] = 1
+
     return out
 
 
