@@ -365,21 +365,32 @@ def run_screening(
     preset: str,
     input_budget: int = DEFAULT_SCREENING_INPUT_BUDGET,
     lgb_min_score_floor: float | None = 30.0,
+    include_decile: bool = True,
 ) -> Iterable[tuple[StrategyEvent, RoundResult | None]]:
     """Run all 强势初筛 batches, yielding (event, terminal_result_or_None).
 
     The caller (strategy.run) re-yields the events into the runner. The final
     iteration yields a result alongside the STEP_FINISHED event so the caller
     can hand it on to 连板预测.
+
+    ``include_decile`` (v0.7 / P2-2) controls whether ``lgb_decile`` reaches
+    the LLM input — both as a prompt-template mention and as a candidate-row
+    field. Audit / render / persistence layers keep their decile values
+    regardless; only the LLM payload is affected.
     """
     profile = resolve_profile(preset, STAGE_SCREENING)
     candidates = bundle.candidates
+    if not include_decile:
+        candidates = [_strip_decile(c) for c in candidates]
     plan = plan_llm_batches(
         n_candidates=len(candidates),
         input_budget=input_budget,
         output_budget=profile.max_output_tokens,
     )
-    screening_system = build_screening_system(lgb_min_score_floor=lgb_min_score_floor)
+    screening_system = build_screening_system(
+        lgb_min_score_floor=lgb_min_score_floor,
+        include_decile=include_decile,
+    )
     yield (
         StrategyEvent(
             type=EventType.LIVE_STATUS,
@@ -550,6 +561,21 @@ def run_screening(
 # ---------------------------------------------------------------------------
 
 
+def _strip_decile(row: dict[str, Any]) -> dict[str, Any]:
+    """Return a shallow copy of *row* with ``lgb_decile`` removed.
+
+    v0.7 / P2-2 — used by ``run_screening`` and ``run_prediction`` when
+    ``LubConfig.lgb_decile_in_prompt=False`` so the LLM never sees decile
+    values. Audit and render code paths keep the original ``bundle.candidates``
+    untouched, so the field stays in DuckDB / summary.md.
+    """
+    if "lgb_decile" not in row:
+        return row
+    out = dict(row)
+    out.pop("lgb_decile", None)
+    return out
+
+
 def run_prediction(
     *,
     llm: LLMClient,
@@ -558,15 +584,23 @@ def run_prediction(
     preset: str,
     input_budget: int = DEFAULT_PREDICTION_INPUT_BUDGET,
     lgb_min_score_floor: float | None = 30.0,
+    include_decile: bool = True,
 ) -> Iterable[tuple[StrategyEvent, RoundResult | None]]:
-    """Run 连板预测; multi-batch + 全局重排 if the candidate set exceeds the budget."""
+    """Run 连板预测; multi-batch + 全局重排 if the candidate set exceeds the budget.
+
+    ``include_decile`` (v0.7 / P2-2) — see ``run_screening`` docstring; same
+    semantics applied to the 连板预测 payload + system prompt.
+    """
     profile = resolve_profile(preset, STAGE_PREDICTION)
     plan = plan_llm_batches(
         n_candidates=len(selected),
         input_budget=input_budget,
         output_budget=profile.max_output_tokens,
     )
-    prediction_system = build_prediction_system(lgb_min_score_floor=lgb_min_score_floor)
+    prediction_system = build_prediction_system(
+        lgb_min_score_floor=lgb_min_score_floor,
+        include_decile=include_decile,
+    )
     yield (
         StrategyEvent(
             type=EventType.LIVE_STATUS,
@@ -599,6 +633,8 @@ def run_prediction(
     payload_rows: list[dict[str, Any]] = [
         _prediction_row_from_selected(c, bundle.candidates) for c in selected
     ]
+    if not include_decile:
+        payload_rows = [_strip_decile(r) for r in payload_rows]
 
     for i in range(plan.n_batches):
         batch_objs = selected[i * plan.batch_size : (i + 1) * plan.batch_size]

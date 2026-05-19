@@ -51,7 +51,10 @@ from .ui import choose_renderer
 
 app = typer.Typer(
     name="limit-up-board",
-    help="打板策略 — A 股涨停板双轮 LLM 漏斗。",
+    help=(
+        "打板策略 — 盘后基于 T 日涨停池预测 T+1 次日连板/高位溢价候选"
+        "（双轮 LLM 漏斗 + LightGBM 次日最大溢价概率锚点）。"
+    ),
     no_args_is_help=True,
     add_completion=False,
 )
@@ -126,7 +129,11 @@ def cmd_run(
         ),
     ),
 ) -> None:
-    """Run the full打板策略 pipeline."""
+    """Run the full 打板策略 pipeline.
+
+    盘后基于 T 日已收盘的涨停池，预测 T+1 次日连板/高位溢价候选；不依赖盘中实时
+    盘口或集合竞价数据。
+    """
     debate_llms_list: list[str] | None = None
     if debate_llms is not None:
         if not debate:

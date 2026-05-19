@@ -140,6 +140,101 @@ def test_prediction_user_prompt_includes_candidate_lgb_score() -> None:
     assert '"lgb_decile": 4' in text
 
 
+# ---------------------------------------------------------------------------
+# v0.7 — include_decile switch (LubConfig.lgb_decile_in_prompt)
+# ---------------------------------------------------------------------------
+
+
+def test_build_screening_system_drops_decile_when_disabled() -> None:
+    out = build_screening_system(lgb_min_score_floor=30.0, include_decile=False)
+    assert "lgb_score" in out
+    # No decile mention at all.
+    assert "lgb_decile" not in out
+    # Floor exception still applies.
+    assert "lgb_score < 30" in out
+
+
+def test_build_prediction_system_drops_decile_when_disabled() -> None:
+    out = build_prediction_system(lgb_min_score_floor=30.0, include_decile=False)
+    assert "lgb_score" in out
+    assert "lgb_decile" not in out
+    assert "lgb_score < 30" in out
+
+
+def test_build_prediction_system_drops_floor_and_decile_together() -> None:
+    """Both switches off: keep the core lgb_score guidance, drop floor + decile."""
+    out = build_prediction_system(lgb_min_score_floor=None, include_decile=False)
+    assert "lgb_score" in out
+    assert "lgb_decile" not in out
+    # Floor-exception bullet is gone (the strip regex removes both wrapped lines).
+    assert "lgb_score < " not in out
+    assert "若你给出 top_candidate" not in out
+
+
+# ---------------------------------------------------------------------------
+# v0.7 — P1-5 LGB low-score exception is field-bound
+# ---------------------------------------------------------------------------
+
+
+def test_screening_lgb_low_score_exception_cites_input_fields() -> None:
+    """P1-5 — the low-floor exception must reference real input fields, not
+    a vague "突发题材 / 一线游资认可" free-form clause."""
+    out = build_screening_system(lgb_min_score_floor=30.0)
+    # Old free-form wording must be gone.
+    assert "极强的突发题材" not in out
+    assert "一线游资认可" not in out
+    # New field-bound wording must reference at least one of: lhb_famous_seats_count,
+    # lhb_net_buy_yi, lu_desc/tag, sector_strength_source.
+    assert "lhb_famous_seats_count" in out
+    assert "lhb_net_buy_yi" in out
+    assert "lu_desc" in out
+    assert "sector_strength_source" in out
+
+
+def test_prediction_lgb_low_score_top_candidate_must_cite_fields() -> None:
+    """连板预测 prompt must require the top_candidate-override rationale to cite
+    input fields (so the evidence validator can verify)."""
+    out = build_prediction_system(lgb_min_score_floor=30.0)
+    assert "只能引用输入字段" in out
+    assert "lhb_famous_seats_count" in out
+    assert "lu_desc" in out
+
+
+# ---------------------------------------------------------------------------
+# v0.7 — P1-4 R1 cyq/lhb usage rule
+# ---------------------------------------------------------------------------
+
+
+def test_screening_r1_explains_cyq_lhb_as_secondary_signals() -> None:
+    """P1-4 — R1 must clarify that 筹码/LHB 只作风险或正向加分，不主筛。"""
+    out = build_screening_system(lgb_min_score_floor=30.0)
+    assert "cyq_winner_pct" in out
+    assert "lhb_famous_seats_count" in out
+    # The phrase 'R1 仅作为风险或正向加分信号' (rule), no need for exact match;
+    # check the key qualifier:
+    assert "不作为主要筛选" in out
+    assert "lhb_data_quality" in out
+
+
+# ---------------------------------------------------------------------------
+# v0.7 — P0 scene prologue must mention 盘后 / 次日
+# ---------------------------------------------------------------------------
+
+
+def test_screening_system_states_post_close_scene() -> None:
+    out = build_screening_system(lgb_min_score_floor=30.0)
+    assert "盘后" in out
+    assert "T+1" in out
+    # Old "打板策略研究助手" framing replaced.
+    assert "盘后涨停复盘" in out
+
+
+def test_prediction_system_states_post_close_scene() -> None:
+    out = build_prediction_system(lgb_min_score_floor=30.0)
+    assert "盘后" in out
+    assert "次日连板/高位溢价" in out
+
+
 def test_user_prompts_omit_lgb_when_field_absent() -> None:
     """When LGB disabled and not injected, prompt JSON dump simply lacks the key."""
     candidates = [

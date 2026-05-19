@@ -637,13 +637,17 @@ class LubRunner:
         # v0.5 LGB: thread the configured min_score_floor into the prompts;
         # when LGB is fully disabled we pass None so the prompt drops the
         # numeric threshold sentence (the rest of the LGB guidance survives).
+        # v0.7 LGB: lgb_decile_in_prompt controls whether lgb_decile reaches
+        # the LLM (P2-2). Audit/render layers always keep the value.
         lgb_floor = lub_cfg.lgb_min_score_floor if rt.lgb_scorer is not None else None
+        include_decile = lub_cfg.lgb_decile_in_prompt
         screening_result = None
         for ev, res in run_screening(
             llm=self._llm,
             bundle=bundle,
             preset=preset,
             lgb_min_score_floor=lgb_floor,
+            include_decile=include_decile,
         ):
             yield ev
             if res is not None:
@@ -661,6 +665,7 @@ class LubRunner:
             bundle=bundle,
             preset=preset,
             lgb_min_score_floor=lgb_floor,
+            include_decile=include_decile,
         ):
             yield ev
             if res is not None:
@@ -785,8 +790,10 @@ class LubRunner:
             reports_dir = paths.reports_dir() / run_id
 
             # v0.5 — resolve the LGB floor once per run; workers all share it.
+            # v0.7 — lgb_decile_in_prompt likewise shared across debate workers.
             lub_cfg = load_config(rt.db)
             lgb_floor = lub_cfg.lgb_min_score_floor if rt.lgb_scorer is not None else None
+            include_decile = lub_cfg.lgb_decile_in_prompt
 
             # ----- Phase A: parallel 强势初筛 + 连板预测 + (final_ranking) ---
             emit(
@@ -807,6 +814,7 @@ class LubRunner:
                         reports_dir,
                         rt.config,
                         lgb_floor,
+                        include_decile,
                     ): provider
                     for provider in providers
                 }
@@ -1395,6 +1403,7 @@ def _worker_phase_a(
     reports_dir: Path,
     config: ConfigService,
     lgb_min_score_floor: float | None = 30.0,
+    include_decile: bool = True,
 ) -> ProviderDebateResult:
     """One provider's 强势初筛 + 连板预测 + (optional) final_ranking. Tagged
     events are attached to the returned ProviderDebateResult; the main thread
@@ -1411,6 +1420,7 @@ def _worker_phase_a(
         for ev, res in run_screening(
             llm=llm, bundle=bundle, preset=preset,
             lgb_min_score_floor=lgb_min_score_floor,
+            include_decile=include_decile,
         ):
             events.append(ev)
             if res is not None:
@@ -1421,6 +1431,7 @@ def _worker_phase_a(
             for ev, res in run_prediction(
                 llm=llm, selected=selected, bundle=bundle, preset=preset,
                 lgb_min_score_floor=lgb_min_score_floor,
+                include_decile=include_decile,
             ):
                 events.append(ev)
                 if res is not None:

@@ -1,10 +1,10 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.7.0
+version: 0.7.1
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
-description: A 股打板策略：双轮 LLM 漏斗（强势初筛 → 连板预测）
+description: A 股打板策略：盘后基于 T 日涨停池预测 T+1 次日连板/高位溢价候选（双轮 LLM 漏斗 + LightGBM 次日最大溢价概率锚点）
 author: DeepTrade
 
 # v0.4.0 框架起：插件自行声明非框架自带的运行时依赖（PEP 508）。

@@ -16,29 +16,54 @@ from typing import Any
 # 强势初筛 (strong target analysis)
 # ---------------------------------------------------------------------------
 
-_SCREENING_LGB_BLOCK_FLOOR = (
+# v0.7.0 — LGB §8.1 block 拆成 3 段：score 描述、可选 floor 例外、可选 decile 段。
+# 三段独立拼装让 ``build_screening_system`` 同时支持 (1) 关闭 floor、(2) 关闭 decile
+# 输入两种正交开关，对应 LubConfig.lgb_min_score_floor / lgb_decile_in_prompt。
+_SCREENING_LGB_HEAD = (
     "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，预测「次日最大溢价概率」——"
-    "T+1 最高价 ≥ T 收盘价 × (1+阈值%) 的概率，越大越倾向高位溢价但 ≠ 必涨停 / ≠ 可实现收益）；"
-    "lgb_decile（1=最弱，10=最强，当批分位）。\n"
-    "  · lgb_score < {floor} 的标的，除非有极强的突发题材或一线游资认可，否则倾向 selected=false。\n"
-    "  · lgb_score 缺失（null）或本次未启用模型时，按其他证据判断，不要因为缺失就一概 selected=false。\n"
-    "  · 在 evidence 中引用时 field=lgb_score，unit=\"无\"，interpretation 形如 "
+    "T+1 最高价 ≥ T 收盘价 × (1+阈值%) 的概率，越大越倾向次日高位溢价/连板，但 ≠ 必涨停 / "
+    "≠ 可实现收益；属于盘后统计学锚点，盘口风险信号仍优先）。"
+)
+
+_SCREENING_LGB_DECILE_LINE = (
+    "lgb_decile（1=最弱，10=最强，当批分位）。"
+)
+
+# P1-5 — 例外字段化：仅允许引用输入字段，避免 LLM 自由补全"突发题材/一线游资"。
+_SCREENING_LGB_FLOOR_BLOCK = (
+    "\n  · lgb_score < {floor} 的标的倾向 selected=false；仅当输入字段满足以下任一条件时"
+    "才可 selected=true，且 rationale 必须明确写出引用的字段名与数值：\n"
+    "    (a) lhb_famous_seats_count > 0 且 lhb_net_buy_yi > 0（一线游资明确净买入）；\n"
+    "    (b) lu_desc / tag 含明显主线题材关键词，且 sector_strength_source ∈ "
+    "{{limit_cpt_list, lu_desc_aggregation}}（题材可信度足够）。"
+)
+
+_SCREENING_LGB_TAIL = (
+    "\n  · lgb_score 缺失（null）或本次未启用模型时，按其他证据判断，不要因为缺失就一概 selected=false。"
+    "\n  · 在 evidence 中引用时 field=lgb_score，unit=\"无\"，interpretation 形如 "
     "\"分位 X / 模型分 Y\"；不可同时把 lgb_score 当做 risk_flags 与 evidence 的唯一支柱。"
 )
 
-_SCREENING_LGB_BLOCK_NO_FLOOR = (
-    "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，预测「次日最大溢价概率」——"
-    "T+1 最高价 ≥ T 收盘价 × (1+阈值%) 的概率，越大越倾向高位溢价但 ≠ 必涨停 / ≠ 可实现收益）；"
-    "lgb_decile（1=最弱，10=最强，当批分位）。\n"
-    "  · lgb_score 缺失（null）或本次未启用模型时，按其他证据判断，不要因为缺失就一概 selected=false。\n"
-    "  · 在 evidence 中引用时 field=lgb_score，unit=\"无\"，interpretation 形如 "
-    "\"分位 X / 模型分 Y\"；不可同时把 lgb_score 当做 risk_flags 与 evidence 的唯一支柱。"
+# P1-4 — R1 阶段筹码/LHB 字段使用边界（候选行已带这些字段，但 R1 目标是高召回）。
+_SCREENING_CYQ_LHB_BLOCK = (
+    "- 筹码 / 龙虎榜（cyq_winner_pct / cyq_top10_concentration / lhb_net_buy_yi / "
+    "lhb_famous_seats_count / lhb_data_quality）：**R1 仅作为风险或正向加分信号，"
+    "不作为主要筛选维度**——\n"
+    "  · cyq_winner_pct > 70% 视为「获利盘抛压重」→ 降分但不直接 selected=false；\n"
+    "  · lhb_famous_seats_count > 0 且 lhb_net_buy_yi > 0 视为「游资认可」→ 可作为正向加分；\n"
+    "  · lhb_data_quality=\"not_listed\" 是合法事实（未上龙虎榜），不视为缺失；\n"
+    "  · 详细分歧/解套口径在下一轮（连板预测）评估，R1 不必深挖。"
 )
 
 
 def _screening_system_with(lgb_block: str) -> str:
     return f"""\
-你是一个 A 股打板策略研究助手。你只能基于本次消息中提供的结构化数据进行分析。
+你是一个 A 股盘后涨停复盘研究助手。你只能基于本次消息中提供的结构化数据进行分析。
+
+【场景前提】
+- 当前是【盘后】基于 T 日已经收盘的涨停池，对【T+1 次日连板/高位溢价】候选进行预测。
+- 输入均为盘后结构化数据；**不会**提供集合竞价、盘中实时盘口、实时封单撤单、新闻公告等。
+- 因此判断标的强弱时，请围绕 T 日涨停盘的复盘特征（封板质量/题材/梯队/量价/资金/历史基因）展开。
 
 【硬性纪律】
 1. 严禁使用外部搜索、新闻网站、公告网站、实时行情、社交媒体、机构观点或任何未提供的数据。
@@ -48,7 +73,7 @@ def _screening_system_with(lgb_block: str) -> str:
 5. 仅输出 JSON，不要 Markdown 代码块包裹，不要解释性前后缀。
 
 【任务】
-对本批次涨停候选股进行"强势标的分析"，判断其是否具备进入下一轮"连板预测"的资格。
+对本批次 T 日涨停候选股进行"强势标的分析"，判断其是否具备进入下一轮"次日连板/高位溢价预测"的资格。
 
 【分析维度】
 - 封板强度：first_time / last_time / open_times / fd_amount_yi / limit_amount_yi / fd_amount_ratio（封单/成交额，>10% 为强势封板）
@@ -59,24 +84,52 @@ def _screening_system_with(lgb_block: str) -> str:
 - 历史基因：up_count_30d（近 30 日涨停次数）/ up_stat
 - 市场情绪：参考下方【市场摘要】中 limit_step_trend / yesterday_failure_rate / yesterday_winners_today
 {lgb_block}
+{_SCREENING_CYQ_LHB_BLOCK}
 - 风险：是否一字板 / 过度连板 / 题材孤立 / 缺数据
 
 【evidence 要求】"""
 
 
-def build_screening_system(*, lgb_min_score_floor: float | None = 30.0) -> str:
+def _build_screening_lgb_block(
+    *, lgb_min_score_floor: float | None, include_decile: bool
+) -> str:
+    """Compose the LGB block for the screening system prompt.
+
+    Two orthogonal switches:
+      * ``lgb_min_score_floor=None`` → drop the floor-exception sentence.
+      * ``include_decile=False`` → drop the ``lgb_decile`` mention; LLM only
+        sees ``lgb_score`` references. Must match ``data._attach_lgb_scores``
+        which actually omits the ``lgb_decile`` field from candidate rows when
+        the same flag is off.
+    """
+    if include_decile:
+        head = _SCREENING_LGB_HEAD[:-1] + "；" + _SCREENING_LGB_DECILE_LINE
+    else:
+        head = _SCREENING_LGB_HEAD
+    if lgb_min_score_floor is not None:
+        floor_repr = f"{lgb_min_score_floor:g}"
+        floor = _SCREENING_LGB_FLOOR_BLOCK.format(floor=floor_repr)
+    else:
+        floor = ""
+    return head + floor + _SCREENING_LGB_TAIL
+
+
+def build_screening_system(
+    *,
+    lgb_min_score_floor: float | None = 30.0,
+    include_decile: bool = True,
+) -> str:
     """Render 强势初筛 system prompt with the LGB §8.1 paragraph.
 
     ``lgb_min_score_floor=None`` → omit the soft-floor sentence (the model still
     sees the lgb_score description, but no numeric threshold is suggested).
+    ``include_decile=False`` → omit the ``lgb_decile`` reference entirely; pair
+    with ``_attach_lgb_scores`` dropping the field from candidate rows.
     """
-    if lgb_min_score_floor is None:
-        block = _SCREENING_LGB_BLOCK_NO_FLOOR
-    else:
-        # Format inline; ``floor`` is the only placeholder. Trim trailing zeros
-        # so 30.0 renders as "30" but 32.5 stays as "32.5".
-        floor_repr = f"{lgb_min_score_floor:g}"
-        block = _SCREENING_LGB_BLOCK_FLOOR.format(floor=floor_repr)
+    block = _build_screening_lgb_block(
+        lgb_min_score_floor=lgb_min_score_floor,
+        include_decile=include_decile,
+    )
     return _screening_system_with(block) + _SCREENING_TAIL
 
 
@@ -128,10 +181,14 @@ rationale 不超过 80 字（输出截断会触发 JSON 失败）。
 """
 
 
-# Backward-compatible constant — reflects the LubConfig default
-# (lgb_min_score_floor=30.0). Pipelines that want a different floor must call
-# ``build_screening_system(...)`` directly.
-SCREENING_SYSTEM = build_screening_system(lgb_min_score_floor=30.0)
+# Backward-compatible constant — reflects the LubConfig defaults
+# (lgb_min_score_floor=30.0, lgb_decile_in_prompt=True). Pipelines that want a
+# different floor / decile-toggle must call ``build_screening_system(...)``
+# directly.
+SCREENING_SYSTEM = build_screening_system(
+    lgb_min_score_floor=30.0,
+    include_decile=True,
+)
 
 
 def screening_user_prompt(
@@ -165,8 +222,13 @@ def screening_user_prompt(
 # 连板预测 (continuation prediction)
 # ---------------------------------------------------------------------------
 
-PREDICTION_SYSTEM = """\
-你是一个 A 股打板策略研究助手，正在执行第二轮"连板预测"。
+_PREDICTION_SYSTEM_TEMPLATE = """\
+你是一个 A 股盘后涨停复盘研究助手，正在执行第二轮"次日连板/高位溢价预测"。
+
+【场景前提】（与第一轮一致）
+- 当前是【盘后】基于 T 日已经收盘的涨停池，对【T+1 次日连板/高位溢价】候选进行预测。
+- 输入均为盘后结构化数据；**不会**提供集合竞价、盘中实时盘口、实时封单撤单、新闻公告等。
+- 你的任务是给每只候选股输出一个「次日重点关注 / 观察 / 回避」的预测决策。
 
 【硬性纪律】（与第一轮一致）
 1. 严禁使用外部搜索或任何未提供的数据。
@@ -183,18 +245,20 @@ PREDICTION_SYSTEM = """\
 - 风险：高位加速 / 连续一字 / 流动性不足。
 - 市场亏钱效应（market_summary.yesterday_failure_rate.interpretation == 'high'）下，
   所有 confidence 自动下调一档（high → medium，medium → low），rationale 需明示。
-- 涨停梯队拉升（market_summary.limit_step_trend.interpretation == 'spectrum_lifting'）下，
+- 涨停梯队拉升（market_summary.limit_step_trend.interpretation == 'spectrum_lifting'）下,
   最高板地位的标的可适度上调 continuation_score；score 仍受 0–100 上限约束。
 - 不允许引用 missing_data 中的字段；可引用所有派生字段
   （amplitude_pct / fd_amount_ratio / ma_* / up_count_30d）。
-- LightGBM 量化分（lgb_score / lgb_decile）作为 continuation_score 的统计学锚点之一：
+- LightGBM 量化分（lgb_score__PREDICTION_DECILE_REF__）作为 continuation_score 的统计学锚点之一：
   · lgb_score = 模型预测的「次日最大溢价概率」（T+1 最高价 ≥ T 收盘价 × (1+阈值%)）；
-    数值越大越倾向高位溢价，但**不等价于"必涨停"或"可实现收益"**——盘口风险信号仍优先。
+    数值越大越倾向次日高位溢价/连板，但**不等价于"必涨停"或"可实现收益"**——盘口风险信号仍优先。
   · lgb_score ≥ 70 的标的可适度上调 confidence；但若同时存在 cyq_winner_pct > 70 / 高位连板等
     分歧风险，仍需下调。
-  · lgb_score < __PREDICTION_LGB_FLOOR__ 的标的若你给出 top_candidate，rationale 必须明确写出"为何超越模型判断"。
+  · lgb_score < __PREDICTION_LGB_FLOOR__ 的标的若你给出 top_candidate，rationale 必须明确写出"为何超越模型判断"，
+    且该理由只能引用输入字段（如 lhb_famous_seats_count / lhb_net_buy_yi / lu_desc / tag /
+    sector_strength_source 等），不得引用任何未提供数据。
   · lgb_score 缺失（null）或本次未启用模型时，忽略此维度，按其他证据评估。
-  · 引用时 field 可以是 lgb_score 或 lgb_decile，value 必须填标量（分数 / 分位数）。
+  · 引用时 field 可以是 lgb_score__PREDICTION_DECILE_FIELD__，value 必须填标量（分数 / 分位数）。
 - 筹码维度（参考候选行 cyq_winner_pct / cyq_top10_concentration /
   cyq_avg_cost_yuan / cyq_close_to_avg_cost_pct）：
   · cyq_winner_pct > 70% 视为"获利盘抛压重"，下调 confidence；
@@ -262,32 +326,57 @@ PREDICTION_SYSTEM = """\
 """
 
 
-# v0.5 — LGB §8.2 block uses `__PREDICTION_LGB_FLOOR__` sentinel so config can
-# override at render time. Constant default (LubConfig.lgb_min_score_floor=30)
-# bakes in the typical value so the constant string stays self-describing.
-PREDICTION_SYSTEM = PREDICTION_SYSTEM.replace("__PREDICTION_LGB_FLOOR__", "30")
-
-
-def build_prediction_system(*, lgb_min_score_floor: float | None = 30.0) -> str:
+def build_prediction_system(
+    *,
+    lgb_min_score_floor: float | None = 30.0,
+    include_decile: bool = True,
+) -> str:
     """Render 连板预测 system prompt with the §8.2 LGB paragraph.
 
     ``lgb_min_score_floor=None`` → drop the soft-floor sentence entirely; the
     rest of the LGB guidance (≥70 boost, missing-handling, evidence shape) is
     preserved.
+    ``include_decile=False`` → strip every ``lgb_decile`` mention; pair with
+    ``data._attach_lgb_scores`` dropping the field from candidate rows.
     """
+    # v0.7 — re-derive from the raw template each call so the decile / floor
+    # switches compose cleanly. Using the pre-rendered module constant would
+    # make the substitutions overlap.
+    raw = (
+        _PREDICTION_SYSTEM_TEMPLATE.replace(
+            "__PREDICTION_LGB_FLOOR__",
+            f"{lgb_min_score_floor:g}" if lgb_min_score_floor is not None else "30",
+        )
+        .replace(
+            "__PREDICTION_DECILE_REF__",
+            " / lgb_decile" if include_decile else "",
+        )
+        .replace(
+            "__PREDICTION_DECILE_FIELD__",
+            " 或 lgb_decile" if include_decile else "",
+        )
+    )
     if lgb_min_score_floor is None:
-        # Re-derive the template and strip the floor line; cheap (one string op).
+        # Drop the floor-exception bullet (and its second wrapped line) so the
+        # rest of the LGB block stays intact. The two-line shape was just
+        # rendered above so the literal numeric value to strip is "30" or the
+        # caller's float — we cover both.
         from re import sub as _re_sub
 
-        return _re_sub(
-            r"\n  · lgb_score < 30 的标的若你给出 top_candidate[^\n]*\n",
+        raw = _re_sub(
+            r"\n  · lgb_score < [^\n]+\n    且该理由只能引用输入字段[^\n]*\n",
             "\n",
-            PREDICTION_SYSTEM,
+            raw,
         )
-    if lgb_min_score_floor == 30.0:
-        return PREDICTION_SYSTEM
-    floor_repr = f"{lgb_min_score_floor:g}"
-    return PREDICTION_SYSTEM.replace("lgb_score < 30 的标的", f"lgb_score < {floor_repr} 的标的")
+    return raw
+
+
+# Backward-compatible module-level constant — reflects the LubConfig defaults
+# (lgb_min_score_floor=30.0, lgb_decile_in_prompt=True).
+PREDICTION_SYSTEM = build_prediction_system(
+    lgb_min_score_floor=30.0,
+    include_decile=True,
+)
 
 
 def prediction_user_prompt(
@@ -317,7 +406,7 @@ def prediction_user_prompt(
 # ---------------------------------------------------------------------------
 
 FINAL_RANKING_SYSTEM = """\
-你是一个 A 股打板策略的全局排名助手。
+你是一个 A 股盘后涨停复盘策略的全局排名助手——基于已经完成的次日连板/高位溢价预测结果，给出跨批次的最终排名。
 
 【硬性纪律】
 1. 严禁引入新事实；仅基于下方 finalists 的摘要 + 市场环境进行重排。
@@ -382,7 +471,7 @@ def final_ranking_user_prompt(
 # ---------------------------------------------------------------------------
 
 REVISION_SYSTEM = """\
-你是 A 股打板策略多 LLM 辩论中的一员。本轮你已经独立完成了"连板预测"，
+你是 A 股盘后涨停复盘策略多 LLM 辩论中的一员。本轮你已经独立完成了"次日连板/高位溢价预测"，
 下方将给你看其他匿名同行（peer_a / peer_b / ...）对同一批候选股的预测结果。
 
 【硬性纪律】
