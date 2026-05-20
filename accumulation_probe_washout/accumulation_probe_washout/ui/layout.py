@@ -37,6 +37,13 @@ def render_header(mode: str, trade_date: str, run_id: str) -> Panel:
     return Panel(text, border_style="cyan", padding=(0, 1))
 
 
+def _format_step_no(no: float) -> str:
+    """Drop the trailing .0 on whole-number step ids ("Step 2", not "Step 2.0")."""
+    if isinstance(no, float) and no.is_integer():
+        return str(int(no))
+    return str(no)
+
+
 def render_stage_stack(stack: StageStack) -> Panel:
     tbl = Table.grid(padding=(0, 1))
     tbl.add_column("glyph", no_wrap=True)
@@ -45,7 +52,7 @@ def render_stage_stack(stack: StageStack) -> Panel:
     for s in stack.steps:
         tbl.add_row(
             Text(_STATE_GLYPH[s.state], style=_STATE_STYLE[s.state]),
-            Text(f"Step {s.no} {s.label}", style=_STATE_STYLE[s.state]),
+            Text(f"Step {_format_step_no(s.no)} {s.label}", style=_STATE_STYLE[s.state]),
             Text(s.message or "", style="dim"),
         )
     return Panel(tbl, title="Stages", border_style="blue", padding=(0, 1))

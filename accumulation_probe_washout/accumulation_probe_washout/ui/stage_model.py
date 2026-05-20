@@ -6,7 +6,12 @@ payload['step'] (when present) or fallback to event-type heuristics.
 Mode → step list:
   screen  : Step 0 数据同步, Step 1 漏斗筛选, Step 2 持久化
   analyze : Step 0 数据同步, Step 1 读取 watchlist, Step 3 LLM, Step 5 写入
-  run     : Step 0 数据同步, Step 1 漏斗筛选, Step 2 持久化命中, Step 3 LLM, Step 5 写入
+  run     : Step 0 数据同步, Step 1 漏斗筛选, Step 2 持久化命中,
+            Step 2.5 读取 watchlist, Step 3 LLM, Step 5 写入
+
+Run mode carries an extra Step 2.5 ("读取 watchlist") so the analyze
+sub-stage doesn't collide with the screen step 1 ("漏斗筛选") and
+overwrite its done state in the dashboard.
 """
 
 from __future__ import annotations
@@ -20,16 +25,19 @@ if TYPE_CHECKING:  # pragma: no cover
 
 @dataclass
 class Step:
-    no: int
+    no: float
     label: str
     state: str = "pending"  # pending / running / done / failed
     message: str = ""
 
 
-_SCREEN_STEPS = [(0, "数据同步"), (1, "漏斗筛选"), (2, "持久化命中")]
-_ANALYZE_STEPS = [(0, "数据同步"), (1, "读取 watchlist"), (3, "LLM 走势分析"), (5, "写入结果")]
-_RUN_STEPS = [
+_SCREEN_STEPS: list[tuple[float, str]] = [(0, "数据同步"), (1, "漏斗筛选"), (2, "持久化命中")]
+_ANALYZE_STEPS: list[tuple[float, str]] = [
+    (0, "数据同步"), (1, "读取 watchlist"), (3, "LLM 走势分析"), (5, "写入结果"),
+]
+_RUN_STEPS: list[tuple[float, str]] = [
     (0, "数据同步"), (1, "漏斗筛选"), (2, "持久化命中"),
+    (2.5, "读取 watchlist"),
     (3, "LLM 走势分析"), (5, "写入结果"),
 ]
 
@@ -49,7 +57,7 @@ class StageStack:
             tpl = _SCREEN_STEPS
         return cls(mode=mode, steps=[Step(no=n, label=l) for n, l in tpl])
 
-    def get(self, step_no: int) -> Step | None:
+    def get(self, step_no: float) -> Step | None:
         for s in self.steps:
             if s.no == step_no:
                 return s
@@ -74,12 +82,14 @@ class StageStack:
                 s.message = ev.message
             return
 
-        if et == "step.started" and isinstance(step_no, int):
+        # Accept int or float step ids (bool is a subclass of int — exclude it).
+        is_step_id = isinstance(step_no, (int, float)) and not isinstance(step_no, bool)
+        if et == "step.started" and is_step_id:
             s = self.get(step_no)
             if s:
                 s.state = "running"
                 s.message = ev.message
-        elif et == "step.finished" and isinstance(step_no, int):
+        elif et == "step.finished" and is_step_id:
             s = self.get(step_no)
             if s:
                 s.state = "done"

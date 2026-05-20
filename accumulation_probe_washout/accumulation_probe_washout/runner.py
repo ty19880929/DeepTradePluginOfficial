@@ -42,6 +42,7 @@ from .data import (
     detect_probe_day,
     fetch_daily,
     fetch_daily_basic,
+    fetch_daily_basic_on,
     fetch_index_daily,
     fetch_latest_trade_date,
     fetch_moneyflow,
@@ -392,12 +393,18 @@ class ApwRunner:
                 tushare, ts_codes=uni["ts_code"].tolist(), start=window_start, end=T,
                 batch_size=50,
             )
-            basic_extra = _fetch_daily_basic_in_batches(
-                tushare, ts_codes=uni["ts_code"].tolist(), start=window_start, end=T,
-                batch_size=50,
+            # daily_basic must be pulled per trade_date — multi-code
+            # ts_code lists return 0 rows from Tushare (see helper docstring).
+            uni_codes = uni["ts_code"].astype(str).tolist()
+            trade_dates_in_window = calendar.open_dates_in_range(window_start, T)
+            basic_extra = _fetch_daily_basic_by_day(
+                tushare,
+                trade_dates=trade_dates_in_window,
+                universe=set(uni_codes),
             )
+            # moneyflow caps ts_code lists at 1000; fetch_moneyflow batches internally.
             mf_outcome = fetch_moneyflow(
-                tushare, ts_codes=uni["ts_code"].tolist(), start=window_start, end=T
+                tushare, ts_codes=uni_codes, start=window_start, end=T
             )
 
             # ---- index_daily for relative_strength_20d (cfg.baseline_index_code).
@@ -432,6 +439,34 @@ class ApwRunner:
             )
             after_liquidity = uni[liquidity_mask].reset_index(drop=True)
             n_after_liquidity = len(after_liquidity)
+
+            # ---- daily_basic coverage guard.
+            # When circ_mv is missing for the bulk of the liquid universe we
+            # silently sink n_after_mv to 0 and the whole run looks like
+            # "today nothing matched" — but the real cause is a data outage.
+            # Fail fast so the user gets an actionable error instead of an
+            # empty success row.
+            if basic_extra is None or basic_extra.empty:
+                msg = (
+                    f"daily_basic returned no rows for window {window_start}..{T}; "
+                    "cannot apply market-cap filter (check Tushare access / "
+                    "fetch_daily_basic_on shape)"
+                )
+                raise RuntimeError(msg)
+            if n_after_liquidity > 0:
+                covered = sum(
+                    1 for code in after_liquidity["ts_code"].astype(str)
+                    if day_circ_mv_yi.get(code) is not None
+                )
+                coverage_ratio = covered / float(n_after_liquidity)
+                if coverage_ratio < 0.5:
+                    msg = (
+                        f"daily_basic returned circ_mv for only {covered}/"
+                        f"{n_after_liquidity} (≈{coverage_ratio:.0%}) of the liquid "
+                        f"universe on T={T}; cannot apply market-cap filter "
+                        "reliably (likely Tushare data gap)"
+                    )
+                    raise RuntimeError(msg)
 
             def _in_mv_band(code: str) -> bool:
                 cm = day_circ_mv_yi.get(code)
@@ -1300,7 +1335,20 @@ class ApwRunner:
             # Only rows refreshed by today's screen (last_seen_date = T) are
             # eligible; stale rows from prior trade days would otherwise be
             # re-analysed and persisted under the current T (review round 2 P1).
-            self._emit(EventType.STEP_STARTED, "Step 1: 读取 watchlist", payload={"step": 1})
+            # In run mode (screen → analyze in one process) screen already
+            # owns step 1 ("漏斗筛选"); reuse step=1 here would overwrite its
+            # done state in the dashboard. Use step=2.5 instead — the run
+            # mode StageStack template has a matching slot, while standalone
+            # analyze keeps the historical step=1.
+            read_step: float = 1 if _owns_run else 2.5
+            read_label_prefix = (
+                "Step 1" if _owns_run else "Analyze Step 2.5"
+            )
+            self._emit(
+                EventType.STEP_STARTED,
+                f"{read_label_prefix}: 读取 watchlist",
+                payload={"step": read_step},
+            )
             rows = self.rt.db.fetchall(
                 """
                 SELECT ts_code, name, phase, raw_candidate_json
@@ -1326,8 +1374,8 @@ class ApwRunner:
             candidates = candidates[: max_candidates]
             self._emit(
                 EventType.STEP_FINISHED,
-                f"Step 1: 读取 watchlist 完成，候选 {len(candidates)}",
-                payload={"step": 1, "n_candidates": len(candidates)},
+                f"{read_label_prefix}: 读取 watchlist 完成，候选 {len(candidates)}",
+                payload={"step": read_step, "n_candidates": len(candidates)},
             )
 
             # v0.6.0 — LGB scoring before LLM. Failure paths are wholly
@@ -1683,18 +1731,43 @@ def _fetch_daily_in_batches(
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
 
 
-def _fetch_daily_basic_in_batches(
-    tushare: Any, *, ts_codes: list[str], start: str, end: str, batch_size: int = 50
+def _fetch_daily_basic_by_day(
+    tushare: Any,
+    *,
+    trade_dates: list[str],
+    universe: set[str],
 ) -> pd.DataFrame:
-    if not ts_codes:
+    """Pull ``daily_basic`` per trade day, then intersect with ``universe``.
+
+    Tushare's ``daily_basic`` returns 0 rows when called with a multi-code
+    ``ts_code='a,b,...'`` list (verified by direct probe), so the legacy
+    chunked-by-ts_code helper silently produced empty frames and erased
+    ``circ_mv`` for every code — sinking the market-cap filter and turning
+    successful runs into ``n_after_mv=0``. Querying by ``trade_date`` is
+    the only reliable shape; we filter to the active universe in memory
+    so we don't haul unrelated codes around.
+
+    Only the columns the runner consumes downstream are retained
+    (``ts_code``, ``trade_date``, ``turnover_rate``, ``circ_mv``).
+    """
+    if not trade_dates or not universe:
         return pd.DataFrame()
+    keep_cols = ("ts_code", "trade_date", "turnover_rate", "circ_mv")
     chunks: list[pd.DataFrame] = []
-    for i in range(0, len(ts_codes), batch_size):
-        sub = ts_codes[i : i + batch_size]
-        df = fetch_daily_basic(tushare, ts_codes=sub, start=start, end=end)
-        if df is not None and not df.empty:
-            chunks.append(df)
-    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+    for td in trade_dates:
+        df = fetch_daily_basic_on(tushare, trade_date=td)
+        if df is None or df.empty or "ts_code" not in df.columns:
+            continue
+        sub = df[df["ts_code"].astype(str).isin(universe)]
+        if sub.empty:
+            continue
+        cols = [c for c in keep_cols if c in sub.columns]
+        chunks.append(sub[cols].copy())
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, ignore_index=True)
+    out["trade_date"] = out["trade_date"].astype(str)
+    return out
 
 
 def _amount_on_date(quotes: pd.DataFrame, trade_date: str) -> dict[str, float]:

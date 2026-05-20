@@ -131,6 +131,21 @@ class _FakeTushare:
                 return pd.DataFrame()
             return pd.concat(frames, ignore_index=True)
         if api == "daily_basic":
+            # New per-day shape: runner calls daily_basic(trade_date=YYYYMMDD).
+            if trade_date is not None:
+                frames = []
+                for c, df in self._daily.items():
+                    sub = df[df["trade_date"].astype(str) == str(trade_date)][
+                        ["ts_code", "trade_date", "turnover_rate", "circ_mv"]
+                    ]
+                    if not sub.empty:
+                        frames.append(sub)
+                return (
+                    pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+                )
+            # Legacy ts_code-list shape (unused by current runner; kept for
+            # back-compat in tests that pin it). Real Tushare returns 0 rows
+            # here — see APW空结果修复方案.
             codes = params.get("ts_code", "").split(",")
             frames = []
             for c in codes:

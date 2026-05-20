@@ -1401,15 +1401,55 @@ def fetch_daily_basic(tushare: Any, *, ts_codes: list[str], start: str, end: str
     )
 
 
-def fetch_moneyflow(tushare: Any, *, ts_codes: list[str], start: str, end: str) -> FetchOutcome:
-    """Optional API. Returns FetchOutcome to track missing-data degradation."""
+def fetch_daily_basic_on(tushare: Any, *, trade_date: str) -> pd.DataFrame:
+    """Pull a full ``daily_basic`` snapshot for one trade day.
+
+    Tushare's ``daily_basic`` returns 0 rows when called with a multi-code
+    comma list (``ts_code='a,b,...'``). Querying by ``trade_date`` alone is
+    the only reliable shape, so the runner pulls per-day and intersects
+    with the current universe in memory.
+    """
+    df = tushare.call("daily_basic", trade_date=trade_date)
+    if df is None:
+        return pd.DataFrame()
+    return df
+
+
+def fetch_moneyflow(
+    tushare: Any,
+    *,
+    ts_codes: list[str],
+    start: str,
+    end: str,
+    batch_size: int = 800,
+) -> FetchOutcome:
+    """Optional API. Returns FetchOutcome to track missing-data degradation.
+
+    Tushare ``moneyflow`` rejects ``ts_code`` lists longer than 1000 entries
+    with ``列表个数超过限制1000个！``. Split into batches of ``batch_size``
+    (≤1000) and concatenate; per-batch failure still degrades silently —
+    only the failing batch contributes to ``missing``.
+    """
     if not ts_codes:
         return FetchOutcome(pd.DataFrame(), [])
-    return _try_optional(
-        tushare,
-        "moneyflow",
-        params={"ts_code": ",".join(ts_codes), "start_date": start, "end_date": end},
-    )
+    if batch_size <= 0 or batch_size > 1000:
+        batch_size = 800
+    chunks: list[pd.DataFrame] = []
+    missing: list[str] = []
+    for i in range(0, len(ts_codes), batch_size):
+        sub = ts_codes[i : i + batch_size]
+        outcome = _try_optional(
+            tushare,
+            "moneyflow",
+            params={"ts_code": ",".join(sub), "start_date": start, "end_date": end},
+        )
+        if outcome.df is not None and not outcome.df.empty:
+            chunks.append(outcome.df)
+        for tag in outcome.missing:
+            if tag not in missing:
+                missing.append(tag)
+    df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+    return FetchOutcome(df, missing)
 
 
 def fetch_st_codes(tushare: Any, *, trade_date: str) -> set[str]:
