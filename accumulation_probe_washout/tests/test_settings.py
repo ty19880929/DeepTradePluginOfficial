@@ -36,7 +36,7 @@ class TestApwConfigStore:
         cfg = ApwConfigStore(fresh_db).load()
         assert cfg.accumulation_score_min == 55.0
         assert cfg.washout_max_trade_days == 25
-        assert cfg.llm_batch_size == 20
+        assert cfg.llm_batch_size == 10
 
     def test_set_overrides_value(self, fresh_db):
         store = ApwConfigStore(fresh_db)

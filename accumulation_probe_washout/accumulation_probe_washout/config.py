@@ -64,7 +64,7 @@ class ApwConfig:
 
     # ---- batching / LLM ----
     max_llm_candidates: int = 80
-    llm_batch_size: int = 20
+    llm_batch_size: int = 10
     llm_max_repair_retries: int = 2
 
     # ---- evaluate ----

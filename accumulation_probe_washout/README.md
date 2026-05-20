@@ -67,7 +67,7 @@ no_setup → accumulating → probe_seen → washing_after_probe → launch_read
 | 洗盘 | `washout_score_min` | 55 | 进入 `washing_after_probe` 的分数下限 |
 | 启动 | `launch_setup_score_min` | 55 | 进入 `launch_ready` 的分数下限 |
 | 启动 | `launch_current_volume_ratio_5d_min` | 1.2 | 启动日量能下限 |
-| LLM | `llm_batch_size` | 20 | 单批最大候选数 |
+| LLM | `llm_batch_size` | 10 | 单批最大候选数 |
 | LLM | `llm_max_repair_retries` | 2 | 校验失败 repair 次数 |
 | 标签 | `label_t5_high_return_pct` / `label_t5_max_drawdown_pct` | 8 / 8 | T+5 启动标签阈值 |
 | 标签 | `label_t10_high_return_pct` / `label_t10_max_drawdown_pct` | 12 / 10 | T+10 启动标签阈值 |
