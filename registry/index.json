@@ -4,12 +4,12 @@
     "limit-up-board": {
       "name": "打板策略",
       "type": "strategy",
-      "description": "A 股打板策略：双轮 LLM 漏斗（强势初筛 → 连板预测）",
+      "description": "A 股打板策略：盘后基于 T 日涨停池预测 T+1 次日连板/高位溢价候选（双轮 LLM 漏斗 + LightGBM 次日最大溢价概率锚点）",
       "repo": "ty19880929/DeepTradePluginOfficial",
       "subdir": "limit_up_board",
       "tag_prefix": "limit-up-board/",
       "min_framework_version": "0.4.2",
-      "latest_version": "limit-up-board/v0.7.1"
+      "latest_version": "limit-up-board/v0.8.0"
     },
     "volume-anomaly": {
       "name": "成交量异动策略",
