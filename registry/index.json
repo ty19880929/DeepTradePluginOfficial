@@ -30,6 +30,16 @@
       "tag_prefix": "accumulation-probe-washout/",
       "min_framework_version": "0.4.2",
       "latest_version": "accumulation-probe-washout/v0.2.0"
+    },
+    "checkmate": {
+      "name": "Checkmate 趋势跟踪策略",
+      "type": "strategy",
+      "description": "A 股 long-only 中期趋势跟踪：股票池+市场环境+突破/回踩+ATR 风控+防守退出",
+      "repo": "ty19880929/DeepTradePluginOfficial",
+      "subdir": "checkmate",
+      "tag_prefix": "checkmate/",
+      "min_framework_version": "0.4.2",
+      "latest_version": "checkmate/v0.4.0"
     }
   }
 }
