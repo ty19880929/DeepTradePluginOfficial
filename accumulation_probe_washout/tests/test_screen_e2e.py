@@ -21,11 +21,7 @@ from accumulation_probe_washout.ui.protocol import NullRenderer
 from tests.conftest import make_quotes
 
 
-MIGRATION_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "migrations"
-    / "20260601_001_init.sql"
-)
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
 @pytest.fixture
@@ -34,11 +30,11 @@ def fresh_db(tmp_path):
 
     dbpath = tmp_path / "apw_test.duckdb"
     db = Database(dbpath)
-    sql = MIGRATION_PATH.read_text(encoding="utf-8")
-    for stmt in sql.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            db.execute(stmt)
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        for stmt in path.read_text(encoding="utf-8").split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                db.execute(stmt)
     yield db
     db.close()
 

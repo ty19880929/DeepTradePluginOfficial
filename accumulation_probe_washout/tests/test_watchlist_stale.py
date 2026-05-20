@@ -19,18 +19,17 @@ from accumulation_probe_washout.runtime import ApwRuntime
 from accumulation_probe_washout.ui.protocol import NullRenderer
 
 
-MIGRATION_PATH = (
-    Path(__file__).resolve().parent.parent / "migrations" / "20260601_001_init.sql"
-)
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
 @pytest.fixture
 def fresh_db(tmp_path):
     from deeptrade.core.db import Database
     db = Database(tmp_path / "apw_test.duckdb")
-    for stmt in MIGRATION_PATH.read_text(encoding="utf-8").split(";"):
-        if stmt.strip():
-            db.execute(stmt.strip())
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        for stmt in path.read_text(encoding="utf-8").split(";"):
+            if stmt.strip():
+                db.execute(stmt.strip())
     yield db
     db.close()
 

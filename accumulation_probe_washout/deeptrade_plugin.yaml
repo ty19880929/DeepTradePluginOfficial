@@ -1,6 +1,6 @@
 plugin_id: accumulation-probe-washout
 name: 吸筹试盘洗盘主升浪策略
-version: 0.2.0
+version: 0.3.0
 type: strategy
 api_version: "1"
 entrypoint: accumulation_probe_washout.plugin:AccumulationProbeWashoutPlugin
@@ -37,6 +37,9 @@ migrations:
   - version: "20260601_001"
     file: migrations/20260601_001_init.sql
     checksum: "sha256:d89172fb8de27d209888cb4d79d2e581b4c52a59b40745fcede2b31caee36704"
+  - version: "20260602_001"
+    file: migrations/20260602_001_dimension_cols.sql
+    checksum: "sha256:69869d49f542b3ef946a55b7e2ff39b1eb81ad79865cca339bd13baaa6cc0a70"
 
 # 框架 v0.4+ 会从 plugin_id 推导默认前缀；此处显式声明匹配实际表名。
 table_prefix: apw_

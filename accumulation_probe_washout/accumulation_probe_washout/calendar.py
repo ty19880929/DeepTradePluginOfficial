@@ -72,3 +72,18 @@ class TradeCalendar:
         if len(opens) < n:
             raise ValueError(f"only {len(opens)} open days before {date}, need {n}")
         return str(opens.iloc[-n]["cal_date"])
+
+    def trade_days_between(self, start: str, end: str) -> int | None:
+        """Count open trade days strictly between ``start`` and ``end``.
+
+        Inclusive of ``end``, exclusive of ``start`` (i.e. how many open days
+        have elapsed since ``start``). Returns ``None`` if either endpoint
+        falls outside the loaded calendar window. Order-sensitive: a negative
+        result means ``end < start`` and is also returned as ``None`` (callers
+        only need the "is end far enough after start" semantic).
+        """
+        if not start or not end or end <= start:
+            return None
+        df = self._df
+        mask = (df["cal_date"] > start) & (df["cal_date"] <= end) & (df["is_open"] == 1)
+        return int(mask.sum())

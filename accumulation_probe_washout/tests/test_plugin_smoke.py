@@ -38,16 +38,16 @@ def test_cli_dispatch_settings_show(tmp_path, monkeypatch) -> None:
     from deeptrade.core import paths
     from deeptrade.core.db import Database
 
-    # Redirect DB and apply the migration so apw_config exists.
+    # Redirect DB and apply every migration so apw_config + dim_* cols exist.
     db_file = tmp_path / "apw.duckdb"
     db = Database(db_file)
-    sql_path = (
-        Path(__file__).resolve().parent.parent
-        / "migrations" / "20260601_001_init.sql"
+    migrations_dir = (
+        Path(__file__).resolve().parent.parent / "migrations"
     )
-    for stmt in sql_path.read_text(encoding="utf-8").split(";"):
-        if stmt.strip():
-            db.execute(stmt.strip())
+    for path in sorted(migrations_dir.glob("*.sql")):
+        for stmt in path.read_text(encoding="utf-8").split(";"):
+            if stmt.strip():
+                db.execute(stmt.strip())
     db.close()
 
     monkeypatch.setattr(paths, "db_path", lambda: db_file)

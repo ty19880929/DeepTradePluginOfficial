@@ -74,6 +74,13 @@ class ApwConfig:
     label_t10_high_return_pct: float = 12.0
     label_t10_max_drawdown_pct: float = 10.0
 
+    # ---- prune (v0.3.0 — phase-aware watchlist cleanup) ----
+    # Defaults reflect the design table in §3.1.5 of the migration plan.
+    prune_idle_days_launch_ready: int = 5
+    prune_drop_on_probe_low_break: bool = True
+    prune_drop_on_ma60_break: bool = True
+    prune_dry_run_default: bool = False
+
 
 # Keys ApwConfigStore exposes via settings show / set. Locked here so we can
 # reject unknown keys at write time (PreconditionError surface in M6).

@@ -2,10 +2,31 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import pandas as pd
 import pytest
 
 from accumulation_probe_washout.config import ApwConfig
+
+
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+
+def apply_all_migrations(db: Any) -> None:
+    """Apply every ``*.sql`` migration in lexicographic order.
+
+    Mirrors what the framework does at plugin install time. Each test that
+    needs a populated schema should call this against its fresh Database so a
+    new migration (e.g. ``20260520_002_dimension_cols.sql`` in v0.3.0) does
+    not require touching every test's ``fresh_db`` fixture.
+    """
+    for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        for stmt in path.read_text(encoding="utf-8").split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                db.execute(stmt)
 
 
 @pytest.fixture

@@ -67,6 +67,12 @@ class ScreenParams:
     trade_date: str | None = None
     force_sync: bool = False
     max_candidates: int | None = None
+    # v0.3.0 — backfill-history knobs. Default ``False`` keeps single-day
+    # ``screen`` behaviour byte-identical to v0.2.0; ``execute_backfill_history``
+    # flips both to true on its per-day inner calls.
+    skip_watchlist: bool = False
+    overwrite_history: bool = False
+    skip_if_history_exists: bool = False
 
 
 @dataclass
@@ -93,6 +99,34 @@ class EvaluateParams:
     horizons: str = "1,3,5,10"
     include_early_phases: bool = False
     force_recompute: bool = False
+
+
+@dataclass
+class BackfillHistoryParams:
+    """``screen --backfill-history`` — LLM-free batch replay across [start, end].
+
+    Writes only ``apw_signal_history``; never touches ``apw_watchlist``.
+    Resumes by default (skips dates with existing rows); ``overwrite`` does a
+    wholesale DELETE-by-date before re-inserting that date's hits.
+    """
+
+    start: str
+    end: str
+    overwrite: bool = False
+    force_sync: bool = False
+
+
+@dataclass
+class PruneParams:
+    """``prune`` — phase-aware watchlist cleanup.
+
+    See §3.1.5 of the migration plan for the trigger table. ``dry_run`` only
+    surfaces the candidates that would be deleted (renderer log) without
+    touching ``apw_watchlist``.
+    """
+
+    dry_run: bool = False
+    trade_date: str | None = None  # overrides "today" anchor for reproducibility
 
 
 @dataclass
@@ -524,9 +558,26 @@ class ApwRunner:
             self._emit(EventType.STEP_STARTED, "Step 2: 持久化命中", payload={"step": 2})
             persisted_history = 0
             persisted_watch = 0
+            # v0.3.0 — backfill-history can DELETE the whole T day's rows up
+            # front so the per-cand DELETE+INSERT inside _upsert_signal_history
+            # behaves like a clean replace (and not just per-(date, ts_code)).
+            if params.overwrite_history:
+                self.rt.db.execute(
+                    "DELETE FROM apw_signal_history WHERE trade_date = ?", [T]
+                )
             for cand in hits:
+                if params.skip_if_history_exists:
+                    existing = self.rt.db.fetchone(
+                        "SELECT 1 FROM apw_signal_history "
+                        "WHERE trade_date = ? AND ts_code = ?",
+                        [cand["trade_date"], cand["ts_code"]],
+                    )
+                    if existing is not None:
+                        continue
                 self._upsert_signal_history(cand)
                 persisted_history += 1
+                if params.skip_watchlist:
+                    continue
                 if cand["phase"] in {
                     APWPhase.WASHING_AFTER_PROBE.value,
                     APWPhase.LAUNCH_READY.value,
@@ -794,6 +845,303 @@ class ApwRunner:
                 row.get("data_status", "missing"),
             ],
         )
+
+    # ---- backfill-history (v0.3.0) ------------------------------------------
+
+    def execute_backfill_history(self, params: BackfillHistoryParams) -> RunOutcome:
+        """LLM-free batch replay of screen rules across ``[start, end]``.
+
+        Owns its own ``apw_runs`` row with ``mode='backfill_history'`` and
+        delegates the per-day funnel to :meth:`execute_screen` via
+        ``_owns_run=False``. Writes only ``apw_signal_history``; never touches
+        ``apw_watchlist`` (the ``skip_watchlist`` flag is forced on for every
+        inner call).
+
+        Resume policy:
+            * default — skip dates whose ``apw_signal_history`` already has any
+              row (DB-resident resume; cheap "WHERE trade_date = ? LIMIT 1");
+            * ``--overwrite`` — DELETE the full day's rows first, then refill.
+        """
+        if self.rt.tushare is None:
+            self.rt.tushare = build_tushare_client(self.rt)
+        tushare = self.rt.tushare
+        now_utc = datetime.now(timezone.utc)
+        cal_start = (now_utc.replace(day=1).replace(year=now_utc.year - 4)).strftime(
+            "%Y%m%d"
+        )
+        cal_end = (now_utc + timedelta(days=30)).strftime("%Y%m%d")
+        cal_df = fetch_trade_cal(tushare, start=cal_start, end=cal_end)
+        calendar = TradeCalendar(cal_df)
+
+        if not (params.start and params.end):
+            raise ValueError("backfill-history requires both --start and --end")
+        if params.start > params.end:
+            raise ValueError(
+                f"backfill-history: --start ({params.start}) must be <= --end ({params.end})"
+            )
+
+        all_dates = calendar.open_dates_in_range(params.start, params.end)
+        if not all_dates:
+            raise ValueError(
+                f"backfill-history: no open trade dates in [{params.start}, {params.end}]"
+            )
+
+        run_id = self._start_run("backfill_history", params.start, params)
+        try:
+            self._emit(
+                EventType.LOG,
+                f"backfill-history: scanning {len(all_dates)} trade dates "
+                f"[{all_dates[0]} .. {all_dates[-1]}] overwrite={params.overwrite}",
+                payload={"n_dates": len(all_dates), "overwrite": params.overwrite},
+            )
+
+            n_processed = 0
+            n_skipped = 0
+            n_failed = 0
+            n_history_total = 0
+            for T in all_dates:
+                if cancel_requested():
+                    raise KeyboardInterrupt
+                # Resume: skip dates with any existing apw_signal_history row,
+                # unless --overwrite was passed.
+                if not params.overwrite:
+                    existing = self.rt.db.fetchone(
+                        "SELECT 1 FROM apw_signal_history "
+                        "WHERE trade_date = ? LIMIT 1",
+                        [T],
+                    )
+                    if existing is not None:
+                        n_skipped += 1
+                        continue
+
+                self._emit(
+                    EventType.STEP_STARTED,
+                    f"backfill T={T} ({n_processed + n_skipped + n_failed + 1}/{len(all_dates)})",
+                    payload={"step": 1, "trade_date": T},
+                )
+                inner = ScreenParams(
+                    trade_date=T,
+                    force_sync=params.force_sync,
+                    skip_watchlist=True,
+                    overwrite_history=params.overwrite,
+                    skip_if_history_exists=False,
+                )
+                # Share the same run_id / event stream with the inner call.
+                outcome = self.execute_screen(inner, _owns_run=False)
+                if outcome.status == RunStatus.SUCCESS:
+                    n_processed += 1
+                    n_history_total += int(
+                        outcome.summary.get("n_signal_history", 0) or 0
+                    )
+                else:
+                    n_failed += 1
+                    self._emit(
+                        EventType.LOG,
+                        f"backfill T={T} failed: {outcome.error}",
+                        level=EventLevel.WARN,
+                        payload={"trade_date": T, "error": outcome.error},
+                    )
+
+            summary = {
+                "n_dates_requested": len(all_dates),
+                "n_dates_processed": n_processed,
+                "n_dates_skipped": n_skipped,
+                "n_dates_failed": n_failed,
+                "n_signal_history_rows": n_history_total,
+                "overwrite": bool(params.overwrite),
+            }
+            self._finish_run(RunStatus.SUCCESS, summary=summary)
+            return RunOutcome(run_id=run_id, status=RunStatus.SUCCESS, summary=summary)
+        except KeyboardInterrupt:
+            return self._make_cancel_outcome(run_id, "backfill_history", True)
+        except Exception as exc:  # noqa: BLE001
+            if cancel_requested():
+                return self._make_cancel_outcome(run_id, "backfill_history", True)
+            tb = traceback.format_exc()
+            self._emit(
+                EventType.LOG,
+                f"backfill-history failed: {exc}",
+                level=EventLevel.ERROR,
+                payload={"traceback": tb},
+            )
+            self._shielded_finish_run(RunStatus.FAILED, error=str(exc))
+            return RunOutcome(run_id=run_id, status=RunStatus.FAILED, error=str(exc))
+
+    # ---- prune (v0.3.0) -----------------------------------------------------
+
+    def execute_prune(self, params: PruneParams) -> RunOutcome:
+        """Phase-aware watchlist cleanup. See §3.1.5 of the migration plan.
+
+        Emits one ``WATCHLIST_PRUNE_HIT`` event per candidate that matched a
+        deletion rule (payload carries ``ts_code`` / ``reason`` / ``phase``).
+        With ``dry_run=True`` events still fire but no rows are deleted.
+        """
+        cfg_store = ApwConfigStore(self.rt.db)
+        cfg = cfg_store.load()
+
+        # Resolve "today" — defaults to the latest open trade_date so the
+        # idle-days math is calendar-aware.
+        if self.rt.tushare is None:
+            self.rt.tushare = build_tushare_client(self.rt)
+        tushare = self.rt.tushare
+        now_utc = datetime.now(timezone.utc)
+        cal_start = (now_utc.replace(day=1).replace(year=now_utc.year - 1)).strftime(
+            "%Y%m%d"
+        )
+        cal_end = (now_utc + timedelta(days=30)).strftime("%Y%m%d")
+        cal_df = fetch_trade_cal(tushare, start=cal_start, end=cal_end)
+        calendar = TradeCalendar(cal_df)
+        # Only probe for the latest trade date when the caller didn't pin one
+        # — saves the index_daily round-trip in tests/scripted contexts.
+        latest = None if params.trade_date else fetch_latest_trade_date(tushare)
+        T, _ = resolve_trade_date(
+            calendar,
+            latest_trade_date=latest,
+            user_specified=params.trade_date,
+        )
+
+        run_id = self._start_run("prune", T, params)
+        try:
+            rows = (
+                self.rt.db.fetchall(
+                    """
+                    SELECT ts_code, name, phase, probe_date, first_seen_date,
+                           last_seen_date, raw_candidate_json
+                    FROM apw_watchlist
+                    ORDER BY last_seen_date DESC, ts_code ASC
+                    """
+                )
+                or []
+            )
+            self._emit(
+                EventType.STEP_STARTED,
+                f"prune: scanning {len(rows)} watchlist rows (T={T}, dry_run={params.dry_run})",
+                payload={"step": 1, "n_watchlist": len(rows), "trade_date": T,
+                         "dry_run": bool(params.dry_run)},
+            )
+
+            to_delete: list[tuple[str, str, str]] = []  # (ts_code, reason, phase)
+            for r in rows:
+                ts_code, _name, phase, probe_date, _first_seen, last_seen, raw_json = r
+                reason = self._prune_reason(
+                    cfg=cfg,
+                    phase=str(phase or ""),
+                    last_seen=str(last_seen or ""),
+                    probe_date=str(probe_date or ""),
+                    raw_json=str(raw_json or "{}"),
+                    today=T,
+                    calendar=calendar,
+                )
+                if reason is not None:
+                    to_delete.append((ts_code, reason, str(phase or "")))
+
+            for ts_code, reason, phase in to_delete:
+                self._emit(
+                    EventType.LOG,
+                    f"prune hit: {ts_code} [{phase}] — {reason}",
+                    payload={
+                        "ts_code": ts_code,
+                        "phase": phase,
+                        "reason": reason,
+                        "trade_date": T,
+                        "dry_run": bool(params.dry_run),
+                    },
+                )
+                if not params.dry_run:
+                    self.rt.db.execute(
+                        "DELETE FROM apw_watchlist WHERE ts_code = ?", [ts_code]
+                    )
+
+            summary = {
+                "n_watchlist": len(rows),
+                "n_deleted": 0 if params.dry_run else len(to_delete),
+                "n_would_delete": len(to_delete),
+                "dry_run": bool(params.dry_run),
+                "trade_date": T,
+            }
+            self._emit(
+                EventType.STEP_FINISHED,
+                f"prune 完成: n_deleted={summary['n_deleted']} "
+                f"n_would_delete={summary['n_would_delete']}",
+                payload={"step": 1, **summary},
+            )
+            self._finish_run(RunStatus.SUCCESS, summary=summary)
+            return RunOutcome(run_id=run_id, status=RunStatus.SUCCESS, summary=summary)
+        except KeyboardInterrupt:
+            return self._make_cancel_outcome(run_id, "prune", True)
+        except Exception as exc:  # noqa: BLE001
+            if cancel_requested():
+                return self._make_cancel_outcome(run_id, "prune", True)
+            tb = traceback.format_exc()
+            self._emit(
+                EventType.LOG,
+                f"prune failed: {exc}",
+                level=EventLevel.ERROR,
+                payload={"traceback": tb},
+            )
+            self._shielded_finish_run(RunStatus.FAILED, error=str(exc))
+            return RunOutcome(run_id=run_id, status=RunStatus.FAILED, error=str(exc))
+
+    def _prune_reason(
+        self,
+        *,
+        cfg: ApwConfig,
+        phase: str,
+        last_seen: str,
+        probe_date: str,
+        raw_json: str,
+        today: str,
+        calendar: TradeCalendar,
+    ) -> str | None:
+        """Return a human-readable deletion reason or ``None`` to keep the row.
+
+        Rules (mirroring §3.1.5 of the plan):
+          1. ``launch_ready`` idle ≥ prune_idle_days_launch_ready trade days
+          2. ``washing_after_probe`` past washout_max_trade_days w/o transition
+          3. close on T below the probe-day low
+          4. close on T below MA60
+        """
+        # Rule 1: launch_ready idle too long.
+        if phase == APWPhase.LAUNCH_READY.value and last_seen:
+            idle = calendar.trade_days_between(last_seen, today)
+            if idle is not None and idle >= cfg.prune_idle_days_launch_ready:
+                return (
+                    f"launch_ready idle {idle} trade days "
+                    f">= prune_idle_days_launch_ready={cfg.prune_idle_days_launch_ready}"
+                )
+
+        # Rule 2: washing_after_probe past max window.
+        if phase == APWPhase.WASHING_AFTER_PROBE.value and probe_date:
+            elapsed = calendar.trade_days_between(probe_date, today)
+            if elapsed is not None and elapsed > cfg.washout_max_trade_days:
+                return (
+                    f"washout_after_probe elapsed {elapsed} trade days "
+                    f"> washout_max_trade_days={cfg.washout_max_trade_days}"
+                )
+
+        # Parse the raw candidate payload once for rules 3/4.
+        try:
+            cand = json.loads(raw_json) if raw_json else {}
+        except (json.JSONDecodeError, TypeError):
+            cand = {}
+
+        # Rule 3: close below probe-day low.
+        if cfg.prune_drop_on_probe_low_break:
+            close = _f(cand.get("close"))
+            probe_low = _f(cand.get("probe_low"))
+            if close is not None and probe_low is not None and close < probe_low:
+                return (
+                    f"close {close:.2f} fell below probe_low {probe_low:.2f}"
+                )
+
+        # Rule 4: close below MA60.
+        if cfg.prune_drop_on_ma60_break:
+            close = _f(cand.get("close"))
+            ma60 = _f(cand.get("ma60"))
+            if close is not None and ma60 is not None and close < ma60:
+                return f"close {close:.2f} fell below MA60 {ma60:.2f}"
+
+        return None
 
     # ---- run (M4) — screen + analyze chained sharing the same run_id ----
 
@@ -1071,6 +1419,10 @@ class ApwRunner:
         self, cand: Any, *, run_id: str, trade_date: str
     ) -> None:
         now = datetime.now(timezone.utc)
+        # v0.3.0 — dual-write the 6 dim_* DOUBLE columns alongside the legacy
+        # json blob (migration 20260520_002 introduces the columns; rollback
+        # = drop columns, json remains the source of truth).
+        ds = cand.dimension_scores.model_dump()
         self.rt.db.execute(
             "DELETE FROM apw_stage_results WHERE run_id = ? AND ts_code = ?",
             [run_id, cand.ts_code],
@@ -1082,8 +1434,11 @@ class ApwRunner:
              confidence, prediction, main_pattern, phase,
              dimension_scores_json, key_evidence_json, rationale,
              next_session_watch_json, invalidation_triggers_json,
-             risk_flags_json, missing_data_json, raw_response_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             risk_flags_json, missing_data_json, raw_response_json, created_at,
+             dim_accumulation, dim_probe, dim_washout, dim_launch_timing,
+             dim_capital_confirmation, dim_risk)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?)
             """,
             [
                 run_id,
@@ -1096,7 +1451,7 @@ class ApwRunner:
                 cand.prediction,
                 cand.main_pattern,
                 cand.phase,
-                json.dumps(cand.dimension_scores.model_dump(), ensure_ascii=False),
+                json.dumps(ds, ensure_ascii=False),
                 json.dumps(
                     [e.model_dump() for e in cand.key_evidence],
                     ensure_ascii=False,
@@ -1108,6 +1463,12 @@ class ApwRunner:
                 json.dumps(list(cand.missing_data), ensure_ascii=False),
                 cand.model_dump_json(),
                 now,
+                _f(ds.get("accumulation")),
+                _f(ds.get("probe")),
+                _f(ds.get("washout")),
+                _f(ds.get("launch_timing")),
+                _f(ds.get("capital_confirmation")),
+                _f(ds.get("risk")),
             ],
         )
 

@@ -24,7 +24,15 @@ from deeptrade.core.llm_manager import LLMManager
 from deeptrade.core.run_status import RunStatus
 
 from .cancellation import install_sigint_marker
-from .runner import AnalyzeParams, ApwRunner, EvaluateParams, RunParams, ScreenParams
+from .runner import (
+    AnalyzeParams,
+    ApwRunner,
+    BackfillHistoryParams,
+    EvaluateParams,
+    PruneParams,
+    RunParams,
+    ScreenParams,
+)
 from .runtime import ApwRuntime
 from .ui.legacy import LegacyStreamRenderer
 
@@ -63,13 +71,77 @@ def cmd_screen(
         None, "--max-candidates", help="上限：每轮 LLM 批次喂入的候选数量（默认读 apw_config）"
     ),
     force_sync: bool = typer.Option(False, "--force-sync"),
+    backfill_history: bool = typer.Option(
+        False,
+        "--backfill-history",
+        help=(
+            "v0.3.0 — LLM-free batch replay over a date range. "
+            "Writes apw_signal_history only; never touches apw_watchlist. "
+            "需要 --start / --end。"
+        ),
+    ),
+    start: Optional[str] = typer.Option(
+        None, "--start",
+        help="--backfill-history 模式下起始 trade_date (YYYYMMDD, 含)",
+    ),
+    end: Optional[str] = typer.Option(
+        None, "--end",
+        help="--backfill-history 模式下结束 trade_date (YYYYMMDD, 含)",
+    ),
+    overwrite: bool = typer.Option(
+        False, "--overwrite",
+        help=(
+            "--backfill-history 模式下,对已存在 apw_signal_history 行的日期"
+            "也重新筛选 (DELETE 后 INSERT)。默认跳过已有日期 (作为 resume)。"
+        ),
+    ),
     no_dashboard: bool = typer.Option(  # noqa: ARG001 — wired in M4
         False, "--no-dashboard",
         help="禁用动态仪表盘 (M4 起生效)。",
     ),
 ) -> None:
-    """Apply local screening rules → write apw_signal_history + apw_watchlist (no LLM)."""
+    """Apply local screening rules → write apw_signal_history + apw_watchlist (no LLM).
+
+    With ``--backfill-history --start --end`` switches to LLM-free batch replay
+    that iterates every open trade_date in ``[start, end]`` and writes hits to
+    ``apw_signal_history`` only (does NOT touch ``apw_watchlist``).
+    """
     from .ui import choose_renderer
+
+    if backfill_history:
+        if not (start and end):
+            typer.echo("✘ --backfill-history requires both --start and --end")
+            raise typer.Exit(2)
+        db, rt = _open_runtime()
+        try:
+            params = BackfillHistoryParams(
+                start=start,
+                end=end,
+                overwrite=overwrite,
+                force_sync=force_sync,
+            )
+            # Multi-day loops mislead the single-day StageStack dashboard —
+            # force legacy renderer regardless of TTY (matches §4.6 of the
+            # migration plan).
+            renderer = LegacyStreamRenderer()
+            outcome = ApwRunner(rt, renderer=renderer).execute_backfill_history(params)
+            typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+            if outcome.status == RunStatus.CANCELLED:
+                typer.echo("message: 用户手动中断，已停止当前策略执行。")
+                raise typer.Exit(130)
+            if outcome.error:
+                typer.echo(f"error: {outcome.error}")
+            if outcome.status.value not in {"success", "partial_failed"}:
+                raise typer.Exit(1)
+        finally:
+            db.close()
+        return
+
+    if start or end or overwrite:
+        typer.echo(
+            "✘ --start / --end / --overwrite are only valid with --backfill-history"
+        )
+        raise typer.Exit(2)
 
     db, rt = _open_runtime()
     try:
@@ -208,6 +280,103 @@ def cmd_evaluate(
 
 
 # ---------------------------------------------------------------------------
+# stats (v0.3.0)
+# ---------------------------------------------------------------------------
+
+
+@app.command("stats")
+def cmd_stats(
+    from_date: Optional[str] = typer.Option(None, "--from", help="YYYYMMDD (inclusive)"),
+    to_date: Optional[str] = typer.Option(None, "--to", help="YYYYMMDD (inclusive)"),
+    by: str = typer.Option(
+        "phase",
+        "--by",
+        help=(
+            "聚合维度：phase | prediction | main_pattern | "
+            "launch_score_bin | accumulation_score_bin | "
+            "probe_quality_score_bin | washout_score_bin | "
+            "launch_setup_score_bin | dimension_scores | lgb_score_bin"
+        ),
+    ),
+) -> None:
+    """Read-only aggregates over apw_signal_history ⋈ apw_realized_returns."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from .stats import StatsQueryError, run_stats_query
+
+    db, _rt = _open_runtime()
+    try:
+        try:
+            rows, title = run_stats_query(
+                db, from_date=from_date, to_date=to_date, by=by
+            )
+        except StatsQueryError as exc:
+            typer.echo(f"✘ {exc}")
+            raise typer.Exit(2) from None
+
+        if not rows:
+            typer.echo(f"(no rows for --by={by} in [{from_date or '*'}, {to_date or '*'}])")
+            return
+
+        console = Console()
+        tbl = Table(title=title)
+        # Column order keys off the first row so dimension_scores can override
+        # the default schema with its own pearson_r_* columns.
+        col_order = [k for k in rows[0].keys() if k != "bucket"]
+        tbl.add_column("bucket")
+        for c in col_order:
+            tbl.add_column(c, justify="right")
+        for r in rows:
+            cells = [str(r["bucket"])]
+            for c in col_order:
+                v = r.get(c)
+                if v is None:
+                    cells.append("—")
+                elif isinstance(v, float):
+                    cells.append(f"{v:.2f}")
+                else:
+                    cells.append(str(v))
+            tbl.add_row(*cells)
+        console.print(tbl)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# prune (v0.3.0)
+# ---------------------------------------------------------------------------
+
+
+@app.command("prune")
+def cmd_prune(
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="只展示将删除哪些 watchlist 行，不实际写库。",
+    ),
+    trade_date: Optional[str] = typer.Option(
+        None, "--date",
+        help="参照 trade_date (YYYYMMDD)；默认取最新开盘日。",
+    ),
+) -> None:
+    """Phase-aware watchlist cleanup (always legacy renderer)."""
+    db, rt = _open_runtime()
+    try:
+        params = PruneParams(dry_run=dry_run, trade_date=trade_date)
+        outcome = ApwRunner(rt, renderer=LegacyStreamRenderer()).execute_prune(params)
+        typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
+        if outcome.status == RunStatus.CANCELLED:
+            typer.echo("message: 用户手动中断，已停止当前策略执行。")
+            raise typer.Exit(130)
+        if outcome.error:
+            typer.echo(f"error: {outcome.error}")
+        if outcome.status.value not in {"success", "partial_failed"}:
+            raise typer.Exit(1)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # settings / history / report — wired in M6
 # ---------------------------------------------------------------------------
 
@@ -231,6 +400,32 @@ def cmd_settings_show() -> None:
             tag = "  (override)" if key in overrides else ""
             shown = ovr if key in overrides else cur
             typer.echo(f"  {key:40s} = {shown}{tag}")
+    finally:
+        db.close()
+
+
+@settings_app.command("reset")
+def cmd_settings_reset(
+    key: Optional[str] = typer.Option(
+        None, "--key",
+        help="只删除指定 key 的 override；省略则清空所有 override。",
+    ),
+) -> None:
+    """Drop apw_config overrides (one key or all keys)."""
+    from .config import ALLOWED_KEYS
+
+    db, _rt = _open_runtime()
+    try:
+        if key is not None:
+            if key not in ALLOWED_KEYS:
+                typer.echo(f"✘ unknown key: {key!r}")
+                typer.echo(f"  allowed: {', '.join(sorted(ALLOWED_KEYS))}")
+                raise typer.Exit(2)
+            db.execute("DELETE FROM apw_config WHERE key = ?", [key])
+            typer.echo(f"✓ reset override for key {key!r}")
+        else:
+            db.execute("DELETE FROM apw_config")
+            typer.echo("✓ cleared all apw_config overrides (defaults restored)")
     finally:
         db.close()
 
