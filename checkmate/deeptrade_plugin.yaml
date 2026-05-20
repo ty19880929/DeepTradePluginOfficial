@@ -1,0 +1,75 @@
+plugin_id: checkmate
+name: Checkmate 趋势跟踪策略
+version: 0.4.0
+type: strategy
+api_version: "1"
+entrypoint: checkmate.plugin:CheckmatePlugin
+description: A 股 long-only 中期趋势跟踪：股票池+市场环境+突破/回踩+ATR 风控+防守退出
+author: DeepTrade
+
+# 依赖按 development_plan.md §8（首版不含 lightgbm / scikit-learn）。
+dependencies:
+  - "tushare>=1.4"
+  - "pandas>=2.2,<3"
+  - "numpy>=1.26,<3"
+  - "pyarrow>=14"
+  - "scipy>=1.11"
+  - "Jinja2>=3"  # v0.2.0 PR-5.3: report --html template rendering
+
+# 权限按 development_plan.md §9：首版 long-only、无 LLM、无 LightGBM。
+permissions:
+  tushare_apis:
+    required:
+      - stock_basic
+      - trade_cal
+      - daily
+      - daily_basic
+      - stk_limit
+      - adj_factor
+      - index_daily
+      - namechange
+    optional:
+      - suspend_d
+      - index_dailybasic
+      - moneyflow
+  llm: false
+  llm_tools: false
+
+migrations:
+  - version: "20260520_001"
+    file: migrations/20260520_001_init.sql
+    checksum: "sha256:62f9aea1ffc0a8a9a13fc60398ab1d0db11c9dddb41993e857eebbe4ac4f74df"
+
+table_prefix: checkmate_
+
+tables:
+  - name: checkmate_stock_status_history
+    description: 历史 ST / 上市状态快照（survivorship 数据源，PK=ts_code+as_of_date）
+    purge_on_uninstall: true
+  - name: checkmate_universe_daily
+    description: 每日股票池命中明细（eligible + reason_codes + 流动性评分）
+    purge_on_uninstall: true
+  - name: checkmate_features_daily
+    description: 每日 qfq 口径技术特征 + 综合 score
+    purge_on_uninstall: true
+  - name: checkmate_regime_daily
+    description: 每日市场环境分档（strong/neutral/weak/risk + exposure_cap）
+    purge_on_uninstall: true
+  - name: checkmate_signals
+    description: 入场 / 持有 / 防守 / 退出信号
+    purge_on_uninstall: true
+  - name: checkmate_positions
+    description: 持仓状态机（pending/holding/defensive/closed）
+    purge_on_uninstall: true
+  - name: checkmate_trades
+    description: 成交流水（回测 + 未来 paper/live 共用）
+    purge_on_uninstall: true
+  - name: checkmate_backtest_runs
+    description: 回测注册表（config_hash + code_version + metrics）
+    purge_on_uninstall: true
+  - name: checkmate_runs
+    description: 本插件 run 历史（替代框架 strategy_runs）
+    purge_on_uninstall: true
+  - name: checkmate_events
+    description: 本插件 run 事件流（替代框架 strategy_events）
+    purge_on_uninstall: true
