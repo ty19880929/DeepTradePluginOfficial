@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [limit_up_board, volume_anomaly]
+        plugin: [limit_up_board, accumulation_probe_washout]
     name: ${{ matrix.plugin }} pytest (-m "not slow")
     steps:
       - uses: actions/checkout@v4

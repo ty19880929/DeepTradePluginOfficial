@@ -8,8 +8,9 @@
 
 | 插件 ID | 类型 | 当前版本 | 简介 | 子目录 |
 |---------|------|---------|------|--------|
-| `limit-up-board` | strategy | 0.5.1 | 打板策略：双轮 LLM 漏斗 + LightGBM 连板概率评分（量化锚点 ⊕ LLM 决策） | [limit_up_board/](./limit_up_board) |
-| `volume-anomaly` | strategy | 0.7.0 | 成交量异动策略：主板放量筛选 + LLM 主升浪启动预测 + LightGBM 启动概率评分 | [volume_anomaly/](./volume_anomaly) |
+| `limit-up-board` | strategy | 0.8.0 | 打板策略：双轮 LLM 漏斗 + LightGBM 连板概率评分（量化锚点 ⊕ LLM 决策） | [limit_up_board/](./limit_up_board) |
+| `accumulation-probe-washout` | strategy | 0.7.0 | 吸筹试盘洗盘主升浪策略：主板吸筹 / 试盘 / 洗盘链路 + LLM 主升浪启动预测 + LightGBM 启动概率评分 | [accumulation_probe_washout/](./accumulation_probe_washout) |
+| `checkmate` | strategy | 0.4.0 | A 股 long-only 中期趋势跟踪：股票池 + 市场环境 + 突破 / 回踩 + ATR 风控 + 防守退出 | [checkmate/](./checkmate) |
 
 各插件版本号以其 `deeptrade_plugin.yaml` 中的 `version` 字段为准。
 
@@ -23,7 +24,8 @@ pipx install deeptrade-quant
 
 # 通过短名安装插件（框架会自动查询本仓库的 registry/index.json）
 deeptrade plugin install limit-up-board
-deeptrade plugin install volume-anomaly
+deeptrade plugin install accumulation-probe-washout
+deeptrade plugin install checkmate
 ```
 
 框架 v0.8 起从 `registry/index.json` 直接读取每条 entry 的 `latest_version` 字段，并通过 `codeload.github.com` CDN 拉取对应 tag 的 tarball —— 全程不打 `api.github.com`，不再受 GitHub 未认证请求 60/h 的限流约束。框架 ≤ v0.7 仍会回落到 GitHub Releases API 解析，未知字段会被忽略，注册表向后兼容。
@@ -33,7 +35,7 @@ deeptrade plugin install volume-anomaly
 | 插件 | 依赖 | 用途 |
 |------|------|------|
 | `limit-up-board` ≥ 0.5.0 | `lightgbm>=4.3`、`scikit-learn>=1.4` | LightGBM 连板概率评分（训练 + 推理）。缺包时 `validate_static` 会在 install 阶段给出友好提示。 |
-| `volume-anomaly` ≥ 0.7.0 | `lightgbm>=4.3`、`scikit-learn>=1.4`、`pyarrow>=14` | LightGBM 主升浪启动概率评分（训练 + 推理 + checkpoint snapshot）。框架在 install / upgrade 阶段自动 `uv pip install`。 |
+| `accumulation-probe-washout` ≥ 0.5.0 | `lightgbm>=4.3`、`scikit-learn>=1.4`、`pyarrow>=15` | LightGBM 主升浪启动概率评分（训练 + 推理 + checkpoint snapshot）。框架在 install / upgrade 阶段自动 `uv pip install`。 |
 
 手动安装：
 
@@ -56,7 +58,7 @@ pipx install deeptrade-quant
 
 # 装齐插件的运行 + 测试依赖（与各插件 deeptrade_plugin.yaml::dependencies 对齐）
 pip install -r limit_up_board/requirements-dev.txt
-pip install -r volume_anomaly/requirements-dev.txt
+pip install -r accumulation_probe_washout/requirements-dev.txt
 ```
 
 > Windows 用户若用 `pipx`，可改用 `pipx inject deeptrade-quant -r limit_up_board/requirements-dev.txt`，
@@ -68,8 +70,8 @@ pip install -r volume_anomaly/requirements-dev.txt
 # limit-up-board 全套（不含 LightGBM smoke）
 cd limit_up_board ; pytest -m "not slow"
 
-# volume-anomaly 同形
-cd volume_anomaly ; pytest -m "not slow"
+# accumulation-probe-washout 同形
+cd accumulation_probe_washout ; pytest -m "not slow"
 
 # 跑单文件 / 单用例
 cd limit_up_board ; pytest tests/test_v04_settings.py
@@ -105,15 +107,17 @@ DeepTradePluginOfficial/
 │   ├── limit_up_board/         # 内层 Python 包（plugin / pipeline / runner / data ...）
 │   ├── tests/
 │   └── pytest.ini
-└── volume_anomaly/             # 结构同上
+├── accumulation_probe_washout/ # 结构同上
+└── checkmate/                  # 结构同上
 ```
 
 ## 版本管理
 
 每个插件维护独立的 SemVer 发布线，tag 形式为 `<plugin-id>/v<X.Y.Z>`，例如：
 
-- `limit-up-board/v0.4.0`
-- `volume-anomaly/v0.6.0`
+- `limit-up-board/v0.8.0`
+- `accumulation-probe-washout/v0.7.0`
+- `checkmate/v0.4.0`
 
 发布流程：
 

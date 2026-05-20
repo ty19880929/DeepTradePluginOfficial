@@ -894,9 +894,6 @@ def derive_phase(
 def compute_vcp_features(window_df: pd.DataFrame) -> dict[str, Any]:
     """ATR / BBW compression measures over the last 60 trade days.
 
-    Mirrors the VA contract semantically but each implementation is owned
-    locally so APW does not depend on volume_anomaly (PR-5 deletes VA).
-
     Returns NaN values when ``window_df`` lacks the required history; the
     LightGBM booster handles NaN natively (no special routing needed).
     """
@@ -1048,10 +1045,10 @@ def compute_alpha_features(
 def compute_volume_event_score(window_df: pd.DataFrame) -> float | None:
     """One-shot rating of T-day volume anomaly (0–100).
 
-    Captures the gist of the legacy volume-anomaly screen (T-day yang body +
-    volume ratio + amplitude) as a single auxiliary feature for APW LGB. Not
-    used to filter candidates — it's a number on the candidate so the LLM and
-    LGB can weigh it however they want.
+    A composite of T-day yang body + 5-day volume ratio + amplitude, exposed
+    as a single auxiliary feature so APW LGB and the LLM can both consume the
+    "is this a noteworthy volume event today" signal without committing to
+    using it as a hard candidate filter.
 
     Components:
         * ``vol_ratio_5d`` — current vol / mean(prev 5 vol); clamped to 1..5

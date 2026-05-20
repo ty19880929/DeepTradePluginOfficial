@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A monorepo of **official plugins** for the [DeepTrade](https://github.com/ty19880929/deeptrade) framework — an LLM-driven A-share stock-screening CLI. Plugins are not imported here directly; the framework's `deeptrade plugin install <short-name>` resolves them by reading `registry/index.json`, calling the GitHub Releases API for the matching `tag_prefix`, and pulling the plugin source from the resolved tag's `subdir`.
 
-Two plugins live here today:
+Three plugins live here today:
 
 - `limit_up_board/` — strategy `limit-up-board` (打板策略, dual-round LLM funnel)
-- `volume_anomaly/` — strategy `volume-anomaly` (主板放量筛选 + LLM 主升浪启动预测)
+- `accumulation_probe_washout/` — strategy `accumulation-probe-washout` (吸筹→试盘→洗盘→主升浪启动链路 + LightGBM 评分)
+- `checkmate/` — strategy `checkmate` (A 股 long-only 中期趋势跟踪)
 
 The framework itself lives in another repo and is **not vendored**. Imports like `from deeptrade.core.db import Database` resolve at install time inside the user's `pipx install deeptrade-quant` environment; running anything in this repo locally requires `deeptrade-quant` to be importable.
 
@@ -35,8 +36,8 @@ cd limit_up_board ; pytest                               # full suite
 cd limit_up_board ; pytest tests/test_v04_settings.py    # single file
 cd limit_up_board ; pytest tests/test_phase_a_factors.py::TestName::test_case  # single test
 
-# volume-anomaly (same shape)
-cd volume_anomaly ; pytest
+# accumulation-probe-washout (same shape)
+cd accumulation_probe_washout ; pytest
 ```
 
 Tests import the plugin under its own package name (e.g. `from limit_up_board.config import ...`), and they import `deeptrade.*` from the installed framework. If `pytest` errors with `ModuleNotFoundError: deeptrade`, the framework is missing from the active interpreter — install it (`pipx install deeptrade-quant` or pip in a venv).
@@ -75,7 +76,7 @@ The framework expects three things on the entrypoint class (`plugin.py`):
 ### CLI surface (current subcommands)
 
 - `limit-up-board`: `run`, `sync`, `history`, `report`, `settings show`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `run --no-lgb` is a one-shot opt-out. `run --no-dashboard` (v0.6+) disables the rich animated dashboard and falls back to the v0.5.x-compatible line-per-event stream. `run --llm <provider>` (v0.6.8+) pins the non-debate-mode LLM provider for one run (overrides the framework default; mutex with `--debate` / `--debate-llms`; unknown / unconfigured provider fails fast via `PreconditionError` so no `lub_runs` row is written).
-- `volume-anomaly`: `screen`, `analyze`, `prune`, `evaluate`, `stats`, `history`, `report`, `settings show|reset`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge` / `refresh-features`. `analyze --no-lgb` is a one-shot opt-out; `stats --by lgb_score_bin` aggregates `va_lgb_predictions` ⋈ `va_realized_returns`. `screen / analyze --no-dashboard` (v0.8+) disables the rich animated dashboard and falls back to the v0.7.x-compatible line-per-event stream; `prune` / `evaluate` always run in legacy mode (no dashboard ever). **`screen --backfill-history --start --end [--overwrite]` (v0.9+)** batch-replays the LLM-free screen rules over a historical range to bootstrap `va_anomaly_history` for new users (so `lgb train` has a training corpus without weeks of daily `screen` runs). Backfill writes only to `va_anomaly_history`, never `va_watchlist`; default behaviour skips dates that already have rows (DB-resident resume), `--overwrite` does a wholesale `DELETE … WHERE trade_date=?` before re-inserting. Forced legacy renderer (the dashboard's single-day StageStack would mislead).
+- `accumulation-probe-washout`: `screen`, `analyze`, `run`, `prune`, `evaluate`, `stats`, `history`, `report`, `settings show|set|reset`, plus the **`lgb`** subcommand group: `train` / `evaluate` / `info` / `list` / `activate` / `prune` / `purge`. `analyze --no-lgb` / `run --no-lgb` are one-shot opt-outs; `stats --by lgb_score_bin` aggregates `apw_lgb_predictions` ⋈ `apw_realized_returns`. **`screen --backfill-history --start --end [--overwrite]` (v0.3.0+)** batch-replays the LLM-free screen rules over a historical range to bootstrap `apw_signal_history` (so `lgb train` has a training corpus without weeks of daily `screen` runs). Backfill writes only to `apw_signal_history`, never `apw_watchlist`; default behaviour skips dates that already have rows (DB-resident resume), `--overwrite` does a wholesale `DELETE … WHERE trade_date=?` before re-inserting. Forced legacy renderer (the dashboard's single-day StageStack would mislead). `prune` (v0.3.0+) is phase-aware: launch_ready idle ≥ `prune_idle_days_launch_ready` / washout past `washout_max_trade_days` / close < probe_low / close < MA60 → delete; `--dry-run` reports candidates without writing.
 
 These are exposed to users as `deeptrade <plugin-id> <subcommand>` once the framework dispatches into `cli.main(argv)`.
 
@@ -99,31 +100,22 @@ The `lgb` group manages the LightGBM 连板概率 booster lifecycle (offline tra
 
 Fallback to legacy whenever any of: caller passed `--no-dashboard`; `sys.stdout` not a TTY (pipes, redirects, pytest capture); `CI` truthy; `DEEPTRADE_NO_DASHBOARD` truthy; `TERM=dumb`. `NO_COLOR=1` keeps the dashboard but disables Console colour. UI failures never crash a run — `LubRunner._dispatch_to_renderer` catches and degrades to legacy mid-stream (Plan §3.6.1). Pipeline / data / lgb / report subsystems are renderer-unaware: the dashboard only consumes `StrategyEvent` instances, never mutates them, never writes to DB. See `docs/limit-up-board/CLI_UI_Redesign_Plan.md` for the full design.
 
-#### `volume-anomaly screen / analyze` dashboard (v0.8+)
+#### `accumulation-probe-washout lgb` (v0.5+)
 
-Same `EventRenderer` protocol shape as LUB v0.6 (`volume_anomaly/ui/protocol.py`), but tailored to VA's four-mode CLI:
+Mirrors the `limit-up-board lgb` design with APW-specific twists:
 
-- **`RichDashboardRenderer`** — rich `Live` region with header / config / stages / (screen funnel card) / log panels (Plan §4.1, §4.2). `mode="analyze"` shows the StageStack only (Step 0/1/2/5, no R2/4.5 because VA has no global re-rank); `mode="screen"` adds a 5-row horizontal-bar **funnel card** between the StageStack and the log panel, fed from `DATA_SYNC_FINISHED.payload` (`n_main_board` → `n_after_st_susp` → `n_after_t_day_rules` → `n_after_turnover` → `n_after_vol_rules`).
-- **`LegacyStreamRenderer`** — one stdout line per event (`  {glyph} [{event_type}] {message}`), byte-identical to v0.7.x apart from the PR-1 message tweak adding `Step 2: ` prefix to the `走势分析` STEP_STARTED/FINISHED events. `prune` / `evaluate` are **forced legacy** (`cli.py` injects `LegacyStreamRenderer()` directly, no `--no-dashboard` flag exposed) — those modes never get the dashboard regardless of TTY.
-
-Fallback to legacy whenever any of: caller passed `--no-dashboard`; `sys.stdout` not a TTY (pipes, redirects, pytest capture); `CI` truthy; `DEEPTRADE_NO_DASHBOARD` truthy; `TERM=dumb`. `NO_COLOR=1` keeps the dashboard but disables Console colour. UI failures never crash a run — `VaRunner._dispatch_to_renderer` catches and degrades to legacy mid-stream. The runner emits a one-shot `_va_settings_log_event` (LOG with `ScreenRules` / profile / lgb in payload) **only when the active renderer isn't legacy**, so dashboard runs get a populated config panel while `--no-dashboard` / CI runs keep their stdout + `va_events` row count identical to v0.7.x.
-
-#### `volume-anomaly lgb` (v0.7+)
-
-Mirrors the `limit-up-board lgb` design with VA-specific twists:
-
-- **Labels come from `va_realized_returns`** — `va_lgb_models` records both `label_threshold_pct` (default 5.0) and `label_source` (`max_ret_5d` / `ret_t3` / `max_ret_10d`) so different label semantics never get mixed. Training does **zero** extra Tushare calls.
-- `lgb train --start --end [--label-threshold] [--label-source] [--folds] [--no-activate] [--fresh] [--keep-checkpoint]` fits a new booster (GroupKFold by anomaly_date). Phase-1 collection is checkpointed by BLAKE2b-64 fingerprint of (window + label config + `SCHEMA_VERSION` + lookbacks + `main_board_only` + `baseline_index_code`); shards land under `~/.deeptrade/volume_anomaly/checkpoints/<digest>/days/<YYYYMMDD>.parquet`. Train success deletes the dir; failures keep shards for resume.
-- `lgb evaluate --start --end [--model-id] [--k] [--drift --baseline <id>]` runs AUC / logloss / Top-K hit-rate vs per-day baseline; label config auto-read from `va_lgb_models`. `--drift` adds 10-bin PSI vs the baseline model's `dataset.parquet` snapshot, sorted by PSI desc with `stable` / `moderate` / `shift` status. JSON dumps under `reports/lgb_evaluate_*.json` and `reports/lgb_drift_*.json`.
-- `lgb info [--model-id] [--recent-N N]` shows registry row + usage count (`runs / trade_dates / rows`) from `va_lgb_predictions` + optional per-day score-distribution snapshot.
+- **Labels come from `apw_realized_returns`** — `apw_lgb_models` records `label_source` (`label_launch_t5` (default) / `label_launch_t10` / `custom_t5`) and `label_threshold_pct` (only used for `custom_t5`). The `label_launch_t5` / `label_launch_t10` columns are pre-computed by `evaluate` and already encode the configured 收益 + 回撤 envelope, so training does **zero** extra Tushare calls.
+- `lgb train --start --end [--label-source] [--label-threshold] [--label-drawdown-threshold] [--folds] [--no-activate] [--fresh] [--keep-checkpoint]` fits a new booster (GroupKFold by signal_date, no same-day leakage). Phase-1 collection is checkpointed by BLAKE2b-64 fingerprint of (window + label config + `SCHEMA_VERSION` + 3 lookbacks + `baseline_index_code` + `volume_adjust_enabled`); shards land under `<plugin_data_dir>/checkpoints/<digest>/days/<YYYYMMDD>.parquet`. Train success deletes the dir; failures keep shards for resume.
+- `lgb evaluate --start --end [--model-id] [--k] [--drift --baseline <id>]` runs AUC / logloss / Top-K hit-rate vs per-day baseline; label config auto-read from `apw_lgb_models`. `--drift` adds 10-bin PSI vs the baseline model's `dataset.parquet` snapshot, sorted by PSI desc with `stable` / `moderate` / `shift` status. JSON dumps under `<plugin_data_dir>/reports/lgb_evaluate_*.json` and `reports/lgb_drift_*.json`.
+- `lgb info [--model-id]` prints registry metadata (CV AUC, label config, on-disk paths).
 - `lgb list` (★ = active), `lgb activate <id>`, `lgb prune --keep N`, `lgb purge --datasets / --models / --predictions / --checkpoints / --all [--yes]`.
-- Inference (`analyze`) is wired through `VaRuntime.lgb_scorer`; failure paths (no active / file missing / schema mismatch / predict raise / `lightgbm` not installed) all degrade to `lgb_score=None` without blocking LLM. `analyze --no-lgb` is one-shot; `VaLgbConfig.lgb_enabled=false` is persistent (settable via `settings`).
+- Inference (`analyze` / `run`) is wired through `ApwRuntime.lgb_scorer` (Step 1.5 before LLM); failure paths (no active / file missing / schema mismatch / predict raise / `lightgbm` not installed) all degrade to `lgb_score=None` without blocking LLM. `analyze --no-lgb` / `run --no-lgb` is one-shot; `ApwConfig.lgb_enabled=false` is persistent (settable via `settings set`). Rows with `lgb_score < lgb_min_score_floor` get a `low_lgb_score` tag in `risk_flags_local` — visible to LLM, doesn't filter the candidate.
 
-Third-party runtime deps are declared in `deeptrade_plugin.yaml::dependencies` (PEP 508). The framework `uv pip install`s them before `validate_static` runs (v0.4.0+; see `plugin_required_dependencies.md`). For `limit-up-board` this includes `tushare`, `pandas`, `numpy`, `lightgbm`, and `scikit-learn`; for `volume-anomaly` (v0.7+), `tushare`, `pandas`, `lightgbm`, `scikit-learn`, and `pyarrow`.
+Third-party runtime deps are declared in `deeptrade_plugin.yaml::dependencies` (PEP 508). The framework `uv pip install`s them before `validate_static` runs (v0.4.0+; see `plugin_required_dependencies.md`). For `limit-up-board` this includes `tushare`, `pandas`, `numpy`, `lightgbm`, and `scikit-learn`; for `accumulation-probe-washout` (v0.5.0+), `tushare`, `pandas`, `pyarrow`, `lightgbm`, and `scikit-learn`.
 
 ### Per-plugin DB tables
 
-Every plugin owns its tables and prefixes them (e.g. `lub_*`, `va_*`). Each table is declared in the yaml's `tables:` block with `purge_on_uninstall: true` so the framework can clean up. Plugins replace the framework's shared `strategy_runs` / `strategy_events` with their own `*_runs` / `*_events` tables (this is the post-v0.4 plugin-owned-history pattern).
+Every plugin owns its tables and prefixes them (e.g. `lub_*`, `apw_*`, `checkmate_*`). Each table is declared in the yaml's `tables:` block with `purge_on_uninstall: true` so the framework can clean up. Plugins replace the framework's shared `strategy_runs` / `strategy_events` with their own `*_runs` / `*_events` tables (this is the post-v0.4 plugin-owned-history pattern).
 
 ## Release flow (matters for any change touching a plugin)
 
@@ -145,4 +137,4 @@ The framework's installer only resolves **published Releases**, so a tag without
 
 - **Plugin id** uses kebab-case (`limit-up-board`); **inner Python package** uses snake_case (`limit_up_board`). Both must match the values in `index.json` and `deeptrade_plugin.yaml` — `check_registry.py` enforces it.
 - **Migration filename**: `<YYYYMMDD>_<NNN>_<name>.sql`, with the version string in the yaml as `<YYYYMMDD>_<NNN>` (no `.sql`). The yaml's `file:` field is the path relative to the plugin subdir.
-- **Table naming**: every table is prefixed by a short plugin tag (`lub_`, `va_`). When adding a table, both create it in the migration AND list it under `tables:` in the yaml — the framework relies on the yaml list for `purge_on_uninstall`.
+- **Table naming**: every table is prefixed by a short plugin tag (`lub_`, `apw_`, `checkmate_`). When adding a table, both create it in the migration AND list it under `tables:` in the yaml — the framework relies on the yaml list for `purge_on_uninstall`.

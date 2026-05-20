@@ -14,7 +14,7 @@ Contract
 * :func:`reset_marker` — for tests / future embedded callers.
 
 Per-plugin copy of the same module shipped in ``limit_up_board`` and
-``volume_anomaly`` (CLAUDE.md "Two layers per plugin" — official plugins
+``checkmate`` (CLAUDE.md "Two layers per plugin" — official plugins
 intentionally don't share code).
 
 Safe-degrade: when ``signal.signal`` fails (off main thread, pytest capture,

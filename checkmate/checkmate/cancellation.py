@@ -17,7 +17,7 @@ Contract
 * :func:`reset_marker` — clears the flag. For tests and future embedded
   callers only.
 
-Per-plugin copy of the same module shipped in volume_anomaly /
+Per-plugin copy of the same module shipped in limit_up_board /
 accumulation_probe_washout — official plugins intentionally do not share code
 (see CLAUDE.md "Two layers per plugin").
 """
