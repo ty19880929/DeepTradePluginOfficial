@@ -81,6 +81,16 @@ class ApwConfig:
     prune_drop_on_ma60_break: bool = True
     prune_dry_run_default: bool = False
 
+    # ---- v0.4.0 — extended feature engineering ----
+    # adj_factor handling for probe / current volume ratios. When True the
+    # screen pipeline will (in a follow-up PR) divide vol by adj_factor so
+    # corporate-action splits / dividends don't break long-window ratios.
+    # PR-2 ships the config knob; the actual ratio rewrite ships with PR-3.
+    volume_adjust_enabled: bool = True
+    # Index code used for alpha_*_pct features. Defaults to the same baseline
+    # that ``relative_strength_20d`` uses so the two stay consistent.
+    alpha_baseline_index_code: str = "000300.SH"
+
 
 # Keys ApwConfigStore exposes via settings show / set. Locked here so we can
 # reject unknown keys at write time (PreconditionError surface in M6).

@@ -887,6 +887,249 @@ def derive_phase(
 
 
 # ---------------------------------------------------------------------------
+# v0.4.0 — derived features that feed LightGBM (PR-3) and (some) LLM prompt
+# ---------------------------------------------------------------------------
+
+
+def compute_vcp_features(window_df: pd.DataFrame) -> dict[str, Any]:
+    """ATR / BBW compression measures over the last 60 trade days.
+
+    Mirrors the VA contract semantically but each implementation is owned
+    locally so APW does not depend on volume_anomaly (PR-5 deletes VA).
+
+    Returns NaN values when ``window_df`` lacks the required history; the
+    LightGBM booster handles NaN natively (no special routing needed).
+    """
+    out: dict[str, Any] = {
+        "atr_10d": None,
+        "atr_10d_pct": None,
+        "atr_10d_quantile_in_60d": None,
+        "bbw_20d": None,
+        "bbw_compression_ratio": None,
+    }
+    if window_df is None or window_df.empty:
+        return out
+    df = window_df.sort_values("trade_date").reset_index(drop=True)
+    if len(df) < 12:
+        return out
+
+    closes = df["close"].astype(float)
+    highs = df["high"].astype(float)
+    lows = df["low"].astype(float)
+    prev_close = closes.shift(1)
+    tr = pd.concat(
+        [
+            (highs - lows).abs(),
+            (highs - prev_close).abs(),
+            (lows - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.rolling(window=10, min_periods=10).mean()
+    last_close = float(closes.iloc[-1])
+    last_atr = float(atr.iloc[-1]) if not math.isnan(atr.iloc[-1]) else None
+    if last_atr is not None and last_close > 0:
+        out["atr_10d"] = round(last_atr, 4)
+        out["atr_10d_pct"] = round(last_atr / last_close * 100.0, 4)
+    # Quantile of the latest ATR within the last 60 ATR observations.
+    window = atr.dropna().tail(60)
+    if last_atr is not None and len(window) >= 20:
+        rank = float((window <= last_atr).sum()) / float(len(window))
+        out["atr_10d_quantile_in_60d"] = round(rank, 4)
+
+    # Bollinger Band Width (20d) = (UB - LB) / MB = 4σ / mean(20d)
+    if len(df) >= 20:
+        roll_mean = closes.rolling(20).mean()
+        roll_std = closes.rolling(20).std(ddof=0)
+        mid = float(roll_mean.iloc[-1]) if not math.isnan(roll_mean.iloc[-1]) else None
+        sd = float(roll_std.iloc[-1]) if not math.isnan(roll_std.iloc[-1]) else None
+        if mid is not None and sd is not None and mid > 0:
+            bbw = 4.0 * sd / mid
+            out["bbw_20d"] = round(bbw, 4)
+            # Compression ratio = current BBW / median BBW over the last 60
+            # 20-day windows; values < 1 indicate compression vs baseline.
+            bbw_series = (4.0 * roll_std / roll_mean).dropna().tail(60)
+            if len(bbw_series) >= 20:
+                median_bbw = float(bbw_series.median())
+                if median_bbw > 0:
+                    out["bbw_compression_ratio"] = round(bbw / median_bbw, 4)
+    return out
+
+
+def compute_long_range_features(window_df: pd.DataFrame) -> dict[str, Any]:
+    """Distance to 120 / 250-day highs and position within the 120-day range."""
+    out: dict[str, Any] = {
+        "dist_to_120d_high_pct": None,
+        "dist_to_250d_high_pct": None,
+        "is_above_120d_high": None,
+        "is_above_250d_high": None,
+        "pos_in_120d_range": None,
+    }
+    if window_df is None or window_df.empty:
+        return out
+    df = window_df.sort_values("trade_date").reset_index(drop=True)
+    last_close = float(df.iloc[-1]["close"]) if len(df) else 0.0
+    if last_close <= 0:
+        return out
+
+    # Compare to the high of the PRIOR 120 / 250 sessions (excluding today),
+    # so ``is_above_120d_high`` can legitimately flip True the moment today's
+    # close pierces the historical resistance.
+    if len(df) >= 121:
+        sub = df.iloc[-121:-1]
+        h120 = float(sub["high"].max())
+        l120 = float(sub["low"].min())
+        if h120 > 0:
+            out["dist_to_120d_high_pct"] = round((last_close - h120) / h120 * 100.0, 4)
+            out["is_above_120d_high"] = last_close > h120
+        if h120 > l120:
+            out["pos_in_120d_range"] = round((last_close - l120) / (h120 - l120), 4)
+
+    if len(df) >= 251:
+        sub = df.iloc[-251:-1]
+        h250 = float(sub["high"].max())
+        if h250 > 0:
+            out["dist_to_250d_high_pct"] = round((last_close - h250) / h250 * 100.0, 4)
+            out["is_above_250d_high"] = last_close > h250
+
+    return out
+
+
+def compute_alpha_features(
+    window_df: pd.DataFrame,
+    index_df: pd.DataFrame | None,
+) -> dict[str, Any]:
+    """Multi-horizon excess return vs ``baseline_index_code``.
+
+    All three windows (5d / 20d / 60d) require ``len(window_df) > N`` AND a
+    matching index frame; missing data → None and the feature stays NaN.
+    ``alpha_leading`` is a coarse 3-state label (LEADING / NEUTRAL / LAGGING)
+    derived from the 20d alpha for prompt readability.
+    """
+    out: dict[str, Any] = {
+        "alpha_5d_pct": None,
+        "alpha_20d_pct": None,
+        "alpha_60d_pct": None,
+        "alpha_leading": None,
+    }
+    if window_df is None or window_df.empty:
+        return out
+    df = window_df.sort_values("trade_date").reset_index(drop=True)
+    if index_df is None or index_df.empty or "close" not in index_df.columns:
+        return out
+    idx = index_df.sort_values("trade_date").reset_index(drop=True)
+    last_close = float(df.iloc[-1]["close"])
+    last_idx = float(idx.iloc[-1]["close"]) if len(idx) else 0.0
+    if last_close <= 0 or last_idx <= 0:
+        return out
+
+    for horizon, key in ((5, "alpha_5d_pct"), (20, "alpha_20d_pct"), (60, "alpha_60d_pct")):
+        if len(df) < horizon + 1 or len(idx) < horizon + 1:
+            continue
+        start_close = float(df.iloc[-horizon - 1]["close"])
+        idx_start = float(idx.iloc[-horizon - 1]["close"])
+        if start_close <= 0 or idx_start <= 0:
+            continue
+        stock_ret = (last_close - start_close) / start_close * 100.0
+        idx_ret = (last_idx - idx_start) / idx_start * 100.0
+        out[key] = round(stock_ret - idx_ret, 4)
+
+    a20 = out["alpha_20d_pct"]
+    if a20 is not None:
+        if a20 >= 5.0:
+            out["alpha_leading"] = "LEADING"
+        elif a20 <= -5.0:
+            out["alpha_leading"] = "LAGGING"
+        else:
+            out["alpha_leading"] = "NEUTRAL"
+    return out
+
+
+def compute_volume_event_score(window_df: pd.DataFrame) -> float | None:
+    """One-shot rating of T-day volume anomaly (0–100).
+
+    Captures the gist of the legacy volume-anomaly screen (T-day yang body +
+    volume ratio + amplitude) as a single auxiliary feature for APW LGB. Not
+    used to filter candidates — it's a number on the candidate so the LLM and
+    LGB can weigh it however they want.
+
+    Components:
+        * ``vol_ratio_5d`` — current vol / mean(prev 5 vol); clamped to 1..5
+        * ``body_ratio`` — |close-open| / (high-low); 0..1
+        * ``amplitude`` — (high-low) / prev_close * 100; clamped to 0..20%
+    """
+    if window_df is None or window_df.empty:
+        return None
+    df = window_df.sort_values("trade_date").reset_index(drop=True)
+    if len(df) < 6:
+        return None
+    prev_5 = df.iloc[-6:-1]
+    if prev_5.empty:
+        return None
+    avg_vol = float(prev_5["vol"].mean())
+    cur = df.iloc[-1]
+    if avg_vol <= 0:
+        return None
+
+    vol_ratio_5d = float(cur["vol"]) / avg_vol
+    range_ = max(float(cur["high"]) - float(cur["low"]), 1e-9)
+    body = abs(float(cur["close"]) - float(cur.get("open", cur["close"])))
+    body_ratio = min(1.0, body / range_)
+    prev_close = float(df.iloc[-2]["close"])
+    amplitude_pct = (
+        (float(cur["high"]) - float(cur["low"])) / prev_close * 100.0
+        if prev_close > 0
+        else 0.0
+    )
+
+    vol_score = max(0.0, min(100.0, (min(vol_ratio_5d, 5.0) - 1.0) * 25.0))
+    body_score = body_ratio * 100.0
+    amp_score = max(0.0, min(100.0, amplitude_pct / 20.0 * 100.0))
+
+    return round(0.5 * vol_score + 0.25 * body_score + 0.25 * amp_score, 2)
+
+
+def compute_ma_distances(window_df: pd.DataFrame) -> dict[str, Any]:
+    """Distance (%) between last close and MA5/10/20/60 + the MA60 value.
+
+    The MA60 value is also surfaced standalone so the v0.3.0 ``prune`` rules
+    (``close < MA60``) can consume it from the candidate JSON without a
+    second pass.
+    """
+    out: dict[str, Any] = {
+        "ma5": None,
+        "ma10": None,
+        "ma20": None,
+        "ma60": None,
+        "close_to_ma5_pct": None,
+        "close_to_ma10_pct": None,
+        "close_to_ma20_pct": None,
+        "close_to_ma60_pct": None,
+    }
+    if window_df is None or window_df.empty:
+        return out
+    df = window_df.sort_values("trade_date").reset_index(drop=True)
+    closes = df["close"].astype(float)
+    last_close = float(closes.iloc[-1]) if len(closes) else 0.0
+    if last_close <= 0:
+        return out
+
+    for n, key, key_pct in (
+        (5, "ma5", "close_to_ma5_pct"),
+        (10, "ma10", "close_to_ma10_pct"),
+        (20, "ma20", "close_to_ma20_pct"),
+        (60, "ma60", "close_to_ma60_pct"),
+    ):
+        if len(closes) < n:
+            continue
+        ma = float(closes.tail(n).mean())
+        out[key] = round(ma, 4)
+        if ma > 0:
+            out[key_pct] = round((last_close - ma) / ma * 100.0, 4)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # pack_candidate — assemble the LLM-input dict
 # ---------------------------------------------------------------------------
 
@@ -904,6 +1147,16 @@ def pack_candidate(
     launch: dict[str, Any],
     sector_strength_score: float | None = None,
     missing_data: list[str] | None = None,
+    # v0.4.0 — derived feature bundles. Defaults to ``None`` so the M2/M3
+    # callers (which do not yet compute these) keep working byte-identically
+    # to v0.3.0; the screen funnel passes the dicts in once the helpers are
+    # wired up in ``runner.py``.
+    vcp: dict[str, Any] | None = None,
+    long_range: dict[str, Any] | None = None,
+    alpha: dict[str, Any] | None = None,
+    ma_distances: dict[str, Any] | None = None,
+    volume_event_score: float | None = None,
+    limit_up_history: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the flat candidate dict sent to the LLM (spec §8)."""
     candidate_id = f"{trade_date}_{ts_code}"
@@ -989,6 +1242,69 @@ def pack_candidate(
         out[k] = launch.get(k)
 
     out["sector_strength_score"] = sector_strength_score
+
+    # v0.4.0 — extended derived features. Keys are emitted unconditionally
+    # (None when the helper wasn't run) so feature_frame builders can rely on
+    # a stable schema.
+    vcp = vcp or {}
+    for k in (
+        "atr_10d",
+        "atr_10d_pct",
+        "atr_10d_quantile_in_60d",
+        "bbw_20d",
+        "bbw_compression_ratio",
+    ):
+        out[k] = vcp.get(k)
+
+    long_range = long_range or {}
+    for k in (
+        "dist_to_120d_high_pct",
+        "dist_to_250d_high_pct",
+        "is_above_120d_high",
+        "is_above_250d_high",
+        "pos_in_120d_range",
+    ):
+        out[k] = long_range.get(k)
+
+    alpha = alpha or {}
+    for k in (
+        "alpha_5d_pct",
+        "alpha_20d_pct",
+        "alpha_60d_pct",
+        "alpha_leading",
+    ):
+        out[k] = alpha.get(k)
+
+    ma_distances = ma_distances or {}
+    for k in (
+        "ma5",
+        "ma10",
+        "ma20",
+        "ma60",
+        "close_to_ma5_pct",
+        "close_to_ma10_pct",
+        "close_to_ma20_pct",
+        "close_to_ma60_pct",
+    ):
+        out[k] = ma_distances.get(k)
+
+    out["volume_event_score"] = volume_event_score
+
+    limit_up_history = limit_up_history or {}
+    out["prior_limit_up_count_60d"] = limit_up_history.get(
+        "prior_limit_up_count_60d"
+    )
+    out["days_since_last_limit_up"] = limit_up_history.get(
+        "days_since_last_limit_up"
+    )
+
+    # Surface probe_low alongside the existing probe dict so the v0.3.0 prune
+    # rules (close < probe_low) can read it directly off the candidate JSON.
+    if probe is not None and "probe_low" in probe and "probe_low" not in out:
+        out["probe_low"] = probe.get("probe_low")
+    if probe is not None and "probe_high" in probe and "probe_high" not in out:
+        out["probe_high"] = probe.get("probe_high")
+
     out["risk_flags_local"] = []
     out["missing_data"] = list(missing_data or [])
     return out

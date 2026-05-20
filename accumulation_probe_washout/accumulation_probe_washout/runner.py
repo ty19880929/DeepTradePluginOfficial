@@ -30,8 +30,13 @@ from .cancellation import cancel_requested
 from .config import ApwConfig, ApwConfigStore
 from .data import (
     compute_accumulation,
+    compute_alpha_features,
     compute_launch_setup,
+    compute_long_range_features,
+    compute_ma_distances,
     compute_returns_and_labels,
+    compute_vcp_features,
+    compute_volume_event_score,
     compute_washout,
     derive_phase,
     detect_probe_day,
@@ -528,6 +533,17 @@ class ApwRunner:
                     + (mf_outcome.missing or [])
                     + index_missing
                 ))
+                # v0.4.0 — extended derived features (VCP / long-range
+                # resistance / alpha / MA distances / volume_event_score).
+                # All are NaN-safe; on too-little history each helper emits
+                # ``None`` values and the LGB booster handles them natively.
+                vcp_features = compute_vcp_features(qdf)
+                long_range = compute_long_range_features(qdf)
+                alpha_features = compute_alpha_features(
+                    qdf, index_df if not index_df.empty else None
+                )
+                ma_distances = compute_ma_distances(qdf)
+                volume_event = compute_volume_event_score(qdf)
                 cand = pack_candidate(
                     trade_date=T,
                     ts_code=code,
@@ -539,6 +555,11 @@ class ApwRunner:
                     washout=wash,
                     launch=launch,
                     missing_data=missing,
+                    vcp=vcp_features,
+                    long_range=long_range,
+                    alpha=alpha_features,
+                    ma_distances=ma_distances,
+                    volume_event_score=volume_event,
                 )
                 hits.append(cand)
 

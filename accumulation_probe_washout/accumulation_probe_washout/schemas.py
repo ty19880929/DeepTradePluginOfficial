@@ -177,6 +177,18 @@ INPUT_FIELD_WHITELIST: frozenset[str] = frozenset(
         "current_volume_ratio_20d", "current_moneyflow_net_yi",
         "above_ma5", "above_ma10", "above_ma20", "relative_strength_20d",
         "sector_strength_score",
+        # v0.4.0 — VCP / 长周期阻力位 / alpha / MA / 涨停历史 / 量能事件
+        "atr_10d", "atr_10d_pct", "atr_10d_quantile_in_60d",
+        "bbw_20d", "bbw_compression_ratio",
+        "dist_to_120d_high_pct", "dist_to_250d_high_pct",
+        "is_above_120d_high", "is_above_250d_high", "pos_in_120d_range",
+        "alpha_5d_pct", "alpha_20d_pct", "alpha_60d_pct", "alpha_leading",
+        "ma5", "ma10", "ma20", "ma60",
+        "close_to_ma5_pct", "close_to_ma10_pct",
+        "close_to_ma20_pct", "close_to_ma60_pct",
+        "volume_event_score",
+        "prior_limit_up_count_60d", "days_since_last_limit_up",
+        "probe_low", "probe_high",
         # meta
         "risk_flags_local", "missing_data",
     ]
