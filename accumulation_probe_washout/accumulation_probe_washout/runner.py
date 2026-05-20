@@ -1485,6 +1485,11 @@ class ApwRunner:
             # ---- run analyze pipeline
             profile = default_profile()
             terminal_result = None
+
+            def emit_pipeline_progress(ev: StrategyEvent) -> None:
+                self._write_event(ev)
+                self._dispatch_to_renderer(ev)
+
             for ev, terminal in run_analyze(
                 llm=llm,
                 candidates=candidates,
@@ -1494,6 +1499,7 @@ class ApwRunner:
                 profile=profile,
                 max_batch_size=cfg.llm_batch_size,
                 max_repair_retries=cfg.llm_max_repair_retries,
+                event_sink=emit_pipeline_progress,
             ):
                 self._write_event(ev)
                 self._dispatch_to_renderer(ev)

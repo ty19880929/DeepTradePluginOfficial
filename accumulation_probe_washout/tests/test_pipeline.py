@@ -130,6 +130,7 @@ class TestPipelineRepairLoop:
         bad = _ok_response_payload(["20260515_600000.SH"])
         good = _ok_response_payload(ids)
         llm = _FakeLLM([bad, good])
+        progress_events = []
 
         result = None
         for ev, terminal in run_analyze(
@@ -142,6 +143,7 @@ class TestPipelineRepairLoop:
             next_trade_date="20260516",
             profile=default_profile(),
             max_repair_retries=2,
+            event_sink=progress_events.append,
         ):
             if terminal is not None:
                 result = terminal
@@ -150,6 +152,8 @@ class TestPipelineRepairLoop:
         assert result.success_batches == 1
         assert result.failed_batches == 0
         assert len(llm.calls) == 2  # repair fired exactly once
+        assert [ev.type.value for ev in progress_events].count("live.status") == 2
+        assert any("返回候选集合不一致" in ev.message for ev in progress_events)
 
     def test_persistent_failure_marks_batch_failed(self) -> None:
         from accumulation_probe_washout.pipeline import default_profile

@@ -11,7 +11,7 @@ Contract (locked at v0.1):
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -102,6 +102,13 @@ def _repair_hint(*, missing: list[str], extra: list[str], evidence_err: str | No
     return "\n".join(parts)
 
 
+def _short_error(message: str, *, limit: int = 180) -> str:
+    one_line = " ".join(str(message).split())
+    if len(one_line) <= limit:
+        return one_line
+    return f"{one_line[: limit - 3]}..."
+
+
 def _complete_with_repair(
     llm: LLMClient,
     *,
@@ -112,6 +119,8 @@ def _complete_with_repair(
     expected_ids: set[str],
     envelope_defaults: dict[str, Any] | None = None,
     max_retries: int = 2,
+    progress_cb: Callable[[StrategyEvent], None] | None = None,
+    progress_payload: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Call the LLM, validate, retry up to ``max_retries`` times on failure.
 
@@ -123,7 +132,28 @@ def _complete_with_repair(
     """
     current_user = user
     last_err = ""
+    base_payload = dict(progress_payload or {})
+    max_attempts = max_retries + 1
     for attempt in range(max_retries + 1):
+        attempt_no = attempt + 1
+        if progress_cb is not None:
+            progress_cb(
+                StrategyEvent(
+                    type=EventType.LIVE_STATUS,
+                    level=EventLevel.INFO,
+                    message=(
+                        f"LLM batch {base_payload.get('batch_no', '?')}/"
+                        f"{base_payload.get('batch_total', '?')} "
+                        f"attempt {attempt_no}/{max_attempts}: 请求已发送，等待响应..."
+                    ),
+                    payload={
+                        **base_payload,
+                        "attempt": attempt_no,
+                        "max_attempts": max_attempts,
+                        "prompt_chars": len(current_user),
+                    },
+                )
+            )
         try:
             raw, meta = llm.complete_json(
                 system=system,
@@ -132,13 +162,49 @@ def _complete_with_repair(
                 profile=profile,
                 envelope_defaults=envelope_defaults,
             )
+            meta = dict(meta or {})
+            meta["attempts"] = attempt_no
             obj = raw if isinstance(raw, schema) else schema.model_validate(raw)
         except (LLMValidationError, ValidationError) as e:
             last_err = str(e)
             if attempt >= max_retries:
                 raise
+            if progress_cb is not None:
+                progress_cb(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.WARN,
+                        message=(
+                            f"LLM batch {base_payload.get('batch_no', '?')}/"
+                            f"{base_payload.get('batch_total', '?')} "
+                            f"attempt {attempt_no}/{max_attempts} 校验失败，准备 repair 重试: "
+                            f"{_short_error(last_err)}"
+                        ),
+                        payload={
+                            **base_payload,
+                            "attempt": attempt_no,
+                            "max_attempts": max_attempts,
+                            "error": last_err,
+                        },
+                    )
+                )
             current_user = user + _repair_hint(missing=[], extra=[], evidence_err=last_err)
             continue
+        except LLMTransportError as e:
+            if progress_cb is not None:
+                progress_cb(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.WARN,
+                        message=(
+                            f"LLM batch {base_payload.get('batch_no', '?')}/"
+                            f"{base_payload.get('batch_total', '?')} transport error: "
+                            f"{_short_error(str(e))}"
+                        ),
+                        payload={**base_payload, "attempt": attempt_no, "error": str(e)},
+                    )
+                )
+            raise
 
         # Caller-side validators (set + whitelist)
         try:
@@ -147,6 +213,25 @@ def _complete_with_repair(
             last_err = str(e)
             if attempt >= max_retries:
                 raise
+            if progress_cb is not None:
+                progress_cb(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.WARN,
+                        message=(
+                            f"LLM batch {base_payload.get('batch_no', '?')}/"
+                            f"{base_payload.get('batch_total', '?')} "
+                            f"attempt {attempt_no}/{max_attempts} 证据字段校验失败，准备 repair 重试: "
+                            f"{_short_error(last_err)}"
+                        ),
+                        payload={
+                            **base_payload,
+                            "attempt": attempt_no,
+                            "max_attempts": max_attempts,
+                            "error": last_err,
+                        },
+                    )
+                )
             current_user = user + _repair_hint(missing=[], extra=[], evidence_err=last_err)
             continue
         except ValueError as e:
@@ -159,6 +244,27 @@ def _complete_with_repair(
                 raise _SetMismatchError(
                     f"set mismatch after {max_retries + 1} attempts; "
                     f"missing={missing}, extra={extra}"
+                )
+            if progress_cb is not None:
+                progress_cb(
+                    StrategyEvent(
+                        type=EventType.LOG,
+                        level=EventLevel.WARN,
+                        message=(
+                            f"LLM batch {base_payload.get('batch_no', '?')}/"
+                            f"{base_payload.get('batch_total', '?')} "
+                            f"attempt {attempt_no}/{max_attempts} 返回候选集合不一致，"
+                            "准备 repair 重试"
+                        ),
+                        payload={
+                            **base_payload,
+                            "attempt": attempt_no,
+                            "max_attempts": max_attempts,
+                            "missing_candidate_ids": missing,
+                            "extra_candidate_ids": extra,
+                            "error": last_err,
+                        },
+                    )
                 )
             current_user = user + _repair_hint(missing=missing, extra=extra, evidence_err=None)
             continue
@@ -206,6 +312,7 @@ def run_analyze(
     profile: StageProfile | None = None,
     max_batch_size: int = 20,
     max_repair_retries: int = 2,
+    event_sink: Callable[[StrategyEvent], None] | None = None,
 ) -> Iterable[tuple[StrategyEvent, AnalyzeResult | None]]:
     """Run all analyze batches as a generator of (event, terminal_result_or_None)."""
     profile = profile or default_profile()
@@ -239,12 +346,23 @@ def run_analyze(
 
     for i in range(plan.n_batches):
         batch = candidates[i * plan.batch_size : (i + 1) * plan.batch_size]
+        batch_no = i + 1
+        candidate_ids = [
+            str(c.get("candidate_id", ""))
+            for c in batch
+            if c.get("candidate_id")
+        ]
         yield (
             StrategyEvent(
                 type=EventType.LLM_BATCH_STARTED,
                 level=EventLevel.INFO,
-                message=f"LLM batch {i + 1}/{plan.n_batches} ({len(batch)} 只)",
-                payload={"batch_no": i + 1, "size": len(batch)},
+                message=f"LLM batch {batch_no}/{plan.n_batches} ({len(batch)} 只)",
+                payload={
+                    "batch_no": batch_no,
+                    "batch_total": plan.n_batches,
+                    "size": len(batch),
+                    "candidate_ids_preview": candidate_ids[:5],
+                },
             ),
             None,
         )
@@ -252,7 +370,7 @@ def run_analyze(
         user = apw_user_prompt(
             trade_date=trade_date,
             next_trade_date=next_trade_date,
-            batch_no=i + 1,
+            batch_no=batch_no,
             batch_total=plan.n_batches,
             candidates=batch,
             market_summary=market_summary,
@@ -270,23 +388,30 @@ def run_analyze(
                     "stage": "accumulation_probe_washout_analysis",
                     "trade_date": trade_date,
                     "next_trade_date": next_trade_date,
-                    "batch_no": i + 1,
+                    "batch_no": batch_no,
                     "batch_total": plan.n_batches,
                     "market_context_summary": "",
                     "risk_disclaimer": "",
                 },
                 max_retries=max_repair_retries,
+                progress_cb=event_sink,
+                progress_payload={
+                    "batch_no": batch_no,
+                    "batch_total": plan.n_batches,
+                    "size": len(batch),
+                    "candidate_ids_preview": candidate_ids[:5],
+                },
             )
         except (LLMValidationError, LLMTransportError, _SetMismatchError, ValidationError) as e:
-            logger.exception("走势分析 批 %d failed", i + 1)
+            logger.exception("走势分析 批 %d failed", batch_no)
             result.failed_batches += 1
-            result.failed_batch_ids.append(str(i + 1))
+            result.failed_batch_ids.append(str(batch_no))
             yield (
                 StrategyEvent(
                     type=EventType.VALIDATION_FAILED,
                     level=EventLevel.ERROR,
-                    message=f"走势分析 批 {i + 1} 失败: {e}",
-                    payload={"batch_no": i + 1, "error": str(e)},
+                    message=f"走势分析 批 {batch_no} 失败: {e}",
+                    payload={"batch_no": batch_no, "error": str(e)},
                 ),
                 None,
             )
@@ -301,12 +426,14 @@ def run_analyze(
             StrategyEvent(
                 type=EventType.LLM_BATCH_FINISHED,
                 level=EventLevel.INFO,
-                message=f"LLM batch {i + 1}/{plan.n_batches} 完成 ({len(obj.candidates)} 条)",
+                message=f"LLM batch {batch_no}/{plan.n_batches} 完成 ({len(obj.candidates)} 条)",
                 payload={
-                    "batch_no": i + 1,
+                    "batch_no": batch_no,
+                    "batch_total": plan.n_batches,
                     "input_tokens": meta.get("input_tokens"),
                     "output_tokens": meta.get("output_tokens"),
                     "latency_ms": meta.get("latency_ms"),
+                    "attempts": meta.get("attempts"),
                 },
             ),
             None,
