@@ -86,6 +86,9 @@ class AnalyzeParams:
     max_candidates: int | None = None
     llm_provider: str | None = None  # --llm <provider>
     prediction_filter: str | None = None  # e.g. "launch_ready"
+    # v0.6.0 — one-shot LGB disable. Persistent default lives in
+    # ApwConfig.lgb_enabled (apw_config table).
+    disable_lgb: bool = False
 
 
 @dataclass
@@ -95,6 +98,7 @@ class RunParams:
     force_sync: bool = False
     max_candidates: int | None = None
     llm_provider: str | None = None
+    disable_lgb: bool = False
 
 
 @dataclass
@@ -1219,6 +1223,7 @@ class ApwRunner:
                 trade_date=T,
                 max_candidates=params.max_candidates,
                 llm_provider=params.llm_provider,
+                disable_lgb=params.disable_lgb,
             )
             analyze_outcome = self.execute_analyze(analyze_params, _owns_run=False)
             summary = {
@@ -1325,6 +1330,74 @@ class ApwRunner:
                 payload={"step": 1, "n_candidates": len(candidates)},
             )
 
+            # v0.6.0 — LGB scoring before LLM. Failure paths are wholly
+            # absorbed by LgbScorer (5-branch fallback emits LGB_DEGRADE_*
+            # events and leaves lgb_score = None); analyze never aborts.
+            lgb_scored = 0
+            lgb_persisted = 0
+            lgb_degrade = None
+            lgb_model_id: str | None = None
+            if candidates and cfg.lgb_enabled and not params.disable_lgb:
+                from .lgb.scorer import build_lgb_scorer  # noqa: PLC0415
+
+                self._emit(
+                    EventType.STEP_STARTED,
+                    "Step 1.5: LGB 评分",
+                    payload={"step": 1.5},
+                )
+                self.rt.lgb_scorer = build_lgb_scorer(self.rt.db)
+                outcome = self.rt.lgb_scorer.score_batch(candidates)
+                lgb_model_id = outcome.model_id
+                if outcome.degrade_reason:
+                    lgb_degrade = outcome.degrade_reason
+                    self._emit(
+                        EventType.LOG,
+                        f"LGB degraded: {outcome.degrade_reason}",
+                        level=EventLevel.WARN,
+                        payload={
+                            "lgb_degrade_reason": outcome.degrade_reason,
+                            "model_id": outcome.model_id,
+                        },
+                    )
+                else:
+                    lgb_persisted = self.rt.lgb_scorer.persist_predictions(
+                        self.rt.db, outcome,
+                        run_id=run_id, trade_date=T,
+                    )
+                # Inject score / decile into each candidate dict (None when
+                # the row degraded). The prompt builder consumes them; the
+                # whitelist already includes lgb_score / lgb_decile.
+                by_code = {s.ts_code: s for s in outcome.scores}
+                for cand in candidates:
+                    s = by_code.get(str(cand.get("ts_code", "")))
+                    if s is None:
+                        continue
+                    cand["lgb_score"] = s.lgb_score
+                    if cfg.lgb_decile_in_prompt:
+                        cand["lgb_decile"] = s.lgb_decile
+                    if (
+                        s.lgb_score is not None
+                        and cfg.lgb_min_score_floor is not None
+                        and s.lgb_score < cfg.lgb_min_score_floor
+                    ):
+                        # Tag — visible to LLM, doesn't filter the candidate.
+                        flags = cand.setdefault("risk_flags_local", [])
+                        if "low_lgb_score" not in flags:
+                            flags.append("low_lgb_score")
+                    if s.lgb_score is not None:
+                        lgb_scored += 1
+                self._emit(
+                    EventType.STEP_FINISHED,
+                    f"Step 1.5: LGB 评分完成 ({lgb_scored}/{len(candidates)})",
+                    payload={
+                        "step": 1.5,
+                        "n_scored": lgb_scored,
+                        "n_persisted": lgb_persisted,
+                        "model_id": lgb_model_id,
+                        "degrade_reason": lgb_degrade,
+                    },
+                )
+
             if not candidates:
                 # Probe whether stale rows exist so standalone analyze callers
                 # know they may need to run screen first today.
@@ -1411,6 +1484,11 @@ class ApwRunner:
                 "n_failed_batches": terminal_result.failed_batches,
                 "failed_batch_ids": terminal_result.failed_batch_ids,
                 "trade_date": T,
+                "lgb_enabled": bool(cfg.lgb_enabled and not params.disable_lgb),
+                "lgb_model_id": lgb_model_id,
+                "lgb_n_scored": lgb_scored,
+                "lgb_n_persisted": lgb_persisted,
+                "lgb_degrade_reason": lgb_degrade,
             }
             status = (
                 RunStatus.PARTIAL_FAILED

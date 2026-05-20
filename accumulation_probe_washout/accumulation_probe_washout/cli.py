@@ -189,6 +189,10 @@ def cmd_analyze(
         None, "--prediction",
         help="只分析指定 phase 的候选股（如 launch_ready）",
     ),
+    no_lgb: bool = typer.Option(
+        False, "--no-lgb",
+        help="本次 run 跳过 LGB 评分（持久化默认看 apw_config.lgb_enabled）。",
+    ),
     no_dashboard: bool = typer.Option(False, "--no-dashboard"),
 ) -> None:
     """Read apw_watchlist → LLM → apw_stage_results."""
@@ -201,6 +205,7 @@ def cmd_analyze(
             max_candidates=max_candidates,
             llm_provider=llm_provider,
             prediction_filter=prediction_filter,
+            disable_lgb=no_lgb,
         )
         renderer = choose_renderer(no_dashboard=no_dashboard, mode="analyze")
         outcome = ApwRunner(rt, renderer=renderer).execute_analyze(params)
@@ -222,6 +227,10 @@ def cmd_run(
     max_candidates: Optional[int] = typer.Option(None, "--max-candidates"),
     force_sync: bool = typer.Option(False, "--force-sync"),
     llm_provider: Optional[str] = typer.Option(None, "--llm"),
+    no_lgb: bool = typer.Option(
+        False, "--no-lgb",
+        help="本次 run 跳过 LGB 评分（持久化默认看 apw_config.lgb_enabled）。",
+    ),
     no_dashboard: bool = typer.Option(False, "--no-dashboard"),
 ) -> None:
     """One-shot screen → analyze (用户最常用入口)."""
@@ -234,6 +243,7 @@ def cmd_run(
             force_sync=force_sync,
             max_candidates=max_candidates,
             llm_provider=llm_provider,
+            disable_lgb=no_lgb,
         )
         renderer = choose_renderer(no_dashboard=no_dashboard, mode="run")
         outcome = ApwRunner(rt, renderer=renderer).execute_run(params)
@@ -739,6 +749,78 @@ def cmd_lgb_activate(model_id: str = typer.Argument(...)) -> None:
             typer.echo(f"✘ model not found: {model_id!r}")
             raise typer.Exit(1)
         typer.echo(f"✓ activated {model_id}")
+    finally:
+        db.close()
+
+
+@lgb_app.command("evaluate")
+def cmd_lgb_evaluate(
+    start: str = typer.Option(..., "--start", help="YYYYMMDD"),
+    end: str = typer.Option(..., "--end", help="YYYYMMDD"),
+    model_id: Optional[str] = typer.Option(
+        None, "--model-id",
+        help="评估指定 model；省略则使用 active model",
+    ),
+    k: int = typer.Option(10, "--k", help="Top-K hit-rate 的 K"),
+    drift: bool = typer.Option(
+        False, "--drift",
+        help="改为对 model_id 与 --baseline 之间做 PSI drift 分析",
+    ),
+    baseline: Optional[str] = typer.Option(
+        None, "--baseline",
+        help="--drift 模式下的基线 model id",
+    ),
+) -> None:
+    """Re-score window + AUC / Top-K + (optional) PSI drift report."""
+    from .lgb import evaluate as _eval
+
+    db, _rt = _open_runtime()
+    try:
+        if drift:
+            if not (model_id and baseline):
+                typer.echo("✘ --drift requires both --model-id and --baseline")
+                raise typer.Exit(2)
+            try:
+                result, path = _eval.evaluate_drift(
+                    db,
+                    baseline_model_id=baseline,
+                    candidate_model_id=model_id,
+                )
+            except _eval.LgbEvalError as exc:
+                typer.echo(f"✘ {exc}")
+                raise typer.Exit(1) from None
+            typer.echo(
+                f"PSI drift  baseline={baseline}  candidate={model_id}"
+            )
+            shown = 0
+            for entry in result.entries:
+                typer.echo(
+                    f"  [{entry.status:8s}] {entry.feature:36s} PSI={entry.psi:.4f}"
+                )
+                shown += 1
+                if shown >= 20:
+                    typer.echo(f"  ... ({len(result.entries) - shown} more in {path})")
+                    break
+            typer.echo(f"\nfull report → {path}")
+            return
+        try:
+            result, path = _eval.evaluate_model(
+                db, start_date=start, end_date=end,
+                model_id=model_id, k=k,
+            )
+        except _eval.LgbEvalError as exc:
+            typer.echo(f"✘ {exc}")
+            raise typer.Exit(1) from None
+        typer.echo(
+            f"model_id={result.model_id} window={result.start_date}..{result.end_date}\n"
+            f"  n_samples={result.n_samples}  n_positive={result.n_positive}\n"
+            f"  AUC={'—' if result.auc is None else f'{result.auc:.4f}'}\n"
+            f"  logloss={'—' if result.logloss is None else f'{result.logloss:.4f}'}\n"
+            f"  top{result.topk}_hit_rate="
+            f"{'—' if result.topk_hit_rate is None else f'{result.topk_hit_rate:.4f}'}\n"
+            f"  per-day rows: {len(result.per_day_topk)}"
+        )
+        typer.echo(f"report → {path}")
     finally:
         db.close()
 

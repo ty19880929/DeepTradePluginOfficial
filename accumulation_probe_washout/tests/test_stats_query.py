@@ -216,13 +216,14 @@ def test_by_dimension_scores_returns_six_rows(fresh_db):
     assert all(r["n_samples"] == 3 for r in rows)
 
 
-def test_lgb_score_bin_raises_until_pr_4_table_exists(fresh_db):
-    """``apw_lgb_predictions`` lands in PR-4; before then the axis surfaces a
-    user-facing error rather than a DuckDB CatalogException."""
-    with pytest.raises(StatsQueryError, match="apw_lgb_predictions"):
-        run_stats_query(
-            fresh_db, from_date=None, to_date=None, by="lgb_score_bin"
-        )
+def test_lgb_score_bin_returns_empty_buckets_when_no_predictions(fresh_db):
+    """PR-4 creates apw_lgb_predictions; with the table empty, lgb_score_bin
+    must still return the 4 canonical buckets (n_samples=0 each)."""
+    rows, _ = run_stats_query(
+        fresh_db, from_date=None, to_date=None, by="lgb_score_bin"
+    )
+    assert [r["bucket"] for r in rows] == ["0-30", "30-50", "50-70", "70-100"]
+    assert all(r["n_samples"] == 0 for r in rows)
 
 
 def test_allowed_by_axes_are_stable():

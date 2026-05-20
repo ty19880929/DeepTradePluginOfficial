@@ -189,6 +189,8 @@ INPUT_FIELD_WHITELIST: frozenset[str] = frozenset(
         "volume_event_score",
         "prior_limit_up_count_60d", "days_since_last_limit_up",
         "probe_low", "probe_high",
+        # v0.6.0 — LGB inference output (None when degraded)
+        "lgb_score", "lgb_decile",
         # meta
         "risk_flags_local", "missing_data",
     ]

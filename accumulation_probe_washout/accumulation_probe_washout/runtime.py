@@ -30,7 +30,9 @@ class ApwRuntime:
     plugin_id: str = PLUGIN_ID
     run_id: str | None = None
     tushare: TushareClient | None = None
-    # v0.2 reservation — LightGBM scorer slot. Always None in v0.1.
+    # v0.6.0 — LightGBM scorer. Constructed lazily by ``execute_analyze`` via
+    # :func:`lgb.scorer.build_lgb_scorer`; ``None`` when disabled by either
+    # ``ApwConfig.lgb_enabled = False`` or the ``--no-lgb`` one-shot flag.
     lgb_scorer: Any | None = None
 
     def emit(
