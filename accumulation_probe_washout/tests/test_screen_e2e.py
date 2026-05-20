@@ -85,8 +85,23 @@ class _FakeTushare:
                 df = make_quotes(ts_code=c, pattern=("flat" if i % 2 else "uptrend"), n=130)
             self._daily[c] = df
 
-    def call(self, api: str, **kwargs: Any):
+    def call(
+        self,
+        api: str,
+        *,
+        trade_date: str | None = None,
+        params: dict[str, Any] | None = None,
+        fields: str | None = None,
+        force_sync: bool = False,
+    ):
+        kwargs: dict[str, Any] = {
+            "trade_date": trade_date,
+            "params": params,
+            "fields": fields,
+            "force_sync": force_sync,
+        }
         self.calls.append((api, kwargs))
+        params = params or {}
         if api == "trade_cal":
             base = pd.date_range("2024-01-01", "2026-12-31", freq="D")
             return pd.DataFrame(
@@ -110,13 +125,13 @@ class _FakeTushare:
         if api == "suspend_d":
             return pd.DataFrame()
         if api == "daily":
-            codes = kwargs.get("ts_code", "").split(",")
+            codes = params.get("ts_code", "").split(",")
             frames = [self._daily[c] for c in codes if c in self._daily]
             if not frames:
                 return pd.DataFrame()
             return pd.concat(frames, ignore_index=True)
         if api == "daily_basic":
-            codes = kwargs.get("ts_code", "").split(",")
+            codes = params.get("ts_code", "").split(",")
             frames = []
             for c in codes:
                 if c in self._daily:
@@ -125,7 +140,7 @@ class _FakeTushare:
             return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if api == "moneyflow":
             # Provide positive net inflow → strengthens accumulation score
-            codes = kwargs.get("ts_code", "").split(",")
+            codes = params.get("ts_code", "").split(",")
             rows: list[dict] = []
             for c in codes:
                 if c not in self._daily:

@@ -13,7 +13,15 @@ class _FakeTushare:
         self.raise_on = raise_on or set()
         self.data = data or {}
 
-    def call(self, api: str, **kwargs):
+    def call(
+        self,
+        api: str,
+        *,
+        trade_date=None,
+        params=None,
+        fields=None,
+        force_sync=False,
+    ):
         if api in self.raise_on:
             raise RuntimeError(f"{api} unavailable")
         return self.data.get(api, pd.DataFrame())

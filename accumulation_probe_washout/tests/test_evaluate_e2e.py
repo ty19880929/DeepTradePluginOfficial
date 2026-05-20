@@ -70,11 +70,20 @@ class _FakeTushare:
     def __init__(self, codes):
         self._codes = codes
 
-    def call(self, api, **kwargs):
+    def call(
+        self,
+        api,
+        *,
+        trade_date=None,
+        params=None,
+        fields=None,
+        force_sync=False,
+    ):
+        params = params or {}
         if api == "daily":
-            ts_codes = kwargs["ts_code"].split(",")
-            start = kwargs["start_date"]
-            end = kwargs["end_date"]
+            ts_codes = params["ts_code"].split(",")
+            start = params["start_date"]
+            end = params["end_date"]
             dates = pd.date_range(start, end, freq="D")
             rows = []
             for code in ts_codes:

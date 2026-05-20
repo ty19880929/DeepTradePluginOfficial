@@ -111,7 +111,16 @@ def _build_tushare(circ_mv_by_code: dict[str, float]):
         daily[code] = df
 
     class _Fake:
-        def call(self, api: str, **kwargs: Any):
+        def call(
+            self,
+            api: str,
+            *,
+            trade_date: str | None = None,
+            params: dict[str, Any] | None = None,
+            fields: str | None = None,
+            force_sync: bool = False,
+        ):
+            params = params or {}
             if api == "trade_cal":
                 base = pd.date_range("2024-01-01", "2026-12-31", freq="D")
                 return pd.DataFrame({
@@ -131,11 +140,11 @@ def _build_tushare(circ_mv_by_code: dict[str, float]):
             if api == "suspend_d":
                 return pd.DataFrame()
             if api == "daily":
-                codes = kwargs.get("ts_code", "").split(",")
+                codes = params.get("ts_code", "").split(",")
                 frames = [daily[c] for c in codes if c in daily]
                 return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
             if api == "daily_basic":
-                codes = kwargs.get("ts_code", "").split(",")
+                codes = params.get("ts_code", "").split(",")
                 frames = [
                     daily[c][["ts_code", "trade_date", "turnover_rate", "circ_mv"]]
                     for c in codes if c in daily

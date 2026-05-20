@@ -1318,8 +1318,22 @@ class FetchOutcome:
     missing: list[str] = field(default_factory=list)
 
 
-def _try_optional(tushare: Any, api_name: str, **kwargs: Any) -> FetchOutcome:
-    """Call an optional Tushare API; transient failure ⇒ empty df + missing tag."""
+def _try_optional(
+    tushare: Any,
+    api_name: str,
+    *,
+    params: dict[str, Any] | None = None,
+    trade_date: str | None = None,
+    fields: str | None = None,
+    force_sync: bool = False,
+) -> FetchOutcome:
+    """Call an optional Tushare API; transient failure ⇒ empty df + missing tag.
+
+    Mirrors the framework's ``TushareClient.call`` signature: API-side
+    parameters go inside ``params``; ``trade_date`` / ``fields`` / ``force_sync``
+    are first-class so the framework can use them for cache keying and
+    immutability classification.
+    """
     try:
         from deeptrade.core.tushare_client import (  # noqa: PLC0415
             TushareRateLimitError,
@@ -1329,8 +1343,18 @@ def _try_optional(tushare: Any, api_name: str, **kwargs: Any) -> FetchOutcome:
     except ImportError:  # pragma: no cover - framework always supplies these
         TushareRateLimitError = TushareServerError = TushareUnauthorizedError = Exception
 
+    call_kwargs: dict[str, Any] = {}
+    if params is not None:
+        call_kwargs["params"] = params
+    if trade_date is not None:
+        call_kwargs["trade_date"] = trade_date
+    if fields is not None:
+        call_kwargs["fields"] = fields
+    if force_sync:
+        call_kwargs["force_sync"] = True
+
     try:
-        df = tushare.call(api_name, **kwargs)
+        df = tushare.call(api_name, **call_kwargs)
         if df is None:
             return FetchOutcome(pd.DataFrame(), [api_name])
         return FetchOutcome(df, [])
@@ -1346,13 +1370,16 @@ def fetch_stock_basic(tushare: Any) -> pd.DataFrame:
     """Pull stock_basic (required API)."""
     return tushare.call(
         "stock_basic",
-        list_status="L",
+        params={"list_status": "L"},
         fields="ts_code,name,industry,market,exchange,list_status,list_date",
     )
 
 
 def fetch_trade_cal(tushare: Any, *, start: str, end: str) -> pd.DataFrame:
-    return tushare.call("trade_cal", exchange="SSE", start_date=start, end_date=end)
+    return tushare.call(
+        "trade_cal",
+        params={"exchange": "SSE", "start_date": start, "end_date": end},
+    )
 
 
 def fetch_daily(tushare: Any, *, ts_codes: list[str], start: str, end: str) -> pd.DataFrame:
@@ -1361,9 +1388,7 @@ def fetch_daily(tushare: Any, *, ts_codes: list[str], start: str, end: str) -> p
     # 单次 query 上限 ~6000 rows；按需要分片由 caller 处理（runner 控制）
     return tushare.call(
         "daily",
-        ts_code=",".join(ts_codes),
-        start_date=start,
-        end_date=end,
+        params={"ts_code": ",".join(ts_codes), "start_date": start, "end_date": end},
     )
 
 
@@ -1372,9 +1397,7 @@ def fetch_daily_basic(tushare: Any, *, ts_codes: list[str], start: str, end: str
         return pd.DataFrame()
     return tushare.call(
         "daily_basic",
-        ts_code=",".join(ts_codes),
-        start_date=start,
-        end_date=end,
+        params={"ts_code": ",".join(ts_codes), "start_date": start, "end_date": end},
     )
 
 
@@ -1383,7 +1406,9 @@ def fetch_moneyflow(tushare: Any, *, ts_codes: list[str], start: str, end: str) 
     if not ts_codes:
         return FetchOutcome(pd.DataFrame(), [])
     return _try_optional(
-        tushare, "moneyflow", ts_code=",".join(ts_codes), start_date=start, end_date=end
+        tushare,
+        "moneyflow",
+        params={"ts_code": ",".join(ts_codes), "start_date": start, "end_date": end},
     )
 
 
@@ -1399,14 +1424,25 @@ def fetch_st_codes(tushare: Any, *, trade_date: str) -> set[str]:
 
 
 def fetch_suspended_codes(tushare: Any, *, trade_date: str) -> set[str]:
-    outcome = _try_optional(tushare, "suspend_d", trade_date=trade_date, suspend_type="S")
+    # trade_date is a first-class TushareClient.call kwarg; suspend_type is an
+    # API-side filter so it lives inside ``params``.
+    outcome = _try_optional(
+        tushare,
+        "suspend_d",
+        trade_date=trade_date,
+        params={"suspend_type": "S"},
+    )
     if outcome.df is None or outcome.df.empty or "ts_code" not in outcome.df.columns:
         return set()
     return set(outcome.df["ts_code"].astype(str).tolist())
 
 
 def fetch_index_daily(tushare: Any, *, index_code: str, start: str, end: str) -> FetchOutcome:
-    return _try_optional(tushare, "index_daily", ts_code=index_code, start_date=start, end_date=end)
+    return _try_optional(
+        tushare,
+        "index_daily",
+        params={"ts_code": index_code, "start_date": start, "end_date": end},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1439,9 +1475,7 @@ def fetch_realized_prices(
         sub = ts_codes[i : i + 50]
         df = tushare.call(
             "daily",
-            ts_code=",".join(sub),
-            start_date=signal_date,
-            end_date=end_str,
+            params={"ts_code": ",".join(sub), "start_date": signal_date, "end_date": end_str},
         )
         if df is not None and not df.empty:
             chunks.append(df)
