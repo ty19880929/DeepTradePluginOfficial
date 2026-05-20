@@ -91,6 +91,30 @@ class ApwConfig:
     # that ``relative_strength_20d`` uses so the two stay consistent.
     alpha_baseline_index_code: str = "000300.SH"
 
+    # ---- v0.5.0 — LightGBM ----
+    # Master switch; ``analyze --no-lgb`` is the one-shot override (PR-4).
+    lgb_enabled: bool = True
+    # Default label source for ``lgb train``. APW's own realised-returns
+    # columns already encode "收益 + 回撤" semantics so we don't need an
+    # explicit threshold for the t5 / t10 cases.
+    # One of: ``label_launch_t5`` | ``label_launch_t10`` | ``custom_t5``.
+    lgb_label_source: str = "label_launch_t5"
+    # Only consulted when ``lgb_label_source = 'custom_t5'``. ``custom_t5`` =
+    # ``max_high_t5_pct >= lgb_label_threshold_pct AND
+    #  max_drawdown_t5_pct <= lgb_label_drawdown_threshold_pct``.
+    lgb_label_threshold_pct: float = 8.0
+    lgb_label_drawdown_threshold_pct: float = 8.0
+    # GroupKFold splits (group = signal_date — no same-day leakage).
+    lgb_train_folds: int = 5
+    lgb_train_min_samples: int = 500
+    lgb_train_lookback_days: int = 365
+    # Retention policies for ``lgb prune`` / ``lgb purge``.
+    lgb_max_models_to_keep: int = 5
+    lgb_max_datasets_to_keep: int = 3
+    # Inference-side knobs (PR-4 consumes them).
+    lgb_min_score_floor: float | None = 25.0
+    lgb_decile_in_prompt: bool = True
+
 
 # Keys ApwConfigStore exposes via settings show / set. Locked here so we can
 # reject unknown keys at write time (PreconditionError surface in M6).

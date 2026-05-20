@@ -1,6 +1,6 @@
 plugin_id: accumulation-probe-washout
 name: 吸筹试盘洗盘主升浪策略
-version: 0.4.0
+version: 0.5.0
 type: strategy
 api_version: "1"
 entrypoint: accumulation_probe_washout.plugin:AccumulationProbeWashoutPlugin
@@ -13,6 +13,8 @@ dependencies:
   - "tushare>=1.4"
   - "pandas>=2.2,<3"
   - "pyarrow>=15"
+  - "lightgbm>=4.3,<5"
+  - "scikit-learn>=1.4,<2"
 
 permissions:
   tushare_apis:
@@ -40,6 +42,9 @@ migrations:
   - version: "20260602_001"
     file: migrations/20260602_001_dimension_cols.sql
     checksum: "sha256:69869d49f542b3ef946a55b7e2ff39b1eb81ad79865cca339bd13baaa6cc0a70"
+  - version: "20260602_002"
+    file: migrations/20260602_002_apw_lgb_models.sql
+    checksum: "sha256:3a19a867d25b4eee9188d626d7f1f6c13e1b5364fbef5dd33161d2ad5c37b98e"
 
 # 框架 v0.4+ 会从 plugin_id 推导默认前缀；此处显式声明匹配实际表名。
 table_prefix: apw_
@@ -65,4 +70,7 @@ tables:
     purge_on_uninstall: true
   - name: apw_config
     description: 本插件用户可调设置
+    purge_on_uninstall: true
+  - name: apw_lgb_models
+    description: LightGBM 主升浪启动概率模型注册表（v0.5.0+）
     purge_on_uninstall: true

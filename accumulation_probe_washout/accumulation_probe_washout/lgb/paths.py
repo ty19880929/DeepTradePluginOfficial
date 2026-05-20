@@ -2,14 +2,15 @@
 
 Layout::
 
-    ~/.deeptrade/accumulation_probe_washout/
+    <paths.db_path().parent>/accumulation_probe_washout/
     ├── models/        # booster files registered in apw_lgb_models
     ├── datasets/      # parquet snapshots of each training matrix
-    └── checkpoints/   # Phase-1 collection shards (resumable trains)
+    ├── checkpoints/   # Phase-1 collection shards (resumable trains)
+    └── reports/       # lgb evaluate / drift JSON dumps
 
-The framework's ``deeptrade.core.paths`` exposes the per-plugin root via
-``plugin_data_dir("accumulation-probe-washout")``; we just build the three
-sub-directories on top.
+We anchor to ``deeptrade.core.paths.db_path().parent`` so the plugin's
+on-disk state lives next to the DB file. The future framework API
+``paths.plugin_data_dir(plugin_id)`` will be a drop-in upgrade.
 """
 
 from __future__ import annotations
@@ -18,14 +19,14 @@ from pathlib import Path
 
 
 PLUGIN_ID = "accumulation-probe-washout"
+_PLUGIN_DIRNAME = "accumulation_probe_washout"
 
 
 def _plugin_root() -> Path:
-    # Import inside the function so importing this module does not require the
-    # framework to be importable (keeps unit tests that exercise features.py
-    # without ``deeptrade.core.paths`` working).
+    # Import inside the function so importing this module does not require
+    # the framework to be importable at unit-test setup time.
     from deeptrade.core import paths as _fw_paths  # noqa: PLC0415
-    return Path(_fw_paths.plugin_data_dir(PLUGIN_ID))
+    return _fw_paths.db_path().parent / _PLUGIN_DIRNAME
 
 
 def models_dir() -> Path:

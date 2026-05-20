@@ -51,6 +51,14 @@ settings_app = typer.Typer(
 )
 app.add_typer(settings_app, name="settings")
 
+lgb_app = typer.Typer(
+    name="lgb",
+    help="LightGBM 主升浪启动概率评分模型生命周期管理（v0.5.0+）。",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(lgb_app, name="lgb")
+
 
 def _open_runtime() -> tuple[Database, ApwRuntime]:
     db = Database(paths.db_path())
@@ -523,6 +531,313 @@ def cmd_report(
         console.print(tbl)
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# lgb subcommands (v0.5.0)
+# ---------------------------------------------------------------------------
+
+
+_LGB_LABEL_SOURCES = ("label_launch_t5", "label_launch_t10", "custom_t5")
+
+
+@lgb_app.command("train")
+def cmd_lgb_train(
+    start: str = typer.Option(..., "--start", help="训练窗口起始 trade_date (YYYYMMDD)"),
+    end: str = typer.Option(..., "--end", help="训练窗口结束 trade_date (YYYYMMDD)"),
+    label_source: Optional[str] = typer.Option(
+        None, "--label-source",
+        help=f"标签源；默认读 apw_config。可选：{', '.join(_LGB_LABEL_SOURCES)}",
+    ),
+    label_threshold: Optional[float] = typer.Option(
+        None, "--label-threshold",
+        help="custom_t5 模式的收益阈值（百分比）",
+    ),
+    label_drawdown_threshold: Optional[float] = typer.Option(
+        None, "--label-drawdown-threshold",
+        help="custom_t5 模式的最大回撤阈值（百分比）",
+    ),
+    folds: Optional[int] = typer.Option(
+        None, "--folds", help="GroupKFold 分组数；默认读 apw_config (=5)",
+    ),
+    no_activate: bool = typer.Option(
+        False, "--no-activate", help="训练完不自动 activate 新模型",
+    ),
+    fresh: bool = typer.Option(
+        False, "--fresh", help="忽略既有 checkpoint，全量重跑 Phase-1",
+    ),
+    keep_checkpoint: bool = typer.Option(
+        False, "--keep-checkpoint",
+        help="训练成功后保留 checkpoint 目录（默认成功即清理）",
+    ),
+) -> None:
+    """Train a new APW LGB booster from apw_signal_history + apw_realized_returns."""
+    from .config import ApwConfigStore
+    from .lgb import dataset as _dataset
+    from .lgb import trainer as _trainer
+
+    if label_source and label_source not in _LGB_LABEL_SOURCES:
+        typer.echo(
+            f"✘ unknown --label-source {label_source!r}; "
+            f"choose from {', '.join(_LGB_LABEL_SOURCES)}"
+        )
+        raise typer.Exit(2)
+
+    db, _rt = _open_runtime()
+    try:
+        cfg = ApwConfigStore(db).load()
+        if folds is not None:
+            cfg.lgb_train_folds = folds
+        typer.echo(
+            f"▶ lgb train [{start} .. {end}] "
+            f"label={(label_source or cfg.lgb_label_source)} "
+            f"folds={cfg.lgb_train_folds}"
+        )
+        ds, ckpt = _dataset.collect_training_window(
+            db,
+            start_date=start,
+            end_date=end,
+            cfg=cfg,
+            label_source=label_source,
+            label_threshold_pct=label_threshold,
+            label_drawdown_threshold_pct=label_drawdown_threshold,
+            fresh=fresh,
+            on_progress=lambda d, i, n: typer.echo(
+                f"  [phase-1] {d}  ({i}/{n})"
+            ),
+        )
+        typer.echo(
+            f"  phase-1 done: n_signal_dates={len(ds.signal_dates)} "
+            f"n_samples={ds.n_samples} n_labeled={ds.n_labeled}"
+        )
+        plugin_version = _read_plugin_version()
+        try:
+            result = _trainer.train_lightgbm(
+                db,
+                dataset=ds,
+                cfg=cfg,
+                plugin_version=plugin_version,
+                activate=not no_activate,
+            )
+        except _trainer.LgbTrainError as exc:
+            typer.echo(f"✘ train aborted: {exc}")
+            raise typer.Exit(1) from None
+        if not keep_checkpoint:
+            ckpt.discard()
+        typer.echo(
+            "\n✓ trained model_id={mid}\n"
+            "  n_samples={ns}  n_positive={npos}\n"
+            "  CV AUC={auc:.4f} ± {auc_sd:.4f}  logloss={ll:.4f}\n"
+            "  booster: {bp}\n"
+            "  dataset: {dp}".format(
+                mid=result.model_id,
+                ns=result.n_samples,
+                npos=result.n_positive,
+                auc=result.cv_auc_mean,
+                auc_sd=result.cv_auc_std,
+                ll=result.cv_logloss_mean,
+                bp=result.booster_path,
+                dp=result.dataset_path,
+            )
+        )
+    finally:
+        db.close()
+
+
+@lgb_app.command("list")
+def cmd_lgb_list() -> None:
+    """List all registered models (★ = active)."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from .lgb import registry as _registry
+
+    db, _rt = _open_runtime()
+    try:
+        models = _registry.list_models(db)
+        if not models:
+            typer.echo("(no registered models — run `lgb train` first)")
+            return
+        tbl = Table(title="apw_lgb_models")
+        for c in ("active", "model_id", "label_source",
+                  "train_window", "n_samples", "n_positive", "AUC", "created"):
+            tbl.add_column(c, overflow="fold")
+        for m in models:
+            tbl.add_row(
+                "★" if m.is_active else "",
+                m.model_id,
+                m.label_source,
+                f"{m.train_start_date}..{m.train_end_date}",
+                str(m.n_samples),
+                str(m.n_positive),
+                "—" if m.cv_auc_mean is None else f"{m.cv_auc_mean:.4f}",
+                "" if m.created_at is None else str(m.created_at)[:19],
+            )
+        Console().print(tbl)
+    finally:
+        db.close()
+
+
+@lgb_app.command("info")
+def cmd_lgb_info(
+    model_id: Optional[str] = typer.Option(
+        None, "--model-id",
+        help="目标模型 id；省略读 active model",
+    ),
+) -> None:
+    """Print one model's full metadata + recent usage stats."""
+    from .lgb import registry as _registry
+
+    db, _rt = _open_runtime()
+    try:
+        m = (
+            _registry.get_model(db, model_id) if model_id
+            else _registry.get_active(db)
+        )
+        if m is None:
+            typer.echo(
+                f"✘ model not found: {'(no active model)' if not model_id else model_id}"
+            )
+            raise typer.Exit(1)
+        typer.echo(f"model_id          {m.model_id}")
+        typer.echo(f"active            {m.is_active}")
+        typer.echo(f"schema_version    {m.schema_version}")
+        typer.echo(f"label_source      {m.label_source}")
+        typer.echo(
+            f"label_threshold   "
+            f"{'—' if m.label_threshold_pct is None else m.label_threshold_pct}"
+        )
+        typer.echo(f"train_window      {m.train_start_date}..{m.train_end_date}")
+        typer.echo(f"n_samples         {m.n_samples}")
+        typer.echo(f"n_positive        {m.n_positive}")
+        typer.echo(
+            f"CV AUC            "
+            f"{'—' if m.cv_auc_mean is None else f'{m.cv_auc_mean:.4f} ± {m.cv_auc_std:.4f}'}"
+        )
+        typer.echo(
+            f"CV logloss        "
+            f"{'—' if m.cv_logloss_mean is None else f'{m.cv_logloss_mean:.4f}'}"
+        )
+        typer.echo(f"feature_count     {m.feature_count}")
+        typer.echo(f"framework_version {m.framework_version}")
+        typer.echo(f"plugin_version    {m.plugin_version}")
+        typer.echo(f"git_commit        {m.git_commit}")
+        typer.echo(f"file_path         {m.file_path}")
+        typer.echo(f"created_at        {m.created_at}")
+    finally:
+        db.close()
+
+
+@lgb_app.command("activate")
+def cmd_lgb_activate(model_id: str = typer.Argument(...)) -> None:
+    """Switch the active model atomically."""
+    from .lgb import registry as _registry
+
+    db, _rt = _open_runtime()
+    try:
+        if not _registry.set_active(db, model_id):
+            typer.echo(f"✘ model not found: {model_id!r}")
+            raise typer.Exit(1)
+        typer.echo(f"✓ activated {model_id}")
+    finally:
+        db.close()
+
+
+@lgb_app.command("prune")
+def cmd_lgb_prune(
+    keep: int = typer.Option(
+        5, "--keep",
+        help="保留多少条非 active 的模型行（active 永远保留）",
+    ),
+) -> None:
+    """Delete old non-active models + their booster / dataset files."""
+    from .lgb import cleanup as _cleanup
+
+    db, _rt = _open_runtime()
+    try:
+        rep = _cleanup.prune_models(db, keep=keep)
+        typer.echo(
+            f"✓ kept {len(rep.kept)}  deleted {len(rep.deleted)}  "
+            f"missing_files {len(rep.missing_files)}"
+        )
+        for mid in rep.kept:
+            typer.echo(f"  kept     {mid}")
+        for mid in rep.deleted:
+            typer.echo(f"  deleted  {mid}")
+        for fp in rep.missing_files:
+            typer.echo(f"  missing  {fp}")
+    finally:
+        db.close()
+
+
+@lgb_app.command("purge")
+def cmd_lgb_purge(
+    datasets: bool = typer.Option(False, "--datasets"),
+    models: bool = typer.Option(False, "--models"),
+    predictions: bool = typer.Option(False, "--predictions"),
+    checkpoints: bool = typer.Option(False, "--checkpoints"),
+    all_scopes: bool = typer.Option(False, "--all"),
+    yes: bool = typer.Option(False, "--yes", help="跳过确认提示"),
+) -> None:
+    """Wholesale clear of LGB artefacts by scope (DESTRUCTIVE)."""
+    from .lgb import cleanup as _cleanup
+
+    if all_scopes:
+        datasets = models = predictions = checkpoints = True
+    if not any((datasets, models, predictions, checkpoints)):
+        typer.echo(
+            "✘ pick at least one scope: --datasets / --models / "
+            "--predictions / --checkpoints / --all"
+        )
+        raise typer.Exit(2)
+    if not yes:
+        scopes = [n for n, v in (
+            ("datasets", datasets), ("models", models),
+            ("predictions", predictions), ("checkpoints", checkpoints),
+        ) if v]
+        typer.echo(
+            f"⚠ this will DESTRUCTIVELY purge: {', '.join(scopes)}\n"
+            "  re-run with --yes to confirm."
+        )
+        raise typer.Exit(2)
+
+    db, _rt = _open_runtime()
+    try:
+        reports = _cleanup.purge(
+            db,
+            datasets=datasets,
+            models=models,
+            predictions=predictions,
+            checkpoints=checkpoints,
+        )
+        for r in reports:
+            typer.echo(
+                f"  {r.scope:12s} files_removed={r.files_removed}  "
+                f"rows_removed={r.rows_removed}"
+            )
+        typer.echo("✓ purge complete")
+    finally:
+        db.close()
+
+
+def _read_plugin_version() -> str:
+    """Read the version from the bundled deeptrade_plugin.yaml.
+
+    Lightweight YAML parse (looking for the leading ``version:`` line) so we
+    don't have to add a runtime PyYAML dependency just for this audit field.
+    """
+    from pathlib import Path
+
+    yaml_path = (
+        Path(__file__).resolve().parent.parent / "deeptrade_plugin.yaml"
+    )
+    try:
+        for line in yaml_path.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("version:"):
+                return line.split(":", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return "unknown"
 
 
 def main(argv: list[str]) -> int:
