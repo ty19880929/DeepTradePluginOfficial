@@ -73,3 +73,34 @@ class TestRichDashboardSmoke:
         )
         r.on_event(ev)
         assert r.funnel_payload.get("n_after_launch_ready") == 10
+
+    def test_result_summary_appears_after_step5_payload(self):
+        from rich.console import Console
+        from deeptrade.plugins_api.events import EventLevel, EventType, StrategyEvent
+
+        r = RichDashboardRenderer(mode="run", console=Console(record=True))
+        r._header = "header"
+        ev = StrategyEvent(
+            type=EventType.STEP_FINISHED,
+            level=EventLevel.INFO,
+            message="Step 5: 写入结果完成，写入 1 条",
+            payload={
+                "step": 5,
+                "result_summary": [
+                    {
+                        "rank": 1,
+                        "ts_code": "600000.SH",
+                        "name": "测试股",
+                        "current_price": 12.34,
+                        "launch_score": 88.8,
+                        "prediction": "launch_ready",
+                        "confidence": "high",
+                    }
+                ],
+            },
+        )
+        r.on_event(ev)
+
+        assert r.result_summary_rows[0]["current_price"] == 12.34
+        out = r._render()
+        assert hasattr(out, "__rich_console__") or hasattr(out, "__rich__") or hasattr(out, "renderables")

@@ -15,7 +15,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
-from accumulation_probe_washout.runner import AnalyzeParams, ApwRunner
+from accumulation_probe_washout.runner import AnalyzeParams, ApwRunner, RunParams
 from accumulation_probe_washout.runtime import ApwRuntime
 from accumulation_probe_washout.ui.protocol import NullRenderer
 
@@ -37,13 +37,14 @@ def fresh_db(tmp_path):
 
 def _seed_watchlist(db, codes):
     now = datetime.now()
-    for code in codes:
+    for i, code in enumerate(codes, start=1):
         cand = {
             "candidate_id": f"20260515_{code}",
             "ts_code": code,
             "name": f"测试股{code[:6]}",
             "trade_date": "20260515",
             "phase": "launch_ready",
+            "close": 10.0 + i,
             "accumulation_score": 70.0,
             "probe_quality_score": 80.0,
             "washout_score": 75.0,
@@ -172,3 +173,64 @@ def test_analyze_persists_stage_results(fresh_db):
         "SELECT ts_code, latest_prediction FROM apw_watchlist ORDER BY ts_code"
     )
     assert {r[1] for r in wl} == {"launch_ready"}
+
+    step5_events = fresh_db.fetchall(
+        """
+        SELECT event_type, message, payload_json
+        FROM apw_events
+        WHERE run_id = ?
+          AND event_type IN ('step.started', 'step.finished')
+          AND payload_json LIKE '%"step": 5%'
+        ORDER BY seq
+        """,
+        [outcome.run_id],
+    )
+    assert [r[0] for r in step5_events] == ["step.started", "step.finished"]
+    assert "写入 3 条" in step5_events[-1][1]
+    payload = json.loads(step5_events[-1][2])
+    assert payload["result_summary"][0] == {
+        "rank": 1,
+        "ts_code": "600000.SH",
+        "name": "name_600000.SH",
+        "current_price": 11.0,
+        "launch_score": 75.0,
+        "prediction": "launch_ready",
+        "confidence": "medium",
+    }
+
+
+def test_run_substage_analyze_emits_step5_events(fresh_db):
+    codes = ["600000.SH", "600001.SH"]
+    _seed_watchlist(fresh_db, codes)
+
+    rt = ApwRuntime(
+        db=fresh_db,
+        config=_FakeConfig(),
+        llms=_FakeLLMManager(),  # type: ignore[arg-type]
+        tushare=_FakeTushare(),
+    )
+    runner = ApwRunner(rt, renderer=NullRenderer())
+    run_id = runner._start_run("run", "20260515", RunParams(trade_date="20260515"))
+    outcome = runner.execute_analyze(
+        AnalyzeParams(trade_date="20260515"),
+        _owns_run=False,
+    )
+
+    assert outcome.run_id == run_id
+    assert outcome.status.value in {"success", "partial_failed"}, outcome.error
+
+    step5_events = fresh_db.fetchall(
+        """
+        SELECT event_type, message, payload_json
+        FROM apw_events
+        WHERE run_id = ?
+          AND event_type IN ('step.started', 'step.finished')
+          AND payload_json LIKE '%"step": 5%'
+        ORDER BY seq
+        """,
+        [run_id],
+    )
+    assert [r[0] for r in step5_events] == ["step.started", "step.finished"]
+    assert "写入 2 条" in step5_events[-1][1]
+    payload = json.loads(step5_events[-1][2])
+    assert [row["current_price"] for row in payload["result_summary"]] == [11.0, 12.0]

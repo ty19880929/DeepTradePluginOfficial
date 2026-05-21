@@ -17,6 +17,7 @@ from .layout import (
     render_funnel,
     render_header,
     render_log,
+    render_result_summary,
     render_stage_stack,
 )
 from .stage_model import StageStack
@@ -34,6 +35,8 @@ class RichDashboardRenderer:
         self.console = console or Console()
         self.stack = StageStack.for_mode(mode)
         self.funnel_payload: dict[str, Any] = {}
+        self.result_summary_rows: list[dict[str, Any]] = []
+        self.result_summary_total: int | None = None
         self.log_lines: list[str] = []
         self._header = render_header(mode, "—", "—")
         self._live: Live | None = None
@@ -65,6 +68,14 @@ class RichDashboardRenderer:
         if ev.type.value == "step.finished" and (ev.payload or {}).get("step") == 1:
             # screen funnel detail comes from Step 1 too
             self.funnel_payload.update(ev.payload or {})
+        if ev.type.value == "step.finished" and (ev.payload or {}).get("step") == 5:
+            rows = (ev.payload or {}).get("result_summary")
+            if isinstance(rows, list):
+                self.result_summary_rows = [
+                    row for row in rows if isinstance(row, dict)
+                ]
+                total = (ev.payload or {}).get("result_summary_total")
+                self.result_summary_total = total if isinstance(total, int) else None
         # Log line
         line = f"[{ev.type.value}] {ev.message}"
         self.log_lines.append(line)
@@ -91,5 +102,12 @@ class RichDashboardRenderer:
         parts: list = [self._header, render_stage_stack(self.stack)]
         if self.mode in ("screen", "run") and self.funnel_payload:
             parts.append(render_funnel(self.funnel_payload))
+        if self.result_summary_rows:
+            parts.append(
+                render_result_summary(
+                    self.result_summary_rows,
+                    total=self.result_summary_total,
+                )
+            )
         parts.append(render_log(self.log_lines))
         return Group(*parts)

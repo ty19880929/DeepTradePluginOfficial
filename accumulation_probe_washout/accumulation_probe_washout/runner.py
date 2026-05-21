@@ -1509,6 +1509,18 @@ class ApwRunner:
             assert terminal_result is not None  # generator always yields terminal
 
             # ---- persist
+            result_summary = _build_result_summary_rows(
+                terminal_result.predictions,
+                candidates,
+            )
+            self._emit(
+                EventType.STEP_STARTED,
+                "Step 5: 写入结果",
+                payload={
+                    "step": 5,
+                    "n_predictions": terminal_result.candidates_out,
+                },
+            )
             n_persisted = 0
             for cand in terminal_result.predictions:
                 self._upsert_stage_result(cand, run_id=run_id, trade_date=T)
@@ -1531,6 +1543,18 @@ class ApwRunner:
                         cand.ts_code,
                     ],
                 )
+            self._emit(
+                EventType.STEP_FINISHED,
+                f"Step 5: 写入结果完成，写入 {n_persisted} 条",
+                payload={
+                    "step": 5,
+                    "n_predictions": n_persisted,
+                    "n_failed_batches": terminal_result.failed_batches,
+                    "result_summary": result_summary,
+                    "result_summary_total": len(terminal_result.predictions),
+                    "result_summary_displayed": len(result_summary),
+                },
+            )
 
             summary = {
                 "n_candidates": len(candidates),
@@ -1704,6 +1728,39 @@ def _f(v: Any) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _build_result_summary_rows(
+    predictions: list[Any],
+    input_candidates: list[dict[str, Any]],
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    by_candidate_id = {
+        str(c.get("candidate_id")): c
+        for c in input_candidates
+        if c.get("candidate_id") is not None
+    }
+    by_code = {
+        str(c.get("ts_code")): c
+        for c in input_candidates
+        if c.get("ts_code") is not None
+    }
+    rows: list[dict[str, Any]] = []
+    for pred in sorted(predictions, key=lambda p: int(getattr(p, "rank", 0) or 0)):
+        src = by_candidate_id.get(str(pred.candidate_id)) or by_code.get(str(pred.ts_code)) or {}
+        rows.append(
+            {
+                "rank": int(pred.rank),
+                "ts_code": pred.ts_code,
+                "name": pred.name,
+                "current_price": _f(src.get("close")),
+                "launch_score": float(pred.launch_score),
+                "prediction": pred.prediction,
+                "confidence": pred.confidence,
+            }
+        )
+    return rows[:limit]
 
 
 def _dc_to_dict(obj: Any) -> dict[str, Any]:

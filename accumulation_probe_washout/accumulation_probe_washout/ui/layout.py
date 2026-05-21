@@ -27,6 +27,18 @@ _STATE_STYLE = {
     "done": "green",
     "failed": "red",
 }
+_PREDICTION_LABELS = {
+    "launch_ready": "启动就绪",
+    "watch_breakout": "观察突破",
+    "still_washing": "仍在洗盘",
+    "probe_failed": "试盘失败",
+    "avoid": "回避",
+}
+_CONFIDENCE_LABELS = {
+    "high": "高",
+    "medium": "中",
+    "low": "低",
+}
 
 
 def render_header(mode: str, trade_date: str, run_id: str) -> Panel:
@@ -85,6 +97,38 @@ def render_funnel(payload: dict[str, Any]) -> Panel:
     return Panel(tbl, title="筛选漏斗", border_style="green", padding=(0, 1))
 
 
+def render_result_summary(rows: list[dict[str, Any]], *, total: int | None = None) -> Panel:
+    tbl = Table(
+        show_header=True,
+        header_style="bold cyan",
+        box=None,
+        expand=True,
+        padding=(0, 1),
+    )
+    tbl.add_column("排名", justify="right", no_wrap=True)
+    tbl.add_column("代码", no_wrap=True)
+    tbl.add_column("名称", no_wrap=True)
+    tbl.add_column("当前价格", justify="right", no_wrap=True)
+    tbl.add_column("启动分", justify="right", no_wrap=True)
+    tbl.add_column("判断", no_wrap=True)
+    tbl.add_column("置信度", no_wrap=True)
+
+    for row in rows:
+        tbl.add_row(
+            _fmt_int(row.get("rank")),
+            str(row.get("ts_code") or ""),
+            str(row.get("name") or ""),
+            _fmt_float(row.get("current_price"), digits=2),
+            _fmt_float(row.get("launch_score"), digits=1),
+            _label(_PREDICTION_LABELS, row.get("prediction")),
+            _label(_CONFIDENCE_LABELS, row.get("confidence")),
+        )
+    title = "结果摘要"
+    if total is not None and total != len(rows):
+        title = f"结果摘要（前 {len(rows)} / 共 {total}）"
+    return Panel(tbl, title=title, border_style="magenta", padding=(0, 1))
+
+
 def render_log(lines: list[str], *, max_lines: int = 12) -> Panel:
     tail = lines[-max_lines:]
     tbl = Table.grid(padding=(0, 1))
@@ -92,3 +136,26 @@ def render_log(lines: list[str], *, max_lines: int = 12) -> Panel:
     for line in tail:
         tbl.add_row(Text(line, style="dim"))
     return Panel(tbl, title="日志", border_style="grey50", padding=(0, 1))
+
+
+def _fmt_float(value: Any, *, digits: int) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_int(value: Any) -> str:
+    if value is None:
+        return "—"
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _label(labels: dict[str, str], value: Any) -> str:
+    raw = str(value or "")
+    return labels.get(raw, raw)
