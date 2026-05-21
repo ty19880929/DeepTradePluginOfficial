@@ -90,6 +90,19 @@ def _ids(items: Iterable[Any]) -> set[str]:
     return {(c["candidate_id"] if isinstance(c, dict) else c.candidate_id) for c in items}
 
 
+_STRUCTURAL_REMINDER = (
+    "结构提醒（必读）：\n"
+    "顶层只允许 8 个键：stage, trade_date, next_trade_date, batch_no, batch_total, "
+    "market_context_summary, risk_disclaimer, candidates。\n"
+    "顶层禁止出现 rationale 或其他任何额外键。\n"
+    "candidates[] 每个元素必须恰好包含 16 个键：\n"
+    "  candidate_id, ts_code, name, rank, launch_score, confidence, prediction, "
+    "main_pattern, phase, dimension_scores, rationale, key_evidence, "
+    "next_session_watch, invalidation_triggers, risk_flags, missing_data。\n"
+    "其中 rationale 是 candidate 内部字段，不是顶层字段。"
+)
+
+
 def _repair_hint(*, missing: list[str], extra: list[str], evidence_err: str | None) -> str:
     parts = ["\n\n⚠ 上一次响应存在错误，请严格按照原 candidate_id 列表与字段白名单重新输出。"]
     if missing:
@@ -97,8 +110,9 @@ def _repair_hint(*, missing: list[str], extra: list[str], evidence_err: str | No
     if extra:
         parts.append(f"extra (你不能包含): {extra}")
     if evidence_err:
-        parts.append(f"key_evidence.field 错误: {evidence_err}")
+        parts.append(f"校验错误: {evidence_err}")
     parts.append("不可遗漏、不可新增、不可改名；key_evidence.field 必须出自输入字段。")
+    parts.append(_STRUCTURAL_REMINDER)
     return "\n".join(parts)
 
 

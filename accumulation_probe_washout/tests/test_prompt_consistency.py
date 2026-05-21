@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from accumulation_probe_washout.data import pack_candidate
 from accumulation_probe_washout.prompts import APW_SYSTEM, apw_user_prompt
-from accumulation_probe_washout.schemas import APWPhase, INPUT_FIELD_WHITELIST
+from accumulation_probe_washout.schemas import (
+    APWPhase,
+    APWTrendCandidate,
+    INPUT_FIELD_WHITELIST,
+)
 
 
 def test_system_prompt_mentions_forbidden_behaviors() -> None:
@@ -30,6 +34,34 @@ def test_system_prompt_mentions_forbidden_behaviors() -> None:
         "high_level_distribution",
     ):
         assert enum_val in APW_SYSTEM
+
+
+def test_system_prompt_lists_every_candidate_field() -> None:
+    """Every required candidate field in the schema must be named in APW_SYSTEM.
+
+    Regression for the v0.7.4 bug where the prompt's candidates[] spec
+    omitted confidence / prediction / main_pattern / phase / rationale,
+    causing Pydantic validation to reject every batch in production runs.
+    """
+    leaked = sorted(
+        name for name in APWTrendCandidate.model_fields if name not in APW_SYSTEM
+    )
+    assert not leaked, (
+        f"APW_SYSTEM is missing required candidate field name(s): {leaked}. "
+        f"Prompt has drifted from APWTrendCandidate schema."
+    )
+
+
+def test_system_prompt_does_not_place_rationale_at_top_level() -> None:
+    """rationale lives inside candidates[]; top-level rationale is rejected by
+    APWTrendResponse(extra='forbid'). The historical bug placed rationale as a
+    sibling of candidates[], so models faithfully returned it at the top.
+    """
+    # No bullet/key naming rationale at the top level of the spec.
+    assert "\n- rationale" not in APW_SYSTEM
+    assert "\n* rationale" not in APW_SYSTEM
+    # And the explicit "顶层" guidance must call this out.
+    assert "顶层禁止出现 rationale" in APW_SYSTEM or "rationale 是" in APW_SYSTEM
 
 
 def test_user_prompt_contains_batch_metadata() -> None:

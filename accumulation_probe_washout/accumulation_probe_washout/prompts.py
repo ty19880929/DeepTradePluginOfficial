@@ -46,19 +46,77 @@ APW_SYSTEM = """\
 - high_level_distribution: 高位放量出货
 - unclear: 形态不清晰
 
-【输出 JSON 必须包含】
-- stage: "accumulation_probe_washout_analysis"
-- trade_date / next_trade_date / batch_no / batch_total / market_context_summary / risk_disclaimer
-- candidates[]: 每只输入候选股各一条，rank 为本 batch 内 1..N 的连续整数
-  * candidate_id 必须原样返回
-  * launch_score: 0–100 排序分（不是投资建议）
-  * dimension_scores: 6 维度评分（accumulation/probe/washout/launch_timing/capital_confirmation/risk）
-  * key_evidence: 1–6 条，field 必须出现在输入字段中，value/unit/interpretation 三件套
-  * next_session_watch: 1–5 条次日观察点
-  * invalidation_triggers: 1–5 条该判断失效的具体条件
-  * risk_flags: 0–6 条本地未识别的风险标签
-  * missing_data: 输入中已为 null / 不可用的字段列表
-- rationale: ≤220 字，简明列出 evidence 与判断逻辑
+【输出 JSON 顶层结构（严格）】
+顶层只允许出现以下 8 个键，多一个少一个都会被拒绝：
+  stage, trade_date, next_trade_date, batch_no, batch_total,
+  market_context_summary, risk_disclaimer, candidates
+- stage: 字符串常量 "accumulation_probe_washout_analysis"
+- trade_date / next_trade_date: "YYYYMMDD"
+- batch_no / batch_total: 正整数，原样回填
+- market_context_summary: ≤220 字，全市场宏观环境简述
+- risk_disclaimer: ≤180 字，风险免责声明
+- candidates: 数组，每只输入候选股各一条，长度与输入一致
+特别注意：rationale 是【每个 candidate 内部】的字段，绝对不能出现在顶层。
+
+【candidates[] 每个元素必须包含的 16 个键（严格，缺一不可，不允许新增其他键）】
+1. candidate_id  — 字符串，原样回填，不得改写
+2. ts_code        — 字符串，原样回填
+3. name           — 字符串，原样回填
+4. rank           — 整数，本 batch 内 1..N 的连续整数（不可重复、不可跳号）
+5. launch_score   — 0–100 浮点排序分（不是投资建议）
+6. confidence     — 枚举：high / medium / low
+7. prediction     — 枚举：launch_ready / watch_breakout / still_washing / probe_failed / avoid
+8. main_pattern   — 枚举：probe_washout_breakout / low_base_accumulation /
+                   second_probe_after_washout / failed_probe /
+                   high_level_distribution / unclear
+9. phase          — 枚举：accumulating / probe_seen / washing_after_probe /
+                   launch_ready / unclear
+10. dimension_scores — 对象，恰好 6 个 0–100 整数键：
+                   accumulation, probe, washout, launch_timing,
+                   capital_confirmation, risk（risk 反极性：越高越差）
+11. rationale     — 字符串 ≤220 字，简明列出本候选的 evidence 与判断逻辑
+12. key_evidence  — 1–6 条数组；每条对象恰好 4 键：
+                   field（必须出自输入字段白名单）, value, unit, interpretation
+13. next_session_watch    — 1–5 条字符串数组，次日观察点
+14. invalidation_triggers — 1–5 条字符串数组，该判断失效的具体条件
+15. risk_flags    — 0–6 条字符串数组，本地未识别的风险标签
+16. missing_data  — 字符串数组，输入中为 null / 不可用的字段名
+
+【输出 JSON 骨架（务必逐键对照，照抄结构，仅填入真实判断）】
+{
+  "stage": "accumulation_probe_washout_analysis",
+  "trade_date": "YYYYMMDD",
+  "next_trade_date": "YYYYMMDD",
+  "batch_no": 1,
+  "batch_total": 1,
+  "market_context_summary": "……",
+  "risk_disclaimer": "……",
+  "candidates": [
+    {
+      "candidate_id": "<原样回填>",
+      "ts_code": "<原样回填>",
+      "name": "<原样回填>",
+      "rank": 1,
+      "launch_score": 0,
+      "confidence": "medium",
+      "prediction": "watch_breakout",
+      "main_pattern": "probe_washout_breakout",
+      "phase": "washing_after_probe",
+      "dimension_scores": {
+        "accumulation": 0, "probe": 0, "washout": 0,
+        "launch_timing": 0, "capital_confirmation": 0, "risk": 0
+      },
+      "rationale": "≤220 字的本候选判断逻辑",
+      "key_evidence": [
+        {"field": "<输入字段名>", "value": 0, "unit": "亿元", "interpretation": "……"}
+      ],
+      "next_session_watch": ["……"],
+      "invalidation_triggers": ["……"],
+      "risk_flags": [],
+      "missing_data": []
+    }
+  ]
+}
 
 【数值单位约定】
 - *_yi 字段单位为"亿元"；
