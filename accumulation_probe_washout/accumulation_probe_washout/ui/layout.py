@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich import box
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -101,7 +102,7 @@ def render_result_summary(rows: list[dict[str, Any]], *, total: int | None = Non
     tbl = Table(
         show_header=True,
         header_style="bold cyan",
-        box=None,
+        box=box.SIMPLE,
         expand=True,
         padding=(0, 1),
     )
@@ -112,6 +113,7 @@ def render_result_summary(rows: list[dict[str, Any]], *, total: int | None = Non
     tbl.add_column("启动分", justify="right", no_wrap=True)
     tbl.add_column("判断", no_wrap=True)
     tbl.add_column("置信度", no_wrap=True)
+    tbl.add_column("LLM意见", ratio=2)
 
     for row in rows:
         tbl.add_row(
@@ -122,6 +124,7 @@ def render_result_summary(rows: list[dict[str, Any]], *, total: int | None = Non
             _fmt_float(row.get("launch_score"), digits=1),
             _label(_PREDICTION_LABELS, row.get("prediction")),
             _label(_CONFIDENCE_LABELS, row.get("confidence")),
+            str(row.get("llm_opinion") or ""),
         )
     title = "结果摘要"
     if total is not None and total != len(rows):

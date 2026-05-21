@@ -10,6 +10,7 @@ import pytest
 from accumulation_probe_washout.ui import choose_renderer
 from accumulation_probe_washout.ui.dashboard import RichDashboardRenderer
 from accumulation_probe_washout.ui.legacy import LegacyStreamRenderer
+from accumulation_probe_washout.ui.layout import render_result_summary
 
 
 class TestChooseRenderer:
@@ -95,6 +96,7 @@ class TestRichDashboardSmoke:
                         "launch_score": 88.8,
                         "prediction": "launch_ready",
                         "confidence": "high",
+                        "llm_opinion": "结构完整，等待放量突破。",
                     }
                 ],
             },
@@ -102,5 +104,28 @@ class TestRichDashboardSmoke:
         r.on_event(ev)
 
         assert r.result_summary_rows[0]["current_price"] == 12.34
+        assert r.result_summary_rows[0]["llm_opinion"] == "结构完整，等待放量突破。"
         out = r._render()
         assert hasattr(out, "__rich_console__") or hasattr(out, "__rich__") or hasattr(out, "renderables")
+
+    def test_result_summary_uses_table_with_llm_opinion_column(self):
+        from rich.console import Console
+
+        console = Console(record=True, width=120)
+        console.print(render_result_summary([
+            {
+                "rank": 1,
+                "ts_code": "600000.SH",
+                "name": "测试股",
+                "current_price": 12.34,
+                "launch_score": 88.8,
+                "prediction": "launch_ready",
+                "confidence": "high",
+                "llm_opinion": "结构完整，等待放量突破。",
+            }
+        ]))
+
+        text = console.export_text()
+        assert "LLM意见" in text
+        assert "结构完整，等待放量突破。" in text
+        assert "当前价格" in text

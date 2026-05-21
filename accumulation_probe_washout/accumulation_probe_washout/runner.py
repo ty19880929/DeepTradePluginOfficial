@@ -1832,6 +1832,7 @@ def _build_result_summary_rows(
                 "launch_score": float(pred.launch_score),
                 "prediction": pred.prediction,
                 "confidence": pred.confidence,
+                "llm_opinion": pred.rationale,
             }
         )
     return rows[:limit]

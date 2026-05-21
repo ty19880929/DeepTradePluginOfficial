@@ -196,6 +196,7 @@ def test_analyze_persists_stage_results(fresh_db):
         "launch_score": 75.0,
         "prediction": "launch_ready",
         "confidence": "medium",
+        "llm_opinion": "结构完整",
     }
 
 
