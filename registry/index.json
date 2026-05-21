@@ -19,7 +19,7 @@
       "subdir": "accumulation_probe_washout",
       "tag_prefix": "accumulation-probe-washout/",
       "min_framework_version": "0.4.2",
-      "latest_version": "accumulation-probe-washout/v0.7.6"
+      "latest_version": "accumulation-probe-washout/v0.7.7"
     },
     "checkmate": {
       "name": "Checkmate 趋势跟踪策略",
