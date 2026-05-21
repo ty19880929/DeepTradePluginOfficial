@@ -29,6 +29,7 @@ from .runner import (
     ApwRunner,
     BackfillHistoryParams,
     EvaluateParams,
+    PreconditionError,
     PruneParams,
     RunParams,
     ScreenParams,
@@ -65,6 +66,23 @@ def _open_runtime() -> tuple[Database, ApwRuntime]:
     cfg = ConfigService(db)
     rt = ApwRuntime(db=db, config=cfg, llms=LLMManager(db, cfg))
     return db, rt
+
+
+def _normalize_llm_option(raw: Optional[str]) -> Optional[str]:
+    """Normalize the user-supplied ``--llm`` value.
+
+    Returns ``None`` when omitted (defer to framework default). A
+    non-empty string is stripped and returned verbatim. An all-whitespace
+    string is rejected so the user gets an immediate error instead of
+    silently falling back to the default.
+    """
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        typer.echo("✘ --llm 解析后为空")
+        raise typer.Exit(2)
+    return stripped
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +201,11 @@ def cmd_analyze(
     max_candidates: Optional[int] = typer.Option(None, "--max-candidates"),
     llm_provider: Optional[str] = typer.Option(
         None, "--llm",
-        help="LLM provider 名（覆盖框架默认；未配置则 PreconditionError 不写 run 行）",
+        help=(
+            "本次 run 使用的 LLM provider 名称（如 'deepseek'、'kimi'），"
+            "覆盖框架默认值。未配置或缺 api_key 的 provider 会以 ✘ 提前退出，"
+            "不会写入 apw_runs 行。"
+        ),
     ),
     prediction_filter: Optional[str] = typer.Option(
         None, "--prediction",
@@ -198,6 +220,7 @@ def cmd_analyze(
     """Read apw_watchlist → LLM → apw_stage_results."""
     from .ui import choose_renderer
 
+    llm_provider = _normalize_llm_option(llm_provider)
     db, rt = _open_runtime()
     try:
         params = AnalyzeParams(
@@ -226,7 +249,14 @@ def cmd_run(
     trade_date: Optional[str] = typer.Option(None, "--date", help="YYYYMMDD"),
     max_candidates: Optional[int] = typer.Option(None, "--max-candidates"),
     force_sync: bool = typer.Option(False, "--force-sync"),
-    llm_provider: Optional[str] = typer.Option(None, "--llm"),
+    llm_provider: Optional[str] = typer.Option(
+        None, "--llm",
+        help=(
+            "本次 run 使用的 LLM provider 名称（如 'deepseek'、'kimi'），"
+            "覆盖框架默认值。未配置或缺 api_key 的 provider 会以 ✘ 提前退出，"
+            "不会写入 apw_runs 行。"
+        ),
+    ),
     no_lgb: bool = typer.Option(
         False, "--no-lgb",
         help="本次 run 跳过 LGB 评分（持久化默认看 apw_config.lgb_enabled）。",
@@ -236,6 +266,7 @@ def cmd_run(
     """One-shot screen → analyze (用户最常用入口)."""
     from .ui import choose_renderer
 
+    llm_provider = _normalize_llm_option(llm_provider)
     db, rt = _open_runtime()
     try:
         params = RunParams(
@@ -943,6 +974,11 @@ def main(argv: list[str]) -> int:
     except KeyboardInterrupt:
         sys.stderr.write("\n⏹ 用户手动中断，已停止当前策略执行。\n")
         return 130
+    except PreconditionError as e:
+        # User-config error (e.g. --llm 指定了未配置的 provider). Surface as
+        # ``✘ {message}`` exit 2 — no traceback, no run row was persisted.
+        sys.stderr.write(f"✘ {e}\n")
+        return 2
     if isinstance(rc, int):
         return rc
     return 0

@@ -66,6 +66,20 @@ def build_tushare_client(rt: ApwRuntime, *, event_cb: Any = None):
     )
 
 
+def pick_llm_provider(rt: ApwRuntime, override: str | None = None) -> str | None:
+    """Pick which configured LLM provider to use for this run.
+
+    ``override`` — CLI ``--llm`` value when the user pinned a provider for
+    this run; takes precedence and is returned verbatim. When ``None``,
+    defers the choice to the framework default
+    (``LLMProviderConfig.is_default`` resolved by ``LLMManager.get_client``).
+    The plugin keeps this hook so a future revision can reintroduce a
+    plugin-specific persisted default (e.g. ``apw.default_llm``) without
+    touching the runner.
+    """
+    return override
+
+
 def open_worker_runtime(parent_rt: ApwRuntime, llm_provider: str | None = None) -> ApwRuntime:
     """Build a per-worker runtime for debate-mode (v0.2).
 

@@ -56,7 +56,7 @@ from .data import (
     pack_candidate,
     resolve_trade_date,
 )
-from .runtime import ApwRuntime, build_tushare_client
+from .runtime import ApwRuntime, build_tushare_client, pick_llm_provider
 from .schemas import APWPhase
 from .ui.protocol import EventRenderer, NullRenderer
 
@@ -145,6 +145,22 @@ class RunOutcome:
     status: RunStatus
     error: str | None = None
     summary: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class PreconditionError(RuntimeError):
+    """Run cannot start because user-facing preconditions are not met
+    (e.g. ``--llm`` named a provider that is not configured).
+
+    Plugin-internal contract: raise BEFORE ``_start_run`` so no run row is
+    persisted. ``cli.main`` renders these as ``✘ {message}`` without a
+    traceback or type prefix — they are user-config errors, not runtime
+    crashes.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +331,47 @@ class ApwRunner:
                     signal.signal(signal.SIGINT, prev)
                 except (ValueError, OSError):
                     pass
+
+    def _validate_single_provider(self, override: str | None) -> str | None:
+        """Resolve & validate the ``--llm`` override.
+
+        Returns the provider name to pass to ``LLMManager.get_client`` —
+        either the user's override (when ``--llm`` named a configured
+        provider) or ``None`` (defer to framework default).
+
+        Raises:
+            PreconditionError: when ``--llm`` named a provider that is not
+                in ``LLMManager.list_providers()`` (i.e. not configured or
+                missing api_key). Surface BEFORE ``_start_run`` so no run
+                row is persisted; ``cli.main`` renders as ``✘ {message}``.
+        """
+        resolved = pick_llm_provider(self.rt, override)
+        if resolved is None:
+            return None
+        try:
+            available = self.rt.llms.list_providers()
+        except Exception:  # noqa: BLE001 — degraded LLMManager → defer to caller
+            available = []
+        if resolved not in available:
+            raise PreconditionError(
+                f"--llm 指定的 provider {resolved!r} 未配置或缺 api_key; "
+                f"当前可用: {available}。"
+                "请运行 `deeptrade config set-llm` 配置后重试。"
+            )
+        return resolved
+
+    def _emit_llm_provider_log(self, provider: str | None) -> None:
+        """Emit the audit LOG event announcing the resolved provider.
+
+        Mirrors limit-up-board's first persisted event of the run. ``None``
+        means we deferred to the framework default; show that verbatim.
+        """
+        display = provider if provider is not None else "(framework default)"
+        self._emit(
+            EventType.LOG,
+            f"LLM provider = {display}",
+            payload={"llm_provider": provider},
+        )
 
     def _make_cancel_outcome(
         self, run_id: str, mode: str, _owns_run: bool
@@ -1230,7 +1287,12 @@ class ApwRunner:
             user_specified=params.trade_date,
         )
 
+        # Precondition check BEFORE _start_run so a bad --llm never persists a
+        # RUNNING/FAILED row. PreconditionError → cli.main → ✘ {msg}.
+        provider_name = self._validate_single_provider(params.llm_provider)
+
         run_id = self._start_run("run", T, params)
+        self._emit_llm_provider_log(provider_name)
 
         try:
             # Pin T into the sub-params so screen/analyze resolve to the same day.
@@ -1322,8 +1384,18 @@ class ApwRunner:
             user_specified=params.trade_date,
         )
 
+        # Precondition check BEFORE _start_run so a bad --llm never persists a
+        # RUNNING/FAILED row. When called from execute_run (_owns_run=False),
+        # the parent already validated and emitted the audit LOG; skip both
+        # to avoid duplicate noise.
+        if _owns_run:
+            provider_name = self._validate_single_provider(params.llm_provider)
+        else:
+            provider_name = params.llm_provider
+
         if _owns_run:
             run_id = self._start_run("analyze", T, params)
+            self._emit_llm_provider_log(provider_name)
         else:
             assert self.rt.run_id is not None, (
                 "_owns_run=False requires the caller to have started a run"
@@ -1475,9 +1547,11 @@ class ApwRunner:
                     summary={"n_candidates": 0, "n_predictions": 0},
                 )
 
-            # ---- pick LLM provider (None = framework default)
+            # ---- pick LLM provider (None = framework default).
+            # ``provider_name`` was resolved+validated above (or inherited
+            # from the parent run when ``_owns_run=False``).
             llm = self.rt.llms.get_client(
-                params.llm_provider,
+                provider_name,
                 plugin_id=self.rt.plugin_id,
                 run_id=run_id,
             )
