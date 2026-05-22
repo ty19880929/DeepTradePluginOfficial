@@ -1,14 +1,17 @@
 """``deeptrade limit-up-board winrate`` Typer 子应用。
 
-PR #2 — 仅 ``summary`` 子命令。PR #3 追加 ``export`` / ``purge``，
+PR #2 — ``summary``。
+PR #3 — ``export`` (JSON / CSV) + ``purge`` (--yes 二次确认)。
 PR #4 追加 ``llm-review``。
 """
 
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
@@ -254,6 +257,86 @@ def _unresolved_breakdown(resolved_list) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Shared pipeline: window → records → resolved → (summary, by_pred, by_rank)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Pipeline:
+    """Hold all derived state for one `summary` / `export` / `llm-review`
+    invocation. Reused so each subcommand shares one resolver pass."""
+
+    window: Window
+    resolved: list  # list[ResolvedRecord] — fwd-decl to avoid late import here
+    summary: object  # WinrateSummary
+    by_prediction: list  # list[GroupStat]
+    by_rank: list  # list[GroupStat]
+    unresolved_breakdown: dict[str, int]
+
+
+def _pre_validate_predictions(prediction: list[str]) -> list[str] | None:
+    if not prediction:
+        return None
+    unknown = [p for p in prediction if p not in VALID_PREDICTIONS]
+    if unknown:
+        typer.echo(
+            f"✘ --prediction 不识别: {', '.join(unknown)}；"
+            f"允许: {', '.join(sorted(VALID_PREDICTIONS))}"
+        )
+        raise typer.Exit(2)
+    return prediction
+
+
+def _build_pipeline(
+    db: Database,
+    rt,
+    *,
+    start: str | None,
+    end: str | None,
+    prediction: list[str],
+    force_sync: bool,
+) -> _Pipeline:
+    """Resolve window + records + outcomes + stats. Common path for summary,
+    export, llm-review."""
+    from .persistence import load_prediction_records  # noqa: PLC0415
+    from .resolver import resolve_records  # noqa: PLC0415
+    from .stats import group_by_prediction, group_by_rank_bucket, summarize  # noqa: PLC0415
+
+    pred_filter = _pre_validate_predictions(prediction)
+
+    try:
+        window = resolve_window(db, start, end)
+    except WinrateError as e:
+        typer.echo(f"✘ {e}")
+        raise typer.Exit(2) from e
+
+    records = load_prediction_records(
+        db, start=window.start, end=window.end, predictions=pred_filter,
+    )
+
+    tushare_client = None
+    if force_sync:
+        try:
+            from ..runtime import build_tushare_client  # noqa: PLC0415
+            tushare_client = build_tushare_client(rt)
+        except Exception as exc:  # noqa: BLE001 — degrade to local-only
+            typer.echo(f"warning: tushare 不可用，--force-sync 将退化为本地查询: {exc}")
+
+    resolved = resolve_records(
+        records, db=db, tushare=tushare_client, force_sync=force_sync,
+    )
+
+    return _Pipeline(
+        window=window,
+        resolved=resolved,
+        summary=summarize(resolved),
+        by_prediction=group_by_prediction(resolved),
+        by_rank=group_by_rank_bucket(resolved),
+        unresolved_breakdown=_unresolved_breakdown(resolved),
+    )
+
+
+# ---------------------------------------------------------------------------
 # `summary` subcommand
 # ---------------------------------------------------------------------------
 
@@ -275,67 +358,160 @@ def cmd_summary(
 
     不传 --start/--end 时默认仅分析 T-1 日；显式指定区间时最长 10 个交易日。
     """
-    # Late imports to keep `--help` snappy and isolate winrate deps.
     from ..cli import _open_runtime  # noqa: PLC0415
-    from .persistence import load_prediction_records  # noqa: PLC0415
-    from .resolver import resolve_records  # noqa: PLC0415
-    from .stats import group_by_prediction, group_by_rank_bucket, summarize  # noqa: PLC0415
-
-    # Pre-validate prediction filter values before opening DB.
-    pred_filter: list[str] | None = None
-    if prediction:
-        unknown = [p for p in prediction if p not in VALID_PREDICTIONS]
-        if unknown:
-            typer.echo(
-                f"✘ --prediction 不识别: {', '.join(unknown)}；"
-                f"允许: {', '.join(sorted(VALID_PREDICTIONS))}"
-            )
-            raise typer.Exit(2)
-        pred_filter = prediction
 
     db, rt = _open_runtime()
     try:
-        try:
-            window = resolve_window(db, start, end)
-        except WinrateError as e:
-            typer.echo(f"✘ {e}")
-            raise typer.Exit(2) from e
-
-        records = load_prediction_records(
-            db, start=window.start, end=window.end, predictions=pred_filter,
+        pipe = _build_pipeline(
+            db, rt, start=start, end=end, prediction=prediction, force_sync=force_sync,
         )
-
-        # Tushare client is constructed lazily — only when the user opted into
-        # network fallback. Avoids forcing a tushare token check on every
-        # `summary` invocation.
-        tushare_client = None
-        if force_sync:
-            try:
-                from ..runtime import build_tushare_client  # noqa: PLC0415
-                tushare_client = build_tushare_client(rt)
-            except Exception as exc:  # noqa: BLE001 — degrade to local-only
-                typer.echo(f"warning: tushare 不可用，--force-sync 将退化为本地查询: {exc}")
-
-        resolved = resolve_records(
-            records, db=db, tushare=tushare_client, force_sync=force_sync,
-        )
-
-        summary = summarize(resolved)
-        by_prediction_stats = group_by_prediction(resolved)
-        by_rank_stats = group_by_rank_bucket(resolved)
-        unresolved_brk = _unresolved_breakdown(resolved)
-
         console = Console()
         render_summary(
             console,
-            window=window,
-            summary=summary,
-            by_prediction=by_prediction_stats,
-            by_rank=by_rank_stats,
-            unresolved_breakdown=unresolved_brk,
+            window=pipe.window,
+            summary=pipe.summary,
+            by_prediction=pipe.by_prediction,
+            by_rank=pipe.by_rank,
+            unresolved_breakdown=pipe.unresolved_breakdown,
+        )
+        if pipe.summary.total == 0:
+            typer.echo("（窗口内无预测记录）")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# `export` subcommand
+# ---------------------------------------------------------------------------
+
+
+@winrate_app.command("export")
+def cmd_export(
+    output: str = typer.Option(..., "--output", help="输出文件路径"),
+    fmt: str | None = typer.Option(
+        None, "--format",
+        help="输出格式 json/csv；不指定时按 --output 扩展名推断（默认 json）",
+    ),
+    start: str | None = typer.Option(None, "--start", help="统计起始 T 日 YYYYMMDD"),
+    end: str | None = typer.Option(None, "--end", help="统计结束 T 日 YYYYMMDD"),
+    prediction: list[str] = typer.Option([], "--prediction"),
+    force_sync: bool = typer.Option(False, "--force-sync"),
+) -> None:
+    """终端输出摘要，并把逐股明细写入文件（JSON / CSV）。
+
+    与 ``summary`` 共用 window 解析与 T+1 行情回退逻辑；终端摘要总是会打印，
+    文件写入失败也不影响摘要展示，但会以非零退出码退出。
+    """
+    from ..cli import _open_runtime  # noqa: PLC0415
+    from .exporter import build_payload, infer_format, write_to_disk  # noqa: PLC0415
+
+    try:
+        resolved_fmt = infer_format(output, fmt)
+    except ValueError as e:
+        typer.echo(f"✘ {e}")
+        raise typer.Exit(2) from e
+
+    db, rt = _open_runtime()
+    try:
+        pipe = _build_pipeline(
+            db, rt, start=start, end=end, prediction=prediction, force_sync=force_sync,
+        )
+        # Terminal summary first — file IO is the optional add-on, never block
+        # the read-only summary on disk problems.
+        console = Console()
+        render_summary(
+            console,
+            window=pipe.window,
+            summary=pipe.summary,
+            by_prediction=pipe.by_prediction,
+            by_rank=pipe.by_rank,
+            unresolved_breakdown=pipe.unresolved_breakdown,
         )
 
-        if summary.total == 0:
-            typer.echo("（窗口内无预测记录）")
+        payload = build_payload(
+            window_start=pipe.window.start,
+            window_end=pipe.window.end,
+            summary=pipe.summary,
+            by_prediction=pipe.by_prediction,
+            resolved=pipe.resolved,
+        )
+
+        try:
+            # Create parent dir if needed (parents=True is friendly for
+            # "reports/2026/winrate.json" style paths).
+            out_path = Path(output)
+            if out_path.parent and not out_path.parent.exists():
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+            write_to_disk(payload, output, resolved_fmt)
+        except OSError as e:
+            typer.echo(f"✘ 写文件失败: {e}")
+            raise typer.Exit(1) from e
+
+        typer.echo(f"\n详细结果已写入: {Path(output).resolve()}")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# `purge` subcommand
+# ---------------------------------------------------------------------------
+
+
+@winrate_app.command("purge")
+def cmd_purge(
+    before: str = typer.Option(
+        ..., "--before",
+        help="删除 trade_date <= before 的所有预测记录（YYYYMMDD）",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes",
+        help="跳过交互确认；非 TTY 模式下必须传，否则报错退出",
+    ),
+) -> None:
+    """删除指定日期及之前的预测留痕（高危：不可撤销）。"""
+    from ..cli import _open_runtime  # noqa: PLC0415
+    from .persistence import purge_prediction_records  # noqa: PLC0415
+
+    if not (len(before) == 8 and before.isdigit()):
+        typer.echo(f"✘ --before 必须是 YYYYMMDD 格式，收到: {before}")
+        raise typer.Exit(2)
+
+    db, _ = _open_runtime()
+    try:
+        # 1) 先 count + 列样本日期
+        row = db.fetchone(
+            "SELECT COUNT(*) FROM lub_prediction_records WHERE trade_date <= ?",
+            (before,),
+        )
+        n = int(row[0]) if row else 0
+        if n == 0:
+            typer.echo(f"（trade_date <= {before} 无记录可删除）")
+            return
+
+        date_rows = db.fetchall(
+            "SELECT DISTINCT trade_date FROM lub_prediction_records "
+            "WHERE trade_date <= ? ORDER BY trade_date ASC",
+            (before,),
+        )
+        dates = [r[0] for r in date_rows]
+        typer.echo(f"将删除 {n} 条预测记录，覆盖 {len(dates)} 个 trade_date:")
+        for d in dates[:5]:
+            typer.echo(f"  - {d}")
+        if len(dates) > 5:
+            typer.echo(f"  ...（共 {len(dates)} 个日期）")
+
+        # 2) 二次确认
+        if not yes:
+            if not sys.stdin.isatty():
+                typer.echo("✘ 高危操作未确认；非交互终端请显式传 --yes")
+                raise typer.Exit(2)
+            ok = typer.confirm("确认删除？", default=False)
+            if not ok:
+                typer.echo("已取消")
+                raise typer.Exit(1)
+
+        # 3) 真删
+        deleted = purge_prediction_records(db, before=before)
+        typer.echo(f"已删除 {deleted} 条预测记录。")
     finally:
         db.close()
