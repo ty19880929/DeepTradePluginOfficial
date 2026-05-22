@@ -720,11 +720,13 @@ class LubRunner:
             failed_batch_ids=failed_batches or None,
         )
         export_llm_calls(rt.run_id, rt.db)
+        html_path = report_path / "summary.html"
         yield rt.emit(
             EventType.RESULT_PERSISTED,
             f"Report written: {report_path}",
             payload={
                 "report_dir": str(report_path),
+                "report_html": str(html_path) if html_path.is_file() else None,
                 "selected": len(selected),
                 "predictions": len(predictions),
                 "final_ranking_used": final_obj is not None,
@@ -1163,10 +1165,15 @@ class LubRunner:
             final_ranking=None,
         )
         export_llm_calls(rt.run_id, rt.db)
+        html_path = report_path / "summary.html"
         yield rt.emit(
             EventType.RESULT_PERSISTED,
             f"empty report ({reason})",
-            payload={"report_dir": str(report_path), "reason": reason},
+            payload={
+                "report_dir": str(report_path),
+                "report_html": str(html_path) if html_path.is_file() else None,
+                "reason": reason,
+            },
         )
 
     def _on_tushare_event(self, event_type: str, message: str, payload: dict) -> None:

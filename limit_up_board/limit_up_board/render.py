@@ -18,6 +18,7 @@ from deeptrade.core import paths
 from deeptrade.core.run_status import RunStatus
 
 from .data import Round1Bundle
+from .html_report import render_summary_html
 from .schemas import (
     ContinuationCandidate,
     FinalRankingResponse,
@@ -197,6 +198,23 @@ def write_report(
             failed_batch_ids=failed_batch_ids,
         )
     (root / "summary.md").write_text(md, encoding="utf-8")
+
+    # 1b. summary.html — v0.9 单 LLM 模式（辩论模式下个迭代补齐，先复用 md）。
+    # 失败不能阻断 summary.md / JSON 落盘，按 CLAUDE.md "UI failure ≠ run failure" 风格降级。
+    if not debate_results:
+        try:
+            html_text = render_summary_html(
+                status=status,
+                bundle=bundle,
+                selected=selected,
+                predictions=predictions,
+                final_ranking=final_ranking,
+                failed_batch_ids=failed_batch_ids,
+                run_id=str(run_id),
+            )
+            (root / "summary.html").write_text(html_text, encoding="utf-8")
+        except Exception as html_exc:  # noqa: BLE001 — never block markdown / JSON
+            logger.warning("render_summary_html failed for run %s: %s", run_id, html_exc)
 
     # 2. round1_strong_targets.json
     (root / "round1_strong_targets.json").write_text(
