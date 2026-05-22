@@ -52,6 +52,9 @@ migrations:
   - version: "20260601_002"
     file: migrations/20260601_002_prediction_records.sql
     checksum: "sha256:bf07fae251a30e99baea0cf4b588d22f619d185c4f6a89ff76d221b2483a610d"
+  - version: "20260601_003"
+    file: migrations/20260601_003_winrate_reviews.sql
+    checksum: "sha256:79832de539ff25b5a3bb3777eb86ddb96b7fee32e65ced95f2393bb80cf922ed"
 
 # 框架 v0.4+ 会从 plugin_id 推导默认前缀（limit_up_board_），需显式声明 lub_ 以匹配实际表名。
 table_prefix: lub_
@@ -107,4 +110,7 @@ tables:
     purge_on_uninstall: true
   - name: lub_prediction_records
     description: 单 LLM 模式 T 日连板预测留痕（胜率分析样本，主键 trade_date+ts_code）
+    purge_on_uninstall: true
+  - name: lub_winrate_reviews
+    description: 胜率分析 LLM Review 历史（payload + 原始响应 + 可选 markdown 报告路径）
     purge_on_uninstall: true

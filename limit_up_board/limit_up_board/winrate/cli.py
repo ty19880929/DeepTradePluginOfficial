@@ -2,7 +2,7 @@
 
 PR #2 — ``summary``。
 PR #3 — ``export`` (JSON / CSV) + ``purge`` (--yes 二次确认)。
-PR #4 追加 ``llm-review``。
+PR #4 — ``llm-review``（含 ``lub_winrate_reviews`` 持久化）。
 """
 
 from __future__ import annotations
@@ -513,5 +513,141 @@ def cmd_purge(
         # 3) 真删
         deleted = purge_prediction_records(db, before=before)
         typer.echo(f"已删除 {deleted} 条预测记录。")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# `llm-review` subcommand
+# ---------------------------------------------------------------------------
+
+
+@winrate_app.command("llm-review")
+def cmd_llm_review(
+    start: str | None = typer.Option(None, "--start", help="窗口起始 T 日 YYYYMMDD"),
+    end: str | None = typer.Option(None, "--end", help="窗口结束 T 日 YYYYMMDD"),
+    prediction: list[str] = typer.Option([], "--prediction"),
+    llm: str | None = typer.Option(
+        None, "--llm",
+        help="指定 LLM provider 名称（如 deepseek / kimi）；省略走框架默认",
+    ),
+    output: str | None = typer.Option(
+        None, "--output",
+        help="可选 markdown 报告输出路径；省略则只持久化到 DB",
+    ),
+    force_sync: bool = typer.Option(False, "--force-sync"),
+) -> None:
+    """让 LLM 基于胜率证据给出策略优化建议；结果同时落到 lub_winrate_reviews。
+
+    与 ``summary`` 共用窗口校验（默认 T-1，区间最长 10 个交易日）；不读 LLM
+    audit 表中已有的 prompt 原文，避免泄露不必要实现细节。
+    """
+    from ..cli import _open_runtime  # noqa: PLC0415
+    from ..config import load_config  # noqa: PLC0415
+    from ..lgb import registry as lgb_registry  # noqa: PLC0415
+    from .llm_review import (  # noqa: PLC0415
+        build_review_payload,
+        call_llm_for_review,
+        mint_review_id,
+        persist_review,
+        render_markdown_report,
+    )
+
+    db, rt = _open_runtime()
+    try:
+        pipe = _build_pipeline(
+            db, rt, start=start, end=end, prediction=prediction, force_sync=force_sync,
+        )
+
+        if pipe.summary.total == 0:
+            typer.echo("✘ 窗口内无预测记录，无法发起 LLM Review")
+            raise typer.Exit(2)
+
+        # 1) Build payload from current LubConfig + active LGB model
+        lub_cfg = load_config(db)
+        active = lgb_registry.get_active(db)
+        active_id = active.model_id if active is not None else None
+
+        payload = build_review_payload(
+            window_start=pipe.window.start,
+            window_end=pipe.window.end,
+            resolved=pipe.resolved,
+            summary=pipe.summary,
+            by_prediction=pipe.by_prediction,
+            by_rank=pipe.by_rank,
+            lub_cfg=lub_cfg,
+            active_lgb_model_id=active_id,
+        )
+
+        # 2) Call LLM
+        review_id = mint_review_id()
+        try:
+            llm_client = rt.llms.get_client(
+                name=llm,
+                plugin_id=rt.plugin_id,
+                run_id=f"winrate-review-{review_id}",
+            )
+        except Exception as e:  # noqa: BLE001 — config errors surface cleanly
+            typer.echo(f"✘ LLM 客户端获取失败: {e}")
+            raise typer.Exit(2) from e
+
+        typer.echo(
+            f"调用 LLM ({llm or '<默认>'}) 复盘 {pipe.window.start}..{pipe.window.end} "
+            f"({pipe.summary.total} 个样本)..."
+        )
+        try:
+            response, _audit = call_llm_for_review(llm_client, payload)
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"✘ LLM 调用失败: {e}")
+            raise typer.Exit(1) from e
+
+        provider_name = llm or "<default>"
+        llm_model = getattr(llm_client, "model_name", None) or getattr(
+            llm_client, "_model_name", None
+        )
+
+        # 3) Optional markdown report
+        report_path_str: str | None = None
+        if output:
+            md = render_markdown_report(
+                review_id=review_id,
+                window_start=pipe.window.start,
+                window_end=pipe.window.end,
+                llm_provider=provider_name,
+                summary=pipe.summary,
+                response=response,
+            )
+            out = Path(output)
+            if out.parent and not out.parent.exists():
+                out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(md, encoding="utf-8")
+            report_path_str = str(out.resolve())
+
+        # 4) Persist — failures here only warn (the LLM result is already in
+        # the user's hands via stdout / report file).
+        try:
+            persist_review(
+                db,
+                review_id=review_id,
+                window_start=pipe.window.start,
+                window_end=pipe.window.end,
+                llm_provider=provider_name,
+                llm_model=llm_model,
+                summary=pipe.summary,
+                payload=payload,
+                response=response,
+                report_path=report_path_str,
+            )
+            typer.echo(f"已落库: review_id={review_id}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("persist winrate review failed: %s", e, exc_info=True)
+            typer.echo(f"warning: 落库失败（review_id={review_id}）: {e}")
+
+        # 5) Show diagnosis summary in terminal
+        typer.echo("")
+        typer.echo("[bold]LLM 诊断:[/bold]" if False else "LLM 诊断:")
+        typer.echo(response.diagnosis)
+        if report_path_str:
+            typer.echo(f"\n完整报告: {report_path_str}")
     finally:
         db.close()
