@@ -1,6 +1,6 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.10.0
+version: 0.11.0
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
@@ -49,6 +49,9 @@ migrations:
   - version: "20260516_001"
     file: migrations/20260516_001_evidence_validation.sql
     checksum: "sha256:bcd0b1fecea014696539f09a8236d8f267c950b36e9a19f0f150162ab125c351"
+  - version: "20260601_002"
+    file: migrations/20260601_002_prediction_records.sql
+    checksum: "sha256:bf07fae251a30e99baea0cf4b588d22f619d185c4f6a89ff76d221b2483a610d"
 
 # 框架 v0.4+ 会从 plugin_id 推导默认前缀（limit_up_board_），需显式声明 lub_ 以匹配实际表名。
 table_prefix: lub_
@@ -101,4 +104,7 @@ tables:
     purge_on_uninstall: true
   - name: lub_lgb_predictions
     description: 每次 run 的 LGB 推理结果审计（含特征摘要，便于复盘）
+    purge_on_uninstall: true
+  - name: lub_prediction_records
+    description: 单 LLM 模式 T 日连板预测留痕（胜率分析样本，主键 trade_date+ts_code）
     purge_on_uninstall: true

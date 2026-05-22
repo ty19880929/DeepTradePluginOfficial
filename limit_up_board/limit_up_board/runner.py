@@ -733,6 +733,35 @@ class LubRunner:
                 "final_ranking_used": final_obj is not None,
             },
         )
+
+        # PR #1 — 单 LLM 模式 T 日预测留痕（胜率分析样本来源）。
+        # 失败只 warning：胜率分析是辅助产物，不能影响 run 状态或后续上传。
+        if predictions:
+            try:
+                from .winrate.persistence import record_predictions_from_run
+
+                saved = record_predictions_from_run(
+                    rt=rt,
+                    bundle=bundle,
+                    predictions=predictions,
+                    final_ranking=final_obj,
+                    run_id=rt.run_id or "",
+                    trade_date=bundle.trade_date,
+                    next_trade_date=bundle.next_trade_date,
+                )
+                yield rt.emit(
+                    EventType.RESULT_PERSISTED,
+                    f"Prediction records saved: {saved}",
+                    payload={"prediction_records": saved},
+                )
+            except Exception as exc:  # noqa: BLE001 — degrade, never fail the run
+                logger.warning("winrate record save failed: %s", exc, exc_info=True)
+                yield rt.emit(
+                    EventType.LOG,
+                    f"prediction records skipped: {exc}",
+                    level=EventLevel.WARNING,
+                )
+
         yield from self._maybe_upload_summary(lub_cfg, report_path)
 
     # ====================================================================
