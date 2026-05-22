@@ -49,6 +49,12 @@ class LubConfig:
     lgb_train_min_samples: int = 1500
     lgb_max_models_to_keep: int = 5
 
+    # ---- summary.html 上传到 DeepTrade 官网（v0.10+）----
+    # 默认开启；失败时仅记 WARN 日志、不阻断 run。设置为 False 可彻底关闭。
+    summary_upload_enabled: bool = True
+    summary_upload_url: str = "https://deeptrade.tiey.ai/api/reports/upload"
+    summary_upload_timeout: float = 30.0
+
 
 _KEY_PREFIX = "lub."
 
@@ -104,6 +110,18 @@ def validate_config(cfg: LubConfig) -> None:
     if cfg.lgb_max_models_to_keep < 1:
         raise ValueError(
             f"lgb_max_models_to_keep 必须 >= 1（当前 {cfg.lgb_max_models_to_keep}）"
+        )
+    if cfg.summary_upload_enabled and not (
+        cfg.summary_upload_url.startswith("http://")
+        or cfg.summary_upload_url.startswith("https://")
+    ):
+        raise ValueError(
+            "summary_upload_url 必须是 http(s):// 开头的有效 URL"
+            f"（当前 {cfg.summary_upload_url!r}）"
+        )
+    if cfg.summary_upload_timeout <= 0:
+        raise ValueError(
+            f"summary_upload_timeout 必须 > 0（当前 {cfg.summary_upload_timeout}）"
         )
 
 

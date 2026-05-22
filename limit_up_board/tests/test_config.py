@@ -85,3 +85,24 @@ def test_lgb_max_models_to_keep_minimum() -> None:
     cfg = replace(LubConfig(), lgb_max_models_to_keep=0)
     with pytest.raises(ValueError, match="lgb_max_models_to_keep"):
         validate_config(cfg)
+
+
+def test_summary_upload_url_must_be_http_or_https() -> None:
+    cfg = replace(LubConfig(), summary_upload_url="ftp://example.com/upload")
+    with pytest.raises(ValueError, match="summary_upload_url"):
+        validate_config(cfg)
+
+
+def test_summary_upload_url_ignored_when_disabled() -> None:
+    """Disabling the feature bypasses URL validation (so an empty URL is OK)."""
+    cfg = replace(LubConfig(), summary_upload_enabled=False, summary_upload_url="")
+    validate_config(cfg)
+
+
+def test_summary_upload_timeout_must_be_positive() -> None:
+    cfg = replace(LubConfig(), summary_upload_timeout=0.0)
+    with pytest.raises(ValueError, match="summary_upload_timeout"):
+        validate_config(cfg)
+    cfg = replace(LubConfig(), summary_upload_timeout=-1.0)
+    with pytest.raises(ValueError, match="summary_upload_timeout"):
+        validate_config(cfg)

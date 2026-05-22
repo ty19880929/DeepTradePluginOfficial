@@ -54,6 +54,7 @@ from .pipeline import (
 )
 from .prompts import assign_peer_labels
 from .render import export_llm_calls, render_terminal_summary, write_report
+from .uploader import UploadError, upload_summary_html
 from .runtime import (
     LubRuntime,
     build_tushare_client,
@@ -732,6 +733,7 @@ class LubRunner:
                 "final_ranking_used": final_obj is not None,
             },
         )
+        yield from self._maybe_upload_summary(lub_cfg, report_path)
 
     # ====================================================================
     # Debate mode (multi-LLM)
@@ -1156,6 +1158,7 @@ class LubRunner:
         self, bundle: Round1Bundle, params: RunParams, *, reason: str = "zero candidates"
     ) -> Iterable[StrategyEvent]:
         rt = self._rt
+        lub_cfg = load_config(rt.db)
         report_path = write_report(
             rt.run_id,
             status=RunStatus.SUCCESS,
@@ -1173,6 +1176,62 @@ class LubRunner:
                 "report_dir": str(report_path),
                 "report_html": str(html_path) if html_path.is_file() else None,
                 "reason": reason,
+            },
+        )
+        yield from self._maybe_upload_summary(lub_cfg, report_path)
+
+    def _maybe_upload_summary(
+        self, lub_cfg: LubConfig, report_path: Path
+    ) -> Iterable[StrategyEvent]:
+        """Best-effort POST ``summary.html`` to DeepTrade 官网.
+
+        Skips silently when:
+          * ``lub_cfg.summary_upload_enabled`` is False
+          * ``summary.html`` was not written (e.g. debate mode, render crash)
+
+        Failures emit a WARN-level LOG event and never raise — the run is
+        already finished and should not be marked partial_failed just because
+        the share endpoint was unreachable.
+        """
+        if not lub_cfg.summary_upload_enabled:
+            return
+        html_path = report_path / "summary.html"
+        if not html_path.is_file():
+            return
+        rt = self._rt
+        try:
+            result = upload_summary_html(
+                html_path,
+                url=lub_cfg.summary_upload_url,
+                timeout=lub_cfg.summary_upload_timeout,
+            )
+        except UploadError as e:
+            yield rt.emit(
+                EventType.LOG,
+                f"⚠ summary.html 上传失败：{e}",
+                level=EventLevel.WARN,
+                payload={"html_path": str(html_path), "error": str(e)},
+            )
+            return
+        except Exception as e:  # noqa: BLE001 — network upload never blocks run
+            logger.warning("upload_summary_html raised unexpectedly: %s", e)
+            yield rt.emit(
+                EventType.LOG,
+                f"⚠ summary.html 上传失败（未知异常）：{type(e).__name__}: {e}",
+                level=EventLevel.WARN,
+                payload={"html_path": str(html_path), "error": str(e)},
+            )
+            return
+        public_url = result.get("url")
+        yield rt.emit(
+            EventType.LOG,
+            f"📤 报告已同步至官网：{public_url}",
+            payload={
+                "html_path": str(html_path),
+                "public_url": public_url,
+                "pathname": result.get("pathname"),
+                "date": result.get("date"),
+                "index": result.get("index"),
             },
         )
 
