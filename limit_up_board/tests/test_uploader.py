@@ -20,7 +20,7 @@ from limit_up_board.uploader import (
     DEFAULT_UPLOAD_URL,
     UploadError,
     _build_multipart,
-    upload_summary_html,
+    upload_summary_json,
 )
 
 
@@ -33,15 +33,15 @@ def test_build_multipart_has_expected_structure() -> None:
     body = _build_multipart(
         "BOUNDARY-X",
         field_name="file",
-        filename="report.html",
-        content=b"<html>hi</html>",
-        mime="text/html",
+        filename="summary.json",
+        content=b'{"meta": {}}',
+        mime="application/json",
     )
     text = body.decode("utf-8")
     assert text.startswith("--BOUNDARY-X\r\n")
-    assert 'Content-Disposition: form-data; name="file"; filename="report.html"' in text
-    assert "Content-Type: text/html" in text
-    assert "<html>hi</html>" in text
+    assert 'Content-Disposition: form-data; name="file"; filename="summary.json"' in text
+    assert "Content-Type: application/json" in text
+    assert '{"meta": {}}' in text
     assert text.endswith("\r\n--BOUNDARY-X--\r\n")
 
 
@@ -51,16 +51,24 @@ def test_build_multipart_has_expected_structure() -> None:
 
 
 def test_upload_rejects_missing_file(tmp_path: Path) -> None:
-    missing = tmp_path / "does_not_exist.html"
+    missing = tmp_path / "does_not_exist.json"
     with pytest.raises(UploadError, match="file not found"):
-        upload_summary_html(missing)
+        upload_summary_json(missing)
 
 
-def test_upload_rejects_non_html_suffix(tmp_path: Path) -> None:
+def test_upload_rejects_non_json_suffix(tmp_path: Path) -> None:
     p = tmp_path / "summary.md"
-    p.write_text("# not html", encoding="utf-8")
-    with pytest.raises(UploadError, match="only .html files"):
-        upload_summary_html(p)
+    p.write_text("# not json", encoding="utf-8")
+    with pytest.raises(UploadError, match="only .json files"):
+        upload_summary_json(p)
+
+
+def test_upload_rejects_html_suffix_after_v012_switch(tmp_path: Path) -> None:
+    """旧 ``.html`` 文件不再被接受 —— 防止误传遗留产物。"""
+    p = tmp_path / "summary.html"
+    p.write_text("<html></html>", encoding="utf-8")
+    with pytest.raises(UploadError, match="only .json files"):
+        upload_summary_json(p)
 
 
 # ---------------------------------------------------------------------------
@@ -86,19 +94,19 @@ class _FakeResp:
         return None
 
 
-def _write_html(tmp_path: Path) -> Path:
-    p = tmp_path / "summary.html"
-    p.write_text("<!doctype html><html><body>ok</body></html>", encoding="utf-8")
+def _write_json(tmp_path: Path) -> Path:
+    p = tmp_path / "summary.json"
+    p.write_text(json.dumps({"meta": {"title": "ok"}}), encoding="utf-8")
     return p
 
 
 def test_upload_success_returns_decoded_json(tmp_path: Path) -> None:
-    html = _write_html(tmp_path)
+    json_path = _write_json(tmp_path)
     body = json.dumps(
         {
             "success": True,
-            "url": "https://blob.example.com/reports/2026-05-22/1.html",
-            "pathname": "reports/2026-05-22/1.html",
+            "url": "https://blob.example.com/reports/2026-05-22/1.json",
+            "pathname": "reports/2026-05-22/1.json",
             "index": 1,
             "date": "2026-05-22",
         }
@@ -109,28 +117,31 @@ def test_upload_success_returns_decoded_json(tmp_path: Path) -> None:
     def fake_urlopen(req, timeout):  # noqa: ANN001
         captured_request["url"] = req.full_url
         captured_request["headers"] = dict(req.header_items())
-        captured_request["data_len"] = len(req.data or b"")
+        captured_request["data"] = req.data or b""
+        captured_request["data_len"] = len(captured_request["data"])
         captured_request["method"] = req.get_method()
         return _FakeResp(200, body)
 
     with patch("limit_up_board.uploader.urlopen", side_effect=fake_urlopen):
-        result = upload_summary_html(html)
+        result = upload_summary_json(json_path)
 
     assert result["success"] is True
-    assert result["url"].endswith("/reports/2026-05-22/1.html")
+    assert result["url"].endswith("/reports/2026-05-22/1.json")
     assert captured_request["url"] == DEFAULT_UPLOAD_URL
     assert captured_request["method"] == "POST"
-    # Headers case-insensitive in HTTP but urllib normalizes to Title-Case keys.
     auth = {k.lower(): v for k, v in captured_request["headers"].items()}
     assert auth["authorization"] == f"Bearer {DEFAULT_UPLOAD_TOKEN}"
     assert auth["content-type"].startswith("multipart/form-data; boundary=")
     # Body should be larger than just the file bytes (multipart overhead).
-    assert captured_request["data_len"] > html.stat().st_size
+    assert captured_request["data_len"] > json_path.stat().st_size
+    # Body must carry the JSON mime in the file part so the server can branch.
+    assert b"Content-Type: application/json" in captured_request["data"]
+    assert b'filename="summary.json"' in captured_request["data"]
 
 
 def test_upload_http_error_maps_to_upload_error(tmp_path: Path) -> None:
-    html = _write_html(tmp_path)
-    err_body = b'{"error":"Only HTML files are allowed"}'
+    json_path = _write_json(tmp_path)
+    err_body = b'{"error":"Only JSON files are allowed"}'
     http_err = HTTPError(
         url=DEFAULT_UPLOAD_URL,
         code=400,
@@ -140,55 +151,55 @@ def test_upload_http_error_maps_to_upload_error(tmp_path: Path) -> None:
     )
     with patch("limit_up_board.uploader.urlopen", side_effect=http_err):
         with pytest.raises(UploadError, match="HTTP 400"):
-            upload_summary_html(html)
+            upload_summary_json(json_path)
 
 
 def test_upload_network_error_maps_to_upload_error(tmp_path: Path) -> None:
-    html = _write_html(tmp_path)
+    json_path = _write_json(tmp_path)
     with patch(
         "limit_up_board.uploader.urlopen",
         side_effect=URLError("connection refused"),
     ):
         with pytest.raises(UploadError, match="network error"):
-            upload_summary_html(html)
+            upload_summary_json(json_path)
 
 
 def test_upload_timeout_maps_to_upload_error(tmp_path: Path) -> None:
-    html = _write_html(tmp_path)
+    json_path = _write_json(tmp_path)
     with patch(
         "limit_up_board.uploader.urlopen",
         side_effect=TimeoutError("read timed out"),
     ):
         with pytest.raises(UploadError, match="network error"):
-            upload_summary_html(html)
+            upload_summary_json(json_path)
 
 
-def test_upload_invalid_json_maps_to_upload_error(tmp_path: Path) -> None:
-    html = _write_html(tmp_path)
+def test_upload_invalid_json_response_maps_to_upload_error(tmp_path: Path) -> None:
+    json_path = _write_json(tmp_path)
     with patch(
         "limit_up_board.uploader.urlopen",
         return_value=_FakeResp(200, b"<html>not json</html>"),
     ):
         with pytest.raises(UploadError, match="invalid JSON"):
-            upload_summary_html(html)
+            upload_summary_json(json_path)
 
 
-def test_upload_non_object_json_maps_to_upload_error(tmp_path: Path) -> None:
-    html = _write_html(tmp_path)
+def test_upload_non_object_json_response_maps_to_upload_error(tmp_path: Path) -> None:
+    json_path = _write_json(tmp_path)
     with patch(
         "limit_up_board.uploader.urlopen",
         return_value=_FakeResp(200, b'["unexpected", "list"]'),
     ):
         with pytest.raises(UploadError, match="unexpected JSON shape"):
-            upload_summary_html(html)
+            upload_summary_json(json_path)
 
 
 def test_upload_unexpected_status_maps_to_upload_error(tmp_path: Path) -> None:
     """Some servers may reply 204 / 302 without raising HTTPError; reject those."""
-    html = _write_html(tmp_path)
+    json_path = _write_json(tmp_path)
     with patch(
         "limit_up_board.uploader.urlopen",
         return_value=_FakeResp(204, b""),
     ):
         with pytest.raises(UploadError, match="unexpected status"):
-            upload_summary_html(html)
+            upload_summary_json(json_path)

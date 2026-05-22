@@ -1,19 +1,19 @@
-"""Upload finished HTML reports to the DeepTrade server.
+"""Upload finished JSON reports to the DeepTrade server.
 
 Stdlib-only multipart/form-data POST so the plugin does not gain a new
-runtime dependency (e.g. requests). The endpoint contract:
+runtime dependency (e.g. requests). The endpoint contract (v0.12+):
 
     POST https://deeptrade.tiey.ai/api/reports/upload
     Authorization: Bearer deeptrade
     Content-Type: multipart/form-data; boundary=...
-    field "file" — the HTML file (filename must end with .html)
+    field "file" — the JSON file (filename must end with .json)
 
 On 200 OK the server returns JSON like::
 
     {
       "success": true,
-      "url": "https://xxx.public.blob.vercel-storage.com/reports/2026-05-22/1.html",
-      "pathname": "reports/2026-05-22/1.html",
+      "url": "https://xxx.public.blob.vercel-storage.com/reports/2026-05-22/1.json",
+      "pathname": "reports/2026-05-22/1.json",
       "index": 1,
       "date": "2026-05-22"
     }
@@ -41,32 +41,32 @@ class UploadError(Exception):
     """Any failure while uploading the report to the DeepTrade endpoint."""
 
 
-def upload_summary_html(
-    html_path: Path,
+def upload_summary_json(
+    json_path: Path,
     *,
     url: str = DEFAULT_UPLOAD_URL,
     token: str = DEFAULT_UPLOAD_TOKEN,
     timeout: float = DEFAULT_UPLOAD_TIMEOUT,
 ) -> dict[str, Any]:
-    """POST *html_path* as form-data ``file`` to the reports endpoint.
+    """POST *json_path* as form-data ``file`` to the reports endpoint.
 
     Returns the decoded JSON response on success. Raises :class:`UploadError`
-    on any failure (missing file, non-.html suffix, HTTP non-200, network
+    on any failure (missing file, non-.json suffix, HTTP non-200, network
     error, non-JSON body).
     """
-    if not html_path.is_file():
-        raise UploadError(f"file not found: {html_path}")
-    if html_path.suffix.lower() != ".html":
-        raise UploadError(f"only .html files are accepted (got {html_path.name!r})")
+    if not json_path.is_file():
+        raise UploadError(f"file not found: {json_path}")
+    if json_path.suffix.lower() != ".json":
+        raise UploadError(f"only .json files are accepted (got {json_path.name!r})")
 
-    payload = html_path.read_bytes()
+    payload = json_path.read_bytes()
     boundary = f"----DeepTradeBoundary{uuid.uuid4().hex}"
     body = _build_multipart(
         boundary,
         field_name="file",
-        filename=html_path.name,
+        filename=json_path.name,
         content=payload,
-        mime="text/html",
+        mime="application/json",
     )
 
     req = Request(

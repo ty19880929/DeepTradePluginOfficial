@@ -18,7 +18,7 @@ from deeptrade.core import paths
 from deeptrade.core.run_status import RunStatus
 
 from .data import Round1Bundle
-from .html_report import render_summary_html
+from .report import build_strategy_report
 from .schemas import (
     ContinuationCandidate,
     FinalRankingResponse,
@@ -199,11 +199,12 @@ def write_report(
         )
     (root / "summary.md").write_text(md, encoding="utf-8")
 
-    # 1b. summary.html — v0.9 单 LLM 模式（辩论模式下个迭代补齐，先复用 md）。
-    # 失败不能阻断 summary.md / JSON 落盘，按 CLAUDE.md "UI failure ≠ run failure" 风格降级。
+    # 1b. summary.json — v0.12+ 网站使用的结构化报告。单 LLM 模式才出（辩论模式 schema
+    # 扩展见 PR-X，本期沿用 md-only）。失败仅 warn，不阻断 markdown / 其它 JSON 落盘
+    # ——按 CLAUDE.md "UI failure ≠ run failure" 风格降级。
     if not debate_results:
         try:
-            html_text = render_summary_html(
+            report_obj = build_strategy_report(
                 status=status,
                 bundle=bundle,
                 selected=selected,
@@ -212,9 +213,12 @@ def write_report(
                 failed_batch_ids=failed_batch_ids,
                 run_id=str(run_id),
             )
-            (root / "summary.html").write_text(html_text, encoding="utf-8")
-        except Exception as html_exc:  # noqa: BLE001 — never block markdown / JSON
-            logger.warning("render_summary_html failed for run %s: %s", run_id, html_exc)
+            (root / "summary.json").write_text(
+                report_obj.model_dump_json(by_alias=True, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as json_exc:  # noqa: BLE001 — never block markdown / other JSON
+            logger.warning("build_strategy_report failed for run %s: %s", run_id, json_exc)
 
     # 2. round1_strong_targets.json
     (root / "round1_strong_targets.json").write_text(

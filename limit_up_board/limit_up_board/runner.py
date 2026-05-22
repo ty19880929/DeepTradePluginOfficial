@@ -54,7 +54,7 @@ from .pipeline import (
 )
 from .prompts import assign_peer_labels
 from .render import export_llm_calls, render_terminal_summary, write_report
-from .uploader import UploadError, upload_summary_html
+from .uploader import UploadError, upload_summary_json
 from .runtime import (
     LubRuntime,
     build_tushare_client,
@@ -721,13 +721,13 @@ class LubRunner:
             failed_batch_ids=failed_batches or None,
         )
         export_llm_calls(rt.run_id, rt.db)
-        html_path = report_path / "summary.html"
+        json_path = report_path / "summary.json"
         yield rt.emit(
             EventType.RESULT_PERSISTED,
             f"Report written: {report_path}",
             payload={
                 "report_dir": str(report_path),
-                "report_html": str(html_path) if html_path.is_file() else None,
+                "report_json": str(json_path) if json_path.is_file() else None,
                 "selected": len(selected),
                 "predictions": len(predictions),
                 "final_ranking_used": final_obj is not None,
@@ -1197,13 +1197,13 @@ class LubRunner:
             final_ranking=None,
         )
         export_llm_calls(rt.run_id, rt.db)
-        html_path = report_path / "summary.html"
+        json_path = report_path / "summary.json"
         yield rt.emit(
             EventType.RESULT_PERSISTED,
             f"empty report ({reason})",
             payload={
                 "report_dir": str(report_path),
-                "report_html": str(html_path) if html_path.is_file() else None,
+                "report_json": str(json_path) if json_path.is_file() else None,
                 "reason": reason,
             },
         )
@@ -1212,11 +1212,11 @@ class LubRunner:
     def _maybe_upload_summary(
         self, lub_cfg: LubConfig, report_path: Path
     ) -> Iterable[StrategyEvent]:
-        """Best-effort POST ``summary.html`` to DeepTrade 官网.
+        """Best-effort POST ``summary.json`` to DeepTrade 官网.
 
         Skips silently when:
           * ``lub_cfg.summary_upload_enabled`` is False
-          * ``summary.html`` was not written (e.g. debate mode, render crash)
+          * ``summary.json`` was not written (e.g. debate mode, builder crash)
 
         Failures emit a WARN-level LOG event and never raise — the run is
         already finished and should not be marked partial_failed just because
@@ -1224,31 +1224,31 @@ class LubRunner:
         """
         if not lub_cfg.summary_upload_enabled:
             return
-        html_path = report_path / "summary.html"
-        if not html_path.is_file():
+        json_path = report_path / "summary.json"
+        if not json_path.is_file():
             return
         rt = self._rt
         try:
-            result = upload_summary_html(
-                html_path,
+            result = upload_summary_json(
+                json_path,
                 url=lub_cfg.summary_upload_url,
                 timeout=lub_cfg.summary_upload_timeout,
             )
         except UploadError as e:
             yield rt.emit(
                 EventType.LOG,
-                f"⚠ summary.html 上传失败：{e}",
+                f"⚠ summary.json 上传失败：{e}",
                 level=EventLevel.WARN,
-                payload={"html_path": str(html_path), "error": str(e)},
+                payload={"json_path": str(json_path), "error": str(e)},
             )
             return
         except Exception as e:  # noqa: BLE001 — network upload never blocks run
-            logger.warning("upload_summary_html raised unexpectedly: %s", e)
+            logger.warning("upload_summary_json raised unexpectedly: %s", e)
             yield rt.emit(
                 EventType.LOG,
-                f"⚠ summary.html 上传失败（未知异常）：{type(e).__name__}: {e}",
+                f"⚠ summary.json 上传失败（未知异常）：{type(e).__name__}: {e}",
                 level=EventLevel.WARN,
-                payload={"html_path": str(html_path), "error": str(e)},
+                payload={"json_path": str(json_path), "error": str(e)},
             )
             return
         public_url = result.get("url")
@@ -1256,7 +1256,7 @@ class LubRunner:
             EventType.LOG,
             f"📤 报告已同步至官网：{public_url}",
             payload={
-                "html_path": str(html_path),
+                "json_path": str(json_path),
                 "public_url": public_url,
                 "pathname": result.get("pathname"),
                 "date": result.get("date"),
