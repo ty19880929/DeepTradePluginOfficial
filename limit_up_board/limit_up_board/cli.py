@@ -76,6 +76,13 @@ lgb_app = typer.Typer(
 )
 app.add_typer(lgb_app, name="lgb")
 
+# v0.11 — 胜率分析子应用（winrate summary / export / purge / llm-review）。
+# 实现位于 .winrate.cli；这里只挂载，避免在主 CLI 启动时拖入 rich.Table 等
+# 仅 winrate 用到的依赖。
+from .winrate.cli import winrate_app  # noqa: E402
+
+app.add_typer(winrate_app, name="winrate")
+
 
 def _open_runtime() -> tuple[Database, LubRuntime]:
     db = Database(paths.db_path())
