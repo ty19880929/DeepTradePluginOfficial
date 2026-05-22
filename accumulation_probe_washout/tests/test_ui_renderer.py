@@ -129,3 +129,30 @@ class TestRichDashboardSmoke:
         assert "LLM意见" in text
         assert "结构完整，等待放量突破。" in text
         assert "当前价格" in text
+
+    def test_result_summary_wraps_full_llm_opinion_without_ellipsis(self):
+        from rich.console import Console
+
+        opinion = (
+            "结构完整，吸筹、试盘、洗盘链条清晰，当前价格贴近试盘高点，"
+            "若下一交易日放量突破且不跌破洗盘低点，可继续观察启动确认。"
+        )
+        console = Console(record=True, width=72)
+        console.print(render_result_summary([
+            {
+                "rank": 1,
+                "ts_code": "600000.SH",
+                "name": "测试股",
+                "current_price": 12.34,
+                "launch_score": 88.8,
+                "prediction": "launch_ready",
+                "confidence": "high",
+                "llm_opinion": opinion,
+            }
+        ]))
+
+        text = console.export_text()
+        assert "..." not in text
+        assert "…" not in text
+        compact = "".join(ch for ch in text if ch not in " \n\r\t│┌┐└┘─")
+        assert opinion in compact

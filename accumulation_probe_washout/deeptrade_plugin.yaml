@@ -1,6 +1,6 @@
 plugin_id: accumulation-probe-washout
 name: 吸筹试盘洗盘主升浪策略
-version: 0.7.8
+version: 0.7.9
 type: strategy
 api_version: "1"
 entrypoint: accumulation_probe_washout.plugin:AccumulationProbeWashoutPlugin

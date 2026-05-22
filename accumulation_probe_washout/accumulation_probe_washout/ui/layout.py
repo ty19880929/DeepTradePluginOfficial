@@ -104,7 +104,7 @@ def render_result_summary(rows: list[dict[str, Any]], *, total: int | None = Non
         header_style="bold cyan",
         box=box.SIMPLE,
         expand=True,
-        padding=(0, 1),
+        padding=(0, 0),
     )
     tbl.add_column("排名", justify="right", no_wrap=True)
     tbl.add_column("代码", no_wrap=True)
@@ -113,7 +113,7 @@ def render_result_summary(rows: list[dict[str, Any]], *, total: int | None = Non
     tbl.add_column("启动分", justify="right", no_wrap=True)
     tbl.add_column("判断", no_wrap=True)
     tbl.add_column("置信度", no_wrap=True)
-    tbl.add_column("LLM意见", ratio=2)
+    tbl.add_column("LLM意见", ratio=3, min_width=20, overflow="fold")
 
     for row in rows:
         tbl.add_row(
