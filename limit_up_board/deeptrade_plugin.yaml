@@ -1,6 +1,6 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.12.2
+version: 0.12.3
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
@@ -32,6 +32,9 @@ permissions:
       - top_list
       - top_inst
       - cyq_perf
+      # v0.12.3+：`fetch_latest_trade_date`（data.py 默认路径，--trade-date 未指定时调用）
+      # 需要 index_daily 权限。新 Tushare 账号未开通该 API 时首跑即失败，故声明为 required。
+      - index_daily
     optional:
       - limit_list_ths
       - limit_cpt_list

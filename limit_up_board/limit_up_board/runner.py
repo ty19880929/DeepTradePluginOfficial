@@ -1221,6 +1221,14 @@ class LubRunner:
         Failures emit a WARN-level LOG event and never raise — the run is
         already finished and should not be marked partial_failed just because
         the share endpoint was unreachable.
+
+        v0.12.3 起：
+          * 默认 ``summary_upload_enabled=False``；用户显式开启才会进入此路径。
+          * Token 从 ``LubConfig.summary_upload_token`` 读取；空串走匿名（不写
+            ``Authorization``）。
+          * 事件 payload 写入完整审计字段（``enabled / url / status /
+            duration_ms / public_url / public_path / error_class``），**永远不写
+            token / Authorization 字段**。
         """
         if not lub_cfg.summary_upload_enabled:
             return
@@ -1228,10 +1236,21 @@ class LubRunner:
         if not json_path.is_file():
             return
         rt = self._rt
+        import time as _time
+
+        t0 = _time.monotonic()
+        audit: dict[str, Any] = {
+            "enabled": True,
+            "url": lub_cfg.summary_upload_url,
+            "json_path": str(json_path),
+            "token_configured": bool(lub_cfg.summary_upload_token),
+            "trade_date": trade_date,
+        }
         try:
             result = upload_summary_json(
                 json_path,
                 url=lub_cfg.summary_upload_url,
+                token=lub_cfg.summary_upload_token or None,
                 timeout=lub_cfg.summary_upload_timeout,
                 extra_fields={
                     "plugin_name": "打板策略",
@@ -1239,33 +1258,41 @@ class LubRunner:
                 },
             )
         except UploadError as e:
+            audit["status"] = "failed"
+            audit["error_class"] = type(e).__name__
+            audit["error"] = str(e)
+            audit["duration_ms"] = (_time.monotonic() - t0) * 1000.0
             yield rt.emit(
                 EventType.LOG,
                 f"⚠ summary.json 上传失败：{e}",
                 level=EventLevel.WARN,
-                payload={"json_path": str(json_path), "error": str(e)},
+                payload=audit,
             )
             return
         except Exception as e:  # noqa: BLE001 — network upload never blocks run
             logger.warning("upload_summary_json raised unexpectedly: %s", e)
+            audit["status"] = "failed"
+            audit["error_class"] = type(e).__name__
+            audit["error"] = str(e)
+            audit["duration_ms"] = (_time.monotonic() - t0) * 1000.0
             yield rt.emit(
                 EventType.LOG,
                 f"⚠ summary.json 上传失败（未知异常）：{type(e).__name__}: {e}",
                 level=EventLevel.WARN,
-                payload={"json_path": str(json_path), "error": str(e)},
+                payload=audit,
             )
             return
         public_url = result.get("url")
+        audit["status"] = "ok"
+        audit["duration_ms"] = (_time.monotonic() - t0) * 1000.0
+        audit["public_url"] = public_url
+        audit["public_path"] = result.get("pathname")
+        audit["date"] = result.get("date")
+        audit["index"] = result.get("index")
         yield rt.emit(
             EventType.LOG,
             f"📤 报告已同步至官网：{public_url}",
-            payload={
-                "json_path": str(json_path),
-                "public_url": public_url,
-                "pathname": result.get("pathname"),
-                "date": result.get("date"),
-                "index": result.get("index"),
-            },
+            payload=audit,
         )
 
     def _on_tushare_event(self, event_type: str, message: str, payload: dict) -> None:

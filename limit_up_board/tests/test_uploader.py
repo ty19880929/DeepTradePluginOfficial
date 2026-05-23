@@ -16,7 +16,6 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from limit_up_board.uploader import (
-    DEFAULT_UPLOAD_TOKEN,
     DEFAULT_UPLOAD_URL,
     UploadError,
     _build_multipart,
@@ -142,20 +141,47 @@ def test_upload_success_returns_decoded_json(tmp_path: Path) -> None:
         return _FakeResp(200, body)
 
     with patch("limit_up_board.uploader.urlopen", side_effect=fake_urlopen):
-        result = upload_summary_json(json_path)
+        result = upload_summary_json(json_path, token="my-test-token")
 
     assert result["success"] is True
     assert result["url"].endswith("/reports/2026-05-22/1.json")
     assert captured_request["url"] == DEFAULT_UPLOAD_URL
     assert captured_request["method"] == "POST"
     auth = {k.lower(): v for k, v in captured_request["headers"].items()}
-    assert auth["authorization"] == f"Bearer {DEFAULT_UPLOAD_TOKEN}"
+    assert auth["authorization"] == "Bearer my-test-token"
     assert auth["content-type"].startswith("multipart/form-data; boundary=")
     # Body should be larger than just the file bytes (multipart overhead).
     assert captured_request["data_len"] > json_path.stat().st_size
     # Body must carry the JSON mime in the file part so the server can branch.
     assert b"Content-Type: application/json" in captured_request["data"]
     assert b'filename="summary.json"' in captured_request["data"]
+
+
+def test_upload_omits_authorization_header_when_token_blank(tmp_path: Path) -> None:
+    """v0.12.3+：token=None / "" 时不写 Authorization header（匿名）。"""
+    json_path = _write_json(tmp_path)
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout):  # noqa: ANN001
+        captured["headers"] = dict(req.header_items())
+        return _FakeResp(200, b'{"success": true}')
+
+    with patch("limit_up_board.uploader.urlopen", side_effect=fake_urlopen):
+        upload_summary_json(json_path)  # token 默认 None
+    auth_keys = {k.lower() for k in captured["headers"]}
+    assert "authorization" not in auth_keys
+
+    with patch("limit_up_board.uploader.urlopen", side_effect=fake_urlopen):
+        upload_summary_json(json_path, token="")
+    auth_keys = {k.lower() for k in captured["headers"]}
+    assert "authorization" not in auth_keys
+
+
+def test_upload_no_default_token_constant_exported() -> None:
+    """v0.12.3+：DEFAULT_UPLOAD_TOKEN 已下线，禁止再有源码硬编码 token。"""
+    import limit_up_board.uploader as u
+
+    assert not hasattr(u, "DEFAULT_UPLOAD_TOKEN")
 
 
 def test_upload_forwards_extra_fields_in_multipart(tmp_path: Path) -> None:

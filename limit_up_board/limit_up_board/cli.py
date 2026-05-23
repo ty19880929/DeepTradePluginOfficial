@@ -339,7 +339,14 @@ def cmd_settings_show() -> None:
     table.add_column("Value", overflow="fold")
     table.add_column("Source", style="yellow")
     for key, value, source in rows:
-        table.add_row(key, "" if value is None else str(value), source)
+        # v0.12.3+：上传 token 等敏感字段仅展示是/否，不打印明文。
+        if key.endswith("_token"):
+            display = "(已配置)" if value else "(未配置)"
+        elif value is None:
+            display = ""
+        else:
+            display = str(value)
+        table.add_row(key, display, source)
     console.print(table)
 
 
@@ -1261,12 +1268,12 @@ def cmd_lgb_purge(
         db.close()
 
 
-@lgb_app.command("refresh-features")
+@lgb_app.command("refresh-features", hidden=True)
 def cmd_lgb_refresh_features(
     start: str | None = typer.Option(None, "--start"),
     end: str | None = typer.Option(None, "--end"),
 ) -> None:
-    """仅拉历史数据 / 不训练（PR-3.x 实现）。"""
+    """仅拉历史数据 / 不训练（PR-3.x 实现，v0.12.3 起从 --help 中隐藏）。"""
     typer.echo(
         f"Not yet implemented in this iteration: lgb refresh-features "
         f"--start={start} --end={end}"

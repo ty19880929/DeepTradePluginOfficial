@@ -4,7 +4,7 @@ Stdlib-only multipart/form-data POST so the plugin does not gain a new
 runtime dependency (e.g. requests). The endpoint contract (v0.12+):
 
     POST https://deeptrade.tiey.ai/api/reports/upload
-    Authorization: Bearer deeptrade
+    Authorization: Bearer <token>   # 可选；token 为空时不带此 header（匿名）
     Content-Type: multipart/form-data; boundary=...
     field "file"        — the JSON file (filename must end with .json)
     field "plugin_name" — 插件中文名（v0.12.2+）
@@ -19,6 +19,9 @@ On 200 OK the server returns JSON like::
       "index": 1,
       "date": "2026-05-22"
     }
+
+v0.12.3 起 ``DEFAULT_UPLOAD_TOKEN`` 已下线；token 必须由调用方显式传入（从
+``LubConfig.summary_upload_token`` 读取），空串/None 代表匿名上传。
 
 All failure modes (bad path, HTTP non-200, network error, malformed JSON)
 raise :class:`UploadError`; callers in ``runner.py`` catch it and degrade
@@ -35,7 +38,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 DEFAULT_UPLOAD_URL = "https://deeptrade.tiey.ai/api/reports/upload"
-DEFAULT_UPLOAD_TOKEN = "deeptrade"
 DEFAULT_UPLOAD_TIMEOUT = 30.0
 
 
@@ -47,14 +49,16 @@ def upload_summary_json(
     json_path: Path,
     *,
     url: str = DEFAULT_UPLOAD_URL,
-    token: str = DEFAULT_UPLOAD_TOKEN,
+    token: str | None = None,
     timeout: float = DEFAULT_UPLOAD_TIMEOUT,
     extra_fields: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """POST *json_path* as form-data ``file`` to the reports endpoint.
 
-    ``extra_fields`` (v0.12.2+) adds additional ``multipart/form-data`` text
-    parts alongside the file — used to send ``plugin_name`` / ``trade_date``.
+    ``token`` (v0.12.3+) 为 None 或空串时不写 ``Authorization`` header，匿名上传
+    由服务端决定是否接受。``extra_fields`` (v0.12.2+) adds additional
+    ``multipart/form-data`` text parts alongside the file — used to send
+    ``plugin_name`` / ``trade_date``.
 
     Returns the decoded JSON response on success. Raises :class:`UploadError`
     on any failure (missing file, non-.json suffix, HTTP non-200, network
@@ -76,15 +80,17 @@ def upload_summary_json(
         text_fields=extra_fields,
     )
 
+    headers: dict[str, str] = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "Content-Length": str(len(body)),
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = Request(
         url,
         data=body,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "Content-Length": str(len(body)),
-        },
+        headers=headers,
     )
     try:
         with urlopen(req, timeout=timeout) as resp:

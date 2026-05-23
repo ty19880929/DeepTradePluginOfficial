@@ -50,10 +50,15 @@ class LubConfig:
     lgb_max_models_to_keep: int = 5
 
     # ---- summary.json 上传到 DeepTrade 官网（v0.12+；v0.10/0.11 是 summary.html）----
-    # 默认开启；失败时仅记 WARN 日志、不阻断 run。设置为 False 可彻底关闭。
-    summary_upload_enabled: bool = True
+    # v0.12.3 起 **默认关闭**（隐私优先）；需要分享报告时显式：
+    #     deeptrade limit-up-board settings set summary_upload_enabled true
+    # 失败时仅记 WARN 日志、不阻断 run。
+    summary_upload_enabled: bool = False
     summary_upload_url: str = "https://deeptrade.tiey.ai/api/reports/upload"
     summary_upload_timeout: float = 30.0
+    # 上传鉴权 token。v0.12.3+：从源码硬编码（"deeptrade"）改为可配置；空串表示匿名上传，
+    # 不写 Authorization header，由服务端决定是否拒绝。
+    summary_upload_token: str = ""
 
 
 _KEY_PREFIX = "lub."

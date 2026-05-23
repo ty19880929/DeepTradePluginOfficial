@@ -19,6 +19,13 @@ def test_defaults_pass() -> None:
     validate_config(LubConfig())
 
 
+def test_summary_upload_default_disabled() -> None:
+    """v0.12.3+：summary_upload 默认关闭，token 默认空（匿名）。"""
+    cfg = LubConfig()
+    assert cfg.summary_upload_enabled is False
+    assert cfg.summary_upload_token == ""
+
+
 def test_min_float_mv_yi_must_be_non_negative() -> None:
     cfg = replace(LubConfig(), min_float_mv_yi=-1.0)
     with pytest.raises(ValueError, match="min_float_mv_yi"):
@@ -88,7 +95,12 @@ def test_lgb_max_models_to_keep_minimum() -> None:
 
 
 def test_summary_upload_url_must_be_http_or_https() -> None:
-    cfg = replace(LubConfig(), summary_upload_url="ftp://example.com/upload")
+    # v0.12.3+：上传默认关闭，必须显式启用才会触发 URL 校验。
+    cfg = replace(
+        LubConfig(),
+        summary_upload_enabled=True,
+        summary_upload_url="ftp://example.com/upload",
+    )
     with pytest.raises(ValueError, match="summary_upload_url"):
         validate_config(cfg)
 

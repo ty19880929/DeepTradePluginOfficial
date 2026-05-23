@@ -12,10 +12,14 @@ Checks:
     (consumed by framework >= v0.8 to skip the GitHub Releases API call)
   - Each migration's sha256 checksum matches the file content
     (matches the framework's _verify_migration_checksum logic)
+  - Every literal ``tushare.call("<api>")`` in the plugin's Python sources
+    is declared in ``permissions.tushare_apis.required`` or ``optional``
+    (P0-1: prevents the install-time silent-403 first-run failure mode).
 """
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import sys
@@ -30,6 +34,50 @@ REQUIRED_FIELDS = {
     "latest_version",
 }
 ALLOWED_TYPES = {"strategy", "channel"}
+
+
+def _is_tushare_call(node: ast.Call) -> bool:
+    func = node.func
+    if not isinstance(func, ast.Attribute) or func.attr != "call":
+        return False
+    receiver = func.value
+    if isinstance(receiver, ast.Name) and receiver.id == "tushare":
+        return True
+    if isinstance(receiver, ast.Attribute) and receiver.attr == "tushare":
+        return True
+    return False
+
+
+def _missing_tushare_apis(plugin_subdir: Path, yaml_data: dict) -> set[str]:
+    """Return the set of literal Tushare APIs called by source under
+    *plugin_subdir* that are NOT declared in
+    ``permissions.tushare_apis.required`` ∪ ``optional``.
+
+    Dynamic dispatch sites (``tushare.call(api_name, ...)``) are skipped;
+    their literal call sites in callers are covered separately.
+    """
+    perms = (yaml_data.get("permissions") or {}).get("tushare_apis") or {}
+    declared: set[str] = set(perms.get("required") or []) | set(perms.get("optional") or [])
+
+    literal_apis: set[str] = set()
+    for py_path in plugin_subdir.rglob("*.py"):
+        # Skip test files — they may stub or assert against API names not
+        # actually called by the plugin runtime.
+        if "tests" in py_path.relative_to(plugin_subdir).parts:
+            continue
+        try:
+            tree = ast.parse(py_path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not _is_tushare_call(node):
+                continue
+            if not node.args:
+                continue
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                literal_apis.add(first.value)
+    return literal_apis - declared
 
 
 def main() -> int:
@@ -115,6 +163,13 @@ def main() -> int:
             errors.append(
                 f"{prefix} yaml.type={yaml_data.get('type')!r} "
                 f"!= index.type={entry['type']!r}"
+            )
+
+        missing_apis = _missing_tushare_apis(subdir, yaml_data)
+        if missing_apis:
+            errors.append(
+                f"{prefix} tushare.call() literals not declared in "
+                f"permissions.tushare_apis: {sorted(missing_apis)}"
             )
 
         for mig in yaml_data.get("migrations", []) or []:
