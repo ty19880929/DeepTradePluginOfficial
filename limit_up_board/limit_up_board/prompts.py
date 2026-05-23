@@ -20,8 +20,8 @@ from typing import Any
 # 三段独立拼装让 ``build_screening_system`` 同时支持 (1) 关闭 floor、(2) 关闭 decile
 # 输入两种正交开关，对应 LubConfig.lgb_min_score_floor / lgb_decile_in_prompt。
 _SCREENING_LGB_HEAD = (
-    "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，预测「次日最大溢价概率」——"
-    "T+1 最高价 ≥ T 收盘价 × (1+阈值%) 的概率，越大越倾向次日高位溢价/连板，但 ≠ 必涨停 / "
+    "- 量化锚点（LightGBM 模型）：lgb_score（0–100 浮点，**未校准的模型排序分**——"
+    "数值越大越倾向次日触及「T+1 最高价 ≥ T 收盘价 × (1+阈值%)」，但**不是概率**（v0.13.0 起明确语义）；越大越倾向次日高位溢价/连板，但 ≠ 必涨停 / "
     "≠ 可实现收益；属于盘后统计学锚点，盘口风险信号仍优先）。"
 )
 
@@ -263,7 +263,8 @@ _PREDICTION_SYSTEM_TEMPLATE = """\
 - 不允许引用 missing_data 中的字段；可引用所有派生字段
   （amplitude_pct / fd_amount_ratio / ma_* / up_count_30d）。
 - LightGBM 量化分（lgb_score__PREDICTION_DECILE_REF__）作为 continuation_score 的统计学锚点之一：
-  · lgb_score = 模型预测的「次日最大溢价概率」（T+1 最高价 ≥ T 收盘价 × (1+阈值%)）；
+  · lgb_score = LightGBM 的**未校准模型排序分**（数值高 = 模型相对更看好「T+1 最高价 ≥ T 收盘价 × (1+阈值%)」触发），
+    v0.13.0 起不再用"概率"二字描述（未做 Platt / Isotonic 校准，数值绝对水平不可信）；30/70 等阈值仅作排序参考；
     数值越大越倾向次日高位溢价/连板，但**不等价于"必涨停"或"可实现收益"**——盘口风险信号仍优先。
   · lgb_score ≥ 70 的标的可适度上调 confidence；但若同时存在 cyq_winner_pct > 70 / 高位连板等
     分歧风险，仍需下调。

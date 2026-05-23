@@ -1,6 +1,6 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.12.4
+version: 0.13.0
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
@@ -58,6 +58,9 @@ migrations:
   - version: "20260601_003"
     file: migrations/20260601_003_winrate_reviews.sql
     checksum: "sha256:79832de539ff25b5a3bb3777eb86ddb96b7fee32e65ced95f2393bb80cf922ed"
+  - version: "20260524_001"
+    file: migrations/20260524_001_lgb_calibration.sql
+    checksum: "sha256:b9fd3d2f69c2bd0143b9284c66a0a332c75dcc46971df3f5ee8af480b9b8b96c"
 
 # 框架 v0.4+ 会从 plugin_id 推导默认前缀（limit_up_board_），需显式声明 lub_ 以匹配实际表名。
 table_prefix: lub_

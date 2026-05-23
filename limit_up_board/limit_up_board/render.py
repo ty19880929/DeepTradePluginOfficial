@@ -907,7 +907,7 @@ def _render_lgb_distribution_section(bundle: Round1Bundle) -> str:
     p25 = _quantile(arr, 0.25)
     p75 = _quantile(arr, 0.75)
     parts = [
-        "\n## 本次 LGB 评分分布（次日最大溢价概率，0–100）\n",
+        "\n## 本次 LGB 评分分布（未校准模型排序分，0–100；v0.13.0 起明确语义）\n",
         f"- n={n}  min={lo:.1f}  p25={p25:.1f}  median={med:.1f}  p75={p75:.1f}  max={hi:.1f}\n",
     ]
     # 10-point histogram (0..100) — ASCII art friendly even in plain terminals.

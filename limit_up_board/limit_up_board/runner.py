@@ -35,6 +35,7 @@ if TYPE_CHECKING:  # pragma: no cover
 from .calendar import TradeCalendar
 from .cancellation import cancel_requested
 from .config import LubConfig, load_config
+from .observability import RunMetrics
 from .data import (
     Round1Bundle,
     collect_round1,
@@ -58,6 +59,8 @@ from .schemas import apply_empty_array_policy
 from .uploader import UploadError, upload_summary_json
 from .runtime import (
     LubRuntime,
+    ProviderConfigSnapshot,
+    build_provider_config_snapshot,
     build_tushare_client,
     open_worker_runtime,
     pick_llm_provider,
@@ -301,6 +304,9 @@ class LubRunner:
         # the FileHandler failed (read-only home etc.); the failure mode is
         # observable in the framework's ~/.deeptrade/logs/deeptrade.log only.
         self._log_file_path: Path | None = None
+        # v0.13.0 (P2-3)：耗时 / 调用 / 校验失败计数器，被动观察事件流；
+        # 收尾时聚合成 OBSERVABILITY_SUMMARY 事件 + summary.json.quality_metrics。
+        self._metrics: RunMetrics = RunMetrics()
 
     # ----- public --------------------------------------------------------
 
@@ -432,6 +438,7 @@ class LubRunner:
                 self._seq += 1
                 self._persist_event(run_id, self._seq, ev)
                 events.append(ev)
+                self._metrics.observe(ev)
                 self._dispatch_to_renderer(ev)
                 if ev.type == EventType.VALIDATION_FAILED:
                     seen_validation_failed = True
@@ -455,6 +462,7 @@ class LubRunner:
         if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
             terminal_status = RunStatus.PARTIAL_FAILED
 
+        self._emit_observability_summary(run_id, events)
         self._shielded_record_run_finish(run_id, terminal_status, terminal_error, events)
         return RunOutcome(
             run_id=run_id, status=terminal_status, error=terminal_error, seen_events=events
@@ -490,6 +498,7 @@ class LubRunner:
                 self._seq += 1
                 self._persist_event(run_id, self._seq, ev)
                 events.append(ev)
+                self._metrics.observe(ev)
                 self._dispatch_to_renderer(ev)
         except KeyboardInterrupt:
             terminal_status = RunStatus.CANCELLED
@@ -508,6 +517,7 @@ class LubRunner:
                 terminal_status = RunStatus.FAILED
                 terminal_error = self._handle_runtime_exception(e, run_id, "sync")
 
+        self._emit_observability_summary(run_id, events)
         self._shielded_record_run_finish(run_id, terminal_status, terminal_error, events)
         outcome = RunOutcome(
             run_id=run_id, status=terminal_status, error=terminal_error, seen_events=events
@@ -833,6 +843,10 @@ class LubRunner:
             lgb_floor = lub_cfg.lgb_min_score_floor if rt.lgb_scorer is not None else None
             include_decile = lub_cfg.lgb_decile_in_prompt
 
+            # v0.13.0 (P1-4)：辩论 worker 接收 frozen ProviderConfigSnapshot，
+            # 不再共享主线程 ConfigService / Database。snapshot 仅构造一次。
+            config_snapshot = build_provider_config_snapshot(rt.config)
+
             # ----- Phase A: parallel 强势初筛 + 连板预测 + (final_ranking) ---
             emit(
                 rt.emit(
@@ -850,7 +864,7 @@ class LubRunner:
                         rt.plugin_id,
                         run_id,
                         reports_dir,
-                        rt.config,
+                        config_snapshot,
                         lgb_floor,
                         include_decile,
                         lub_cfg.empty_array_policy,
@@ -933,7 +947,7 @@ class LubRunner:
                                 for peer in survivors
                                 if peer.provider != r.provider
                             ],
-                            rt.config,
+                            config_snapshot,
                             lub_cfg.empty_array_policy,
                         ): r.provider
                         for r in survivors
@@ -1032,6 +1046,7 @@ class LubRunner:
         if terminal_status == RunStatus.SUCCESS and seen_validation_failed:
             terminal_status = RunStatus.PARTIAL_FAILED
 
+        self._emit_observability_summary(run_id, events)
         self._shielded_record_run_finish(run_id, terminal_status, terminal_error, events)
         return RunOutcome(
             run_id=run_id,
@@ -1337,6 +1352,28 @@ class LubRunner:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _emit_observability_summary(
+        self, run_id: str, events: list[StrategyEvent]
+    ) -> None:
+        """v0.13.0 (P2-3) — emit a LOG event with the run's aggregated
+        ``stage_duration_ms / tushare_api_calls / llm_calls / lgb / upload``
+        right before persistence. Failure is logged but never raised — the
+        rest of the finalize path must still run."""
+        try:
+            summary_payload = self._metrics.build_summary_payload()
+            obs_event = StrategyEvent(
+                type=EventType.LOG,
+                level=EventLevel.INFO,
+                message="[observability] run summary",
+                payload=summary_payload,
+            )
+            self._seq += 1
+            self._persist_event(run_id, self._seq, obs_event)
+            events.append(obs_event)
+            self._dispatch_to_renderer(obs_event)
+        except Exception:  # noqa: BLE001
+            logger.warning("failed to emit OBSERVABILITY_SUMMARY", exc_info=True)
+
     def _shielded_record_run_finish(
         self,
         run_id: str,
@@ -1534,7 +1571,7 @@ def _worker_phase_a(
     plugin_id: str,
     run_id: str,
     reports_dir: Path,
-    config: ConfigService,
+    config_snapshot: ProviderConfigSnapshot,
     lgb_min_score_floor: float | None = 30.0,
     include_decile: bool = True,
     empty_array_policy: str = "repair",
@@ -1546,8 +1583,12 @@ def _worker_phase_a(
     v0.12.4 (P1-2): ``empty_array_policy`` is applied via the schemas
     ContextVar inside this worker thread; ThreadPoolExecutor doesn't
     auto-propagate ContextVars so callers pass the policy explicitly.
+
+    v0.13.0 (P1-4): receives a frozen :class:`ProviderConfigSnapshot` instead
+    of a live :class:`ConfigService`. The worker never reads from the main
+    thread's ``Database._conn`` / ``SecretStore``.
     """
-    db, wrt = open_worker_runtime(plugin_id, run_id, config=config)
+    db, wrt = open_worker_runtime(plugin_id, run_id, config_snapshot=config_snapshot)
     out = ProviderDebateResult(provider=provider)
     try:
         llm = wrt.llms.get_client(
@@ -1606,15 +1647,18 @@ def _worker_phase_b(
     reports_dir: Path,
     own_predictions: list[ContinuationCandidate],
     peers: list[tuple[str, list[ContinuationCandidate]]],
-    config: ConfigService,
+    config_snapshot: ProviderConfigSnapshot,
     empty_array_policy: str = "repair",
 ) -> tuple[list[StrategyEvent], DebateRoundResult]:
     """One provider's 辩论修订 (peer-aware revision).
 
     v0.12.4 (P1-2): ``empty_array_policy`` applied via ContextVar; see
     :func:`_worker_phase_a` for rationale.
+
+    v0.13.0 (P1-4): receives a frozen :class:`ProviderConfigSnapshot` instead
+    of a live :class:`ConfigService` (worker isolation).
     """
-    db, wrt = open_worker_runtime(plugin_id, run_id, config=config)
+    db, wrt = open_worker_runtime(plugin_id, run_id, config_snapshot=config_snapshot)
     try:
         llm = wrt.llms.get_client(
             provider, plugin_id=plugin_id, run_id=run_id, reports_dir=reports_dir

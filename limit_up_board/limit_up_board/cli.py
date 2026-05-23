@@ -70,7 +70,7 @@ app.add_typer(settings_app, name="settings")
 
 lgb_app = typer.Typer(
     name="lgb",
-    help="LightGBM 次日最大溢价概率评分模型生命周期管理（v0.5+）。",
+    help="LightGBM 模型生命周期管理（v0.5+；v0.13.0 起 lgb_score 明确为未校准排序分）。",
     no_args_is_help=True,
     add_completion=False,
 )
