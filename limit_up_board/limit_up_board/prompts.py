@@ -319,8 +319,8 @@ _PREDICTION_SYSTEM_TEMPLATE = """\
           "interpretation": "<对该数值的简短解读>"
         }
       ],
-      "next_day_watch_points": ["<次日需要观察的 1-4 个关键点>"],
-      "failure_triggers": ["<会让预测失效的 1-4 个触发条件>"],
+      "next_day_watch_points": ["<次日需要观察的 1-4 个关键点；至少 1 条，禁止 []>"],
+      "failure_triggers": ["<会让预测失效的 1-4 个触发条件；至少 1 条，禁止 []>"],
       "missing_data": []
     }
   ]
@@ -335,6 +335,10 @@ _PREDICTION_SYSTEM_TEMPLATE = """\
                        严禁填入数组或对象——若需引用 list 类输入字段，请改用其同名
                        _count（条数）或 _text（合并字符串）的标量伴生字段。
 - next_day_watch_points / failure_triggers: 各 1–4 条字符串数组（不可为空）
+  ★ 硬性约束：**每一个** candidate（含 prediction="avoid" / confidence="low" 的弱势标的）都必须给出
+  至少 1 条 next_day_watch_points 与 1 条 failure_triggers，禁止返回 `[]`。
+  对 avoid 候选，可写如「跌破前低/MA20 即确认失败」「分时反包失败/缩量阴跌」等通用要点，
+  也不可省略。**返回空数组会导致整批响应被拒绝、整轮重试，请逐条自查再输出。**
 - 输入清单中的每一只标的都必须出现在 candidates 中，candidate_id 与输入完全一致。
 """
 
@@ -524,8 +528,8 @@ REVISION_SYSTEM = """\
       "key_evidence": [
         {"field": "<输入字段名>", "value": 0, "unit": "<单位>", "interpretation": "<解读>"}
       ],
-      "next_day_watch_points": ["<1-4 个>"],
-      "failure_triggers": ["<1-4 个>"],
+      "next_day_watch_points": ["<1-4 个；至少 1 条，禁止 []>"],
+      "failure_triggers": ["<1-4 个；至少 1 条，禁止 []>"],
       "missing_data": [],
       "revision_note": "<≤120 字，解释相对你 R2 原判断的变化或保持原因>"
     }
@@ -538,7 +542,8 @@ REVISION_SYSTEM = """\
 - confidence:          high / medium / low
 - prediction:          top_candidate / watchlist / avoid
 - key_evidence:        每只 1–5 条
-- next_day_watch_points / failure_triggers: 各 1–4 条
+- next_day_watch_points / failure_triggers: 各 1–4 条，**禁止为空数组 `[]`**；
+  即便修订后判定为 avoid / low 的候选，也必须各保留至少 1 条（可沿用 R2 内容或写通用要点）。
 - revision_note:       1–120 字（必填），保持原判时需写明理由
 - 候选集与你 R2 输出完全一致，不可漏不可加。
 """

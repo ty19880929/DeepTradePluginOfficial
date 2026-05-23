@@ -9,9 +9,15 @@ DESIGN §12.4-12.5 + the v0.3.1 fixes:
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+logger = logging.getLogger(__name__)
+
+_WATCH_FALLBACK = "（LLM 未给出观察点，人工复核）"
+_TRIGGER_FALLBACK = "（LLM 未给出失败触发条件，人工复核）"
 
 # ---------------------------------------------------------------------------
 # Common evidence shape
@@ -84,6 +90,25 @@ class ContinuationCandidate(BaseModel):
     next_day_watch_points: list[str] = Field(min_length=1, max_length=4)
     failure_triggers: list[str] = Field(min_length=1, max_length=4)
     missing_data: list[str] = Field(default_factory=list)
+
+    @field_validator("next_day_watch_points", "failure_triggers", mode="before")
+    @classmethod
+    def _backfill_empty_list(cls, v, info):
+        # LLM 对弱势/avoid 候选偶发偷懒返回 `[]`，触发 min_length=1 校验失败、
+        # retry 仍空 → 整批 LLMValidationError。prompt 已显式禁止空数组仍偶发，
+        # 这里在校验前兜底，让流程继续；fallback 文案带"人工复核"以便人眼识别。
+        if isinstance(v, list) and len(v) == 0:
+            fallback = (
+                _WATCH_FALLBACK
+                if info.field_name == "next_day_watch_points"
+                else _TRIGGER_FALLBACK
+            )
+            logger.warning(
+                "ContinuationCandidate.%s 返回空数组，自动填充占位符；请复核 LLM 输出质量",
+                info.field_name,
+            )
+            return [fallback]
+        return v
 
 
 class ContinuationResponse(BaseModel):
