@@ -26,10 +26,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:  # pragma: no cover
     from deeptrade.core.db import Database
+
+EmptyArrayPolicy = Literal["repair", "degraded", "fallback"]
+_VALID_EMPTY_ARRAY_POLICIES: frozenset[str] = frozenset({"repair", "degraded", "fallback"})
 
 
 @dataclass
@@ -59,6 +62,12 @@ class LubConfig:
     # 上传鉴权 token。v0.12.3+：从源码硬编码（"deeptrade"）改为可配置；空串表示匿名上传，
     # 不写 Authorization header，由服务端决定是否拒绝。
     summary_upload_token: str = ""
+
+    # ---- v0.12.4 (P1-2)：连板预测 / 辩论修订 阶段的空数组兜底策略 ----
+    # "repair"   → LLM 重新生成（默认；与 prompt 文案一致：禁止空数组）
+    # "degraded" → 保留占位符 + 在 candidate.degraded_fields 标注命中字段
+    # "fallback" → 仅替换为占位符（v0.12.3 及之前的行为）
+    empty_array_policy: EmptyArrayPolicy = "repair"
 
 
 _KEY_PREFIX = "lub."
@@ -127,6 +136,11 @@ def validate_config(cfg: LubConfig) -> None:
     if cfg.summary_upload_timeout <= 0:
         raise ValueError(
             f"summary_upload_timeout 必须 > 0（当前 {cfg.summary_upload_timeout}）"
+        )
+    if cfg.empty_array_policy not in _VALID_EMPTY_ARRAY_POLICIES:
+        raise ValueError(
+            f"empty_array_policy 必须为 'repair' / 'degraded' / 'fallback' 之一"
+            f"（当前 {cfg.empty_array_policy!r}）"
         )
 
 

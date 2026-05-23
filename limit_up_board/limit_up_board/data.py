@@ -1156,22 +1156,82 @@ def _famous_seats_hits(seats: list[str]) -> list[str]:
     return out
 
 
+def _aggregate_top_list_net(
+    top_list_df: pd.DataFrame | None,
+    *,
+    reasons_text_max_chars: int = 80,
+) -> dict[str, dict[str, Any]]:
+    """v0.12.4 (P1-3) — per-ts_code aggregation of ``top_list``.
+
+    ``lub_top_list`` 的主键含 ``reason``，同一 ts_code 可能因 \"日涨幅偏离7%\"、
+    \"日涨幅偏离7%(成交额过亿)\"、\"机构专用\" 等多个 reason 同时上榜，每行
+    各自带一份 ``net_amount``。v0.12.3 及之前用 per-row 循环 ``rollup[ts]['lhb_net_buy_yi'] = net``
+    导致后到行覆盖先到行、丢失资金信息。修复后改为 groupby 求和。
+
+    Per ts_code 返回：
+        * ``lhb_net_buy_yi``       —— 全部 reason 净买入额之和（亿）
+        * ``lhb_reason_count``     —— 该 ts_code 当日上榜原因数
+        * ``lhb_reasons_text``     —— 按各 reason 净买入额降序拼接，逗号分隔；
+                                      超过 ``reasons_text_max_chars`` 截断并附 "…"
+    无 net_amount 列 / 全空时 ``lhb_net_buy_yi`` 为 ``None``（pandas sum() 默认
+    会把空组聚成 0；显式判断更稳）。
+    """
+    if top_list_df is None or top_list_df.empty or "ts_code" not in top_list_df.columns:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    has_net = "net_amount" in top_list_df.columns
+    has_reason = "reason" in top_list_df.columns
+    for ts_raw, group in top_list_df.groupby("ts_code"):
+        ts = str(ts_raw)
+        entry: dict[str, Any] = {"lhb_reason_count": int(len(group))}
+        # 净买入额：先按行 normalize 到亿，再求和；全 None → keep None。
+        if has_net:
+            per_row = [
+                normalize_to_yi("net_amount", v) for v in group["net_amount"].tolist()
+            ]
+            non_null = [x for x in per_row if x is not None]
+            entry["lhb_net_buy_yi"] = round(sum(non_null), 2) if non_null else None
+        else:
+            per_row = [None] * len(group)
+            entry["lhb_net_buy_yi"] = None
+        # reasons_text：按当行 net_amount 降序，None 视为 -inf；截断。
+        if has_reason:
+            pairs: list[tuple[str, float]] = []
+            reasons = group["reason"].tolist()
+            for r, n in zip(reasons, per_row, strict=True):
+                if r is None:
+                    continue
+                rs = str(r).strip()
+                if not rs:
+                    continue
+                pairs.append((rs, n if n is not None else float("-inf")))
+            pairs.sort(key=lambda kv: kv[1], reverse=True)
+            joined = ", ".join(p[0] for p in pairs)
+            if len(joined) > reasons_text_max_chars:
+                joined = joined[: reasons_text_max_chars - 1].rstrip(", ") + "…"
+            entry["lhb_reasons_text"] = joined or None
+        else:
+            entry["lhb_reasons_text"] = None
+        out[ts] = entry
+    return out
+
+
 def _build_lhb_rollup(
     top_list_df: pd.DataFrame | None,
     top_inst_df: pd.DataFrame | None,
 ) -> dict[str, dict[str, Any]]:
     """Roll up top_list / top_inst into per-ts_code lhb_* fields.
 
-    Returns ``{ts_code: {lhb_net_buy_yi, lhb_inst_count, lhb_famous_seats}}``.
-    Candidates absent from this map → 未上榜（lhb_* = null in their row）。
+    Returns ``{ts_code: {lhb_net_buy_yi, lhb_reason_count, lhb_reasons_text,
+    lhb_inst_count, lhb_famous_seats}}``. Candidates absent from this map →
+    未上榜（lhb_* = null in their row）。
     """
     rollup: dict[str, dict[str, Any]] = {}
 
-    if top_list_df is not None and not top_list_df.empty and "ts_code" in top_list_df.columns:
-        for row in top_list_df.itertuples(index=False):
-            ts = str(row.ts_code)
-            net = normalize_to_yi("net_amount", getattr(row, "net_amount", None))
-            rollup.setdefault(ts, {})["lhb_net_buy_yi"] = net
+    # v0.12.4 (P1-3)：top_list 改为 groupby 聚合；同 ts_code 多 reason 行
+    # 不再相互覆盖，net_buy_yi 是各 reason 净买入额之和。
+    for ts, entry in _aggregate_top_list_net(top_list_df).items():
+        rollup.setdefault(ts, {}).update(entry)
 
     if top_inst_df is not None and not top_inst_df.empty and "ts_code" in top_inst_df.columns:
         for ts, group in top_inst_df.groupby("ts_code"):
@@ -1319,6 +1379,10 @@ def _build_candidate_rows(
         seats_list = lhb.get("lhb_famous_seats") or []
         rec["lhb_famous_seats_count"] = int(len(seats_list))
         rec["lhb_famous_seats_text"] = "; ".join(str(s) for s in seats_list)
+        # v0.12.4 (P1-3) — 多 reason 派生字段：原因数 + 按净买入额降序拼接文本。
+        # 当 ts_code 未上榜时为 0 / 空串（LLM 通过 lhb_data_quality 区分）。
+        rec["lhb_reason_count"] = int(lhb.get("lhb_reason_count") or 0)
+        rec["lhb_reasons_text"] = lhb.get("lhb_reasons_text") or ""
         # P1-3 — 三态显式标记数据质量，让 LLM 区分「未上榜（事实）」与「接口异常」
         if lhb_api_unavailable:
             rec["lhb_data_quality"] = "api_unavailable"

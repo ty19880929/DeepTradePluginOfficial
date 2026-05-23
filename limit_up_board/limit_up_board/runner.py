@@ -54,6 +54,7 @@ from .pipeline import (
 )
 from .prompts import assign_peer_labels
 from .render import export_llm_calls, render_terminal_summary, write_report
+from .schemas import apply_empty_array_policy
 from .uploader import UploadError, upload_summary_json
 from .runtime import (
     LubRuntime,
@@ -659,18 +660,22 @@ class LubRunner:
             return
 
         # Step 4 — 连板预测
+        # v0.12.4 (P1-2)：空数组兜底策略由 lub_cfg 驱动；schema 内的
+        # ``model_validator`` 通过 ContextVar 读取此策略，决定 repair / degraded /
+        # fallback 三种行为。
         prediction_result = None
-        for ev, res in run_prediction(
-            llm=self._llm,
-            selected=selected,
-            bundle=bundle,
-            preset=preset,
-            lgb_min_score_floor=lgb_floor,
-            include_decile=include_decile,
-        ):
-            yield ev
-            if res is not None:
-                prediction_result = res
+        with apply_empty_array_policy(lub_cfg.empty_array_policy):
+            for ev, res in run_prediction(
+                llm=self._llm,
+                selected=selected,
+                bundle=bundle,
+                preset=preset,
+                lgb_min_score_floor=lgb_floor,
+                include_decile=include_decile,
+            ):
+                yield ev
+                if res is not None:
+                    prediction_result = res
         predictions = prediction_result.predictions if prediction_result else []
 
         # Step 4.5 — final_ranking when 连板预测 was multi-batch
@@ -848,6 +853,7 @@ class LubRunner:
                         rt.config,
                         lgb_floor,
                         include_decile,
+                        lub_cfg.empty_array_policy,
                     ): provider
                     for provider in providers
                 }
@@ -928,6 +934,7 @@ class LubRunner:
                                 if peer.provider != r.provider
                             ],
                             rt.config,
+                            lub_cfg.empty_array_policy,
                         ): r.provider
                         for r in survivors
                     }
@@ -1530,10 +1537,16 @@ def _worker_phase_a(
     config: ConfigService,
     lgb_min_score_floor: float | None = 30.0,
     include_decile: bool = True,
+    empty_array_policy: str = "repair",
 ) -> ProviderDebateResult:
     """One provider's 强势初筛 + 连板预测 + (optional) final_ranking. Tagged
     events are attached to the returned ProviderDebateResult; the main thread
-    will emit them in completion order."""
+    will emit them in completion order.
+
+    v0.12.4 (P1-2): ``empty_array_policy`` is applied via the schemas
+    ContextVar inside this worker thread; ThreadPoolExecutor doesn't
+    auto-propagate ContextVars so callers pass the policy explicitly.
+    """
     db, wrt = open_worker_runtime(plugin_id, run_id, config=config)
     out = ProviderDebateResult(provider=provider)
     try:
@@ -1554,14 +1567,15 @@ def _worker_phase_a(
         selected = out.screening_result.selected if out.screening_result else []
 
         if selected:
-            for ev, res in run_prediction(
-                llm=llm, selected=selected, bundle=bundle, preset=preset,
-                lgb_min_score_floor=lgb_min_score_floor,
-                include_decile=include_decile,
-            ):
-                events.append(ev)
-                if res is not None:
-                    out.prediction_result = res
+            with apply_empty_array_policy(empty_array_policy):  # type: ignore[arg-type]
+                for ev, res in run_prediction(
+                    llm=llm, selected=selected, bundle=bundle, preset=preset,
+                    lgb_min_score_floor=lgb_min_score_floor,
+                    include_decile=include_decile,
+                ):
+                    events.append(ev)
+                    if res is not None:
+                        out.prediction_result = res
 
         if out.prediction_result and out.prediction_result.success_batches > 1 and out.prediction_result.predictions:
             out.final_attempted = True
@@ -1593,8 +1607,13 @@ def _worker_phase_b(
     own_predictions: list[ContinuationCandidate],
     peers: list[tuple[str, list[ContinuationCandidate]]],
     config: ConfigService,
+    empty_array_policy: str = "repair",
 ) -> tuple[list[StrategyEvent], DebateRoundResult]:
-    """One provider's 辩论修订 (peer-aware revision)."""
+    """One provider's 辩论修订 (peer-aware revision).
+
+    v0.12.4 (P1-2): ``empty_array_policy`` applied via ContextVar; see
+    :func:`_worker_phase_a` for rationale.
+    """
     db, wrt = open_worker_runtime(plugin_id, run_id, config=config)
     try:
         llm = wrt.llms.get_client(
@@ -1602,16 +1621,17 @@ def _worker_phase_b(
         )
         events: list[StrategyEvent] = []
         result: DebateRoundResult | None = None
-        for ev, res in run_debate_revision(
-            llm=llm,
-            bundle=bundle,
-            own_predictions=own_predictions,
-            peers=peers,
-            preset=preset,
-        ):
-            events.append(ev)
-            if res is not None:
-                result = res
+        with apply_empty_array_policy(empty_array_policy):  # type: ignore[arg-type]
+            for ev, res in run_debate_revision(
+                llm=llm,
+                bundle=bundle,
+                own_predictions=own_predictions,
+                peers=peers,
+                preset=preset,
+            ):
+                events.append(ev)
+                if res is not None:
+                    result = res
         if result is None:
             result = DebateRoundResult(error="run_debate_revision yielded no terminal result")
         return events, result

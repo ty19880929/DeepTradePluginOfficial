@@ -278,16 +278,22 @@ _PREDICTION_SYSTEM_TEMPLATE = """\
     cyq_close_to_avg_cost_pct < -10% 视为"严重套牢盘解套"，谨慎评估；
     cyq_top10_concentration > 60% 视为"筹码高度集中"，可作为正面 evidence。
   · 仅当数据存在时引用；missing_data 中的字段不得引用、不得编造结论。
-- 龙虎榜（参考候选行 lhb_net_buy_yi / lhb_inst_count / lhb_famous_seats_count / lhb_famous_seats_text）：
-  · lhb_* 全部为 null 表示"该股未上龙虎榜"——这是合法事实，不视为数据缺失，
+- 龙虎榜（参考候选行 lhb_net_buy_yi / lhb_inst_count / lhb_famous_seats_count /
+  lhb_famous_seats_text / lhb_reason_count / lhb_reasons_text，v0.12.4+ 新增后两个字段）：
+  · lhb_* 全部为 null/0 表示"该股未上龙虎榜"——这是合法事实，不视为数据缺失，
     rationale 可以说"未触发龙虎榜异动"。
+  · lhb_net_buy_yi 是该股当日**全部上榜原因合计**的净买入额（亿，v0.12.4 前版本只保留
+    最后一行 reason 的值，已修复为 sum）。lhb_reason_count 是该股同日上榜的原因数；
+    > 1 表示触发了多类型异动（如「日涨幅偏离 7%」+「机构专用」共同上榜），
+    资金来源更分散。lhb_reasons_text 按 reason 净买入额降序逗号拼接（≤80 字）。
   · lhb_famous_seats_count > 0 且 lhb_net_buy_yi > 0 时，可作为"游资认可"的正面 evidence；
     lhb_net_buy_yi < 0 时不得作为正面 evidence（即便 famous_seats_count > 0 也只能作为
     中性或负面信号）。
   · lhb_famous_seats_text 是分号分隔的席位名称合并字符串，仅可在 interpretation 中
-    照抄原文片段；不可推断"哪一位游资"或具体身份。
-  · 作为 key_evidence 引用时，field 用 lhb_famous_seats_count（value 填整数席位数）
-    或 lhb_famous_seats_text（value 填字符串原文），严禁把席位列表当数组写入 value。
+    照抄原文片段；不可推断"哪一位游资"或具体身份。lhb_reasons_text 同理仅照抄原文。
+  · 作为 key_evidence 引用时，field 用 lhb_famous_seats_count / lhb_reason_count
+    （value 填整数）或 lhb_famous_seats_text / lhb_reasons_text（value 填字符串原文），
+    严禁把席位列表 / 原因列表当数组写入 value。
 
 【输出语义】
 - continuation_score (0-100) 仅是模型内部排序分。
