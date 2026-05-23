@@ -42,6 +42,8 @@ class PurgeReport:
     latest_pointer_removed: bool = False
     n_checkpoint_dirs: int = 0
     n_checkpoint_shards: int = 0
+    # v0.13.1：每个模型独立的 isotonic 校准器 pkl；归在 models 标志下一起清。
+    n_calibrator_files: int = 0
     errors: list[str] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
@@ -54,6 +56,7 @@ class PurgeReport:
             self.n_model_files
             + self.n_meta_files
             + self.n_dataset_files
+            + self.n_calibrator_files
             + self.n_checkpoint_shards
             + (1 if self.latest_pointer_removed else 0)
         )
@@ -99,6 +102,9 @@ def count_artifacts(db: Database) -> PurgeReport:
         )
         report.n_meta_files = sum(
             1 for _ in models_dir.glob("lgb_model_*.meta.json") if _.is_file()
+        )
+        report.n_calibrator_files = sum(
+            1 for _ in models_dir.glob("lgb_calibrator_*.pkl") if _.is_file()
         )
         report.latest_pointer_removed = lgb_paths.latest_pointer().is_file()
     if datasets_dir.is_dir():
@@ -179,6 +185,12 @@ def purge_lgb_artifacts(
             lgb_paths.models_dir(), "lgb_model_*.meta.json"
         )
         report.n_meta_files = n_meta
+        report.errors.extend(errs)
+        # v0.13.1：calibrator.pkl 与 booster 同生命周期
+        n_calib, errs = _delete_dir_glob(
+            lgb_paths.models_dir(), "lgb_calibrator_*.pkl"
+        )
+        report.n_calibrator_files = n_calib
         report.errors.extend(errs)
         latest = lgb_paths.latest_pointer()
         if latest.is_file():

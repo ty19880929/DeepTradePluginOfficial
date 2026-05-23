@@ -38,6 +38,7 @@ import pandas as pd
 
 from . import paths as lgb_paths
 from . import registry as lgb_registry
+from .calibration import apply_calibrator, load_calibrator
 from .features import FEATURE_NAMES, FeatureSchemaMismatch, assert_columns
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -73,6 +74,10 @@ class _LoadedModel:
     model_id: str
     booster: Any  # lightgbm.Booster
     feature_names: tuple[str, ...]
+    # v0.13.1 (P2-2)：isotonic 校准器实例；None 表示该模型未训练校准器或
+    # 校准器加载失败，scorer 返回 raw booster 输出。
+    calibrator: Any | None = None
+    calibration_method: str | None = None
 
 
 _SCORE_COLUMNS: tuple[str, ...] = ("lgb_score", "feature_hash", "feature_missing_json")
@@ -138,6 +143,20 @@ class LgbScorer:
     @property
     def load_error(self) -> str | None:
         return self._load_error
+
+    @property
+    def calibration_method(self) -> str | None:
+        """v0.13.1：``"isotonic"`` / ``"platt"`` / ``None``。
+
+        ``None`` 表示该模型没有校准器（旧版本训练的、训练时校准失败、或
+        ``calibrator.pkl`` 文件缺失 / 损坏）— ``score_batch`` 返回的
+        ``lgb_score`` 应当被理解为 raw 排序分而非概率。
+        """
+        return self._loaded.calibration_method if self._loaded is not None else None
+
+    @property
+    def has_calibrator(self) -> bool:
+        return self._loaded is not None and self._loaded.calibrator is not None
 
     def warmup(self) -> None:
         """显式触发 lazy load + 一次空 predict，确认模型可用。
@@ -223,6 +242,11 @@ class LgbScorer:
             )
 
         preds_array = np.asarray(preds, dtype="float64").reshape(-1)
+
+        # v0.13.1 (P2-2)：calibrator 存在时把 booster sigmoid 输出转成校准后的
+        # 经验概率；不存在 / apply 失败 → 留 raw（apply_calibrator 内部已降级）。
+        if loaded.calibrator is not None:
+            preds_array = apply_calibrator(loaded.calibrator, preds_array)
         if preds_array.shape[0] != len(aligned):
             logger.warning(
                 "LgbScorer prediction shape mismatch (%d vs %d); returning NaN.",
@@ -312,13 +336,37 @@ class LgbScorer:
             )
             return
 
+        # v0.13.1 (P2-2)：尝试加载 isotonic 校准器；缺文件 / 损坏 / sklearn 缺包
+        # 都让 load_calibrator 返回 None，scorer 自然降级到 raw 输出（calibration
+        # 元数据也置 None）。
+        calibrator: Any | None = None
+        calibration_method: str | None = record.calibration_method
+        if calibration_method:
+            calibrator_path = (
+                lgb_paths.models_dir() / lgb_paths.calibrator_file_name(record.model_id)
+            )
+            calibrator = load_calibrator(calibrator_path)
+            if calibrator is None:
+                logger.warning(
+                    "LgbScorer: model %s registered as %s but calibrator file missing"
+                    " or unreadable; falling back to raw scores",
+                    record.model_id,
+                    calibration_method,
+                )
+                calibration_method = None
+
         self._loaded = _LoadedModel(
-            model_id=record.model_id, booster=booster, feature_names=feat_names
+            model_id=record.model_id,
+            booster=booster,
+            feature_names=feat_names,
+            calibrator=calibrator,
+            calibration_method=calibration_method,
         )
         logger.info(
-            "LgbScorer loaded model_id=%s (features=%d)",
+            "LgbScorer loaded model_id=%s (features=%d, calibration=%s)",
             record.model_id,
             len(feat_names),
+            calibration_method or "raw",
         )
 
     def _lookup_record(self) -> Any:

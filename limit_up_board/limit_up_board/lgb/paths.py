@@ -53,3 +53,8 @@ def meta_file_name(model_id: str) -> str:
 def dataset_file_name(model_id: str) -> str:
     """训练矩阵 parquet 文件名。"""
     return f"lgb_dataset_{model_id}.parquet"
+
+
+def calibrator_file_name(model_id: str) -> str:
+    """v0.13.1：isotonic 校准器 pickle 文件名（与 booster 同目录）。"""
+    return f"lgb_calibrator_{model_id}.pkl"

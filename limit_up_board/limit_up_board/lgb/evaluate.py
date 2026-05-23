@@ -83,6 +83,12 @@ class EvaluateResult:
     schema_version_match: bool = True
     schema_mismatch_detail: str | None = None
     notes: list[str] = field(default_factory=list)
+    # v0.13.1 (P2-2)：--show-calibration 时填充；不开启时为 None / 空。
+    # ``brier`` 是 scorer 实际输出（校准过则为校准后）对应的 Brier；
+    # ``calibration_method`` 复制自 scorer 加载结果，便于 JSON 消费者识别。
+    calibration_method: str | None = None
+    brier: float | None = None
+    reliability: list[dict[str, float | int]] = field(default_factory=list)
 
     def to_json_dict(self) -> dict[str, Any]:
         """Friendly dict for `json.dumps`."""
@@ -110,6 +116,7 @@ def evaluate_model(
     min_float_mv_yi: float = 0.0,
     force_sync: bool = False,
     on_day: Callable[[str, int, int], None] | None = None,
+    show_calibration: bool = False,
 ) -> EvaluateResult:
     """Run离线评估 over ``[start_date, end_date]``.
 
@@ -199,6 +206,21 @@ def evaluate_model(
 
     # ---- Top-K aggregates --------------------------------------------
     result.topk = _compute_topk_metrics(eval_df, k_values=k_values)
+
+    # ---- v0.13.1 (P2-2)：可选校准评估 --------------------------------
+    if show_calibration and not labeled.empty:
+        from .calibration import brier_score, reliability_table  # noqa: PLC0415
+
+        y_true = labeled["label"].astype(int).to_numpy()
+        y_pred = labeled["lgb_score"].astype(float).to_numpy()
+        result.brier = brier_score(y_true, y_pred)
+        result.reliability = reliability_table(y_true, y_pred, n_bins=10)
+        result.calibration_method = scorer.calibration_method  # type: ignore[assignment]
+        if scorer.calibration_method is None:
+            result.notes.append(
+                "Brier / reliability computed on RAW booster scores — "
+                "model has no calibrator; retrain with v0.13.1+ to fit one."
+            )
 
     return result
 
@@ -364,30 +386,64 @@ def format_evaluate_table(result: EvaluateResult) -> str:
     logloss_str = f"{result.logloss:.4f}" if result.logloss is not None else "—"
     lines.append(f"AUC = {auc_str}   logloss = {logloss_str}")
 
-    if not result.topk:
-        return "\n".join(lines)
-
-    lines.append("")
-    lines.append("Top-K vs baseline (hit_rate% · avg_upside%):")
-    lines.append(
-        " K  | hit%   | up%   | base_hit% | base_up% | Δhit%   | Δup%"
-    )
-    lines.append("----+--------+-------+-----------+----------+---------+--------")
-    for tk in result.topk:
+    if result.topk:
+        lines.append("")
+        lines.append("Top-K vs baseline (hit_rate% · avg_upside%):")
         lines.append(
-            f" {tk.k:2d} | "
-            f"{_fmt(tk.hit_rate_pct, '5.1f'):>6} | "
-            f"{_fmt(tk.avg_upside_pct, '4.2f'):>5} | "
-            f"{_fmt(tk.baseline_hit_rate_pct, '5.1f'):>9} | "
-            f"{_fmt(tk.baseline_avg_upside_pct, '4.2f'):>8} | "
-            f"{_fmt(tk.delta_hit_rate_pct, '+5.1f'):>7} | "
-            f"{_fmt(tk.delta_avg_upside_pct, '+5.2f'):>6}"
+            " K  | hit%   | up%   | base_hit% | base_up% | Δhit%   | Δup%"
         )
+        lines.append("----+--------+-------+-----------+----------+---------+--------")
+        for tk in result.topk:
+            lines.append(
+                f" {tk.k:2d} | "
+                f"{_fmt(tk.hit_rate_pct, '5.1f'):>6} | "
+                f"{_fmt(tk.avg_upside_pct, '4.2f'):>5} | "
+                f"{_fmt(tk.baseline_hit_rate_pct, '5.1f'):>9} | "
+                f"{_fmt(tk.baseline_avg_upside_pct, '4.2f'):>8} | "
+                f"{_fmt(tk.delta_hit_rate_pct, '+5.1f'):>7} | "
+                f"{_fmt(tk.delta_avg_upside_pct, '+5.2f'):>6}"
+            )
+    # v0.13.1 (P2-2)：calibration 段（仅 --show-calibration 触发时填充）。
+    if result.brier is not None:
+        lines.append("")
+        method = result.calibration_method or "raw"
+        lines.append(
+            f"Calibration · method={method} · "
+            f"Brier={result.brier:.4f} · bins={len(result.reliability)}"
+        )
+        if result.reliability:
+            lines.append(
+                " bin | range            | n     | mean_pred | observed | gap"
+            )
+            lines.append(
+                "-----+------------------+-------+-----------+----------+-------"
+            )
+            for idx, row in enumerate(result.reliability, start=1):
+                lo = float(row["bin_lo"])
+                hi = float(row["bin_hi"])
+                lo_disp = "-inf" if lo == -1.0 else f"{lo:.3f}"
+                hi_disp = "+inf" if hi == 1.0 and lo != -1.0 else f"{hi:.3f}"
+                n_v = int(row["n"])
+                mp = row["mean_pred"]
+                obs = row["observed"]
+                gap = row["gap"]
+                lines.append(
+                    f" {idx:>3} | {lo_disp:>7}..{hi_disp:<7} | "
+                    f"{n_v:>5} | "
+                    f"{_fmt(mp if isinstance(mp, float) and not _is_nan(mp) else None, '6.3f'):>9} | "
+                    f"{_fmt(obs if isinstance(obs, float) and not _is_nan(obs) else None, '6.3f'):>8} | "
+                    f"{_fmt(gap if isinstance(gap, float) and not _is_nan(gap) else None, '+6.3f'):>6}"
+                )
+
     if result.notes:
         lines.append("")
         for n in result.notes:
             lines.append(f"note: {n}")
     return "\n".join(lines)
+
+
+def _is_nan(v: float) -> bool:
+    return v != v  # noqa: PLR0124 — IEEE NaN check
 
 
 def _fmt(v: float | None, spec: str) -> str:

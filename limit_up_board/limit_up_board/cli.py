@@ -807,9 +807,23 @@ def cmd_lgb_train(
         model_path = lgb_paths.models_dir() / lgb_paths.model_file_name(model_id)
         meta_path = lgb_paths.models_dir() / lgb_paths.meta_file_name(model_id)
         dataset_path = lgb_paths.datasets_dir() / lgb_paths.dataset_file_name(model_id)
+        calibrator_path = lgb_paths.models_dir() / lgb_paths.calibrator_file_name(model_id)
 
         # ---- save model + meta + dataset snapshot ----
         result.model.save_model(str(model_path))
+
+        # v0.13.1 (P2-2)：把 isotonic 校准器与 booster 同目录持久化；缺
+        # calibrator 时 LgbScorer 自然降级到 raw 输出。
+        if result.calibrator is not None:
+            from .lgb.calibration import save_calibrator  # noqa: PLC0415
+
+            try:
+                save_calibrator(calibrator_path, result.calibrator)
+            except Exception as e:  # noqa: BLE001
+                logging.warning(
+                    "failed to persist calibrator.pkl (%s); scorer will use raw scores",
+                    e,
+                )
 
         meta: dict[str, Any] = {
             "model_id": model_id,
@@ -871,6 +885,9 @@ def cmd_lgb_train(
             plugin_version=_plugin_version(),
             git_commit=git_commit,
             file_path=str(rel_path).replace("\\", "/"),
+            calibration_method=result.calibration_method,
+            calibration_brier=result.calibration_brier,
+            calibration_samples=result.calibration_samples,
         )
         insert_model(db, record, activate=not no_activate)
         if not no_activate:
@@ -886,6 +903,15 @@ def cmd_lgb_train(
             )
         if result.cv_logloss_mean is not None:
             typer.echo(f"  CV logloss = {result.cv_logloss_mean:.4f}")
+        if result.calibration_method:
+            typer.echo(
+                f"  Calibrator = {result.calibration_method} "
+                f"(n={result.calibration_samples}) — Brier "
+                f"{result.calibration_brier_pre:.4f} → "
+                f"{result.calibration_brier:.4f}"
+            )
+        else:
+            typer.echo("  Calibrator = (not fitted; scorer will return raw scores)")
         typer.echo("  Top-10 feature importance:")
         for name, score in result.top_features(10):
             typer.echo(f"    {name:<40} {score:.0f}")
@@ -893,6 +919,8 @@ def cmd_lgb_train(
         typer.echo(f"  meta:    {meta_path}")
         if dataset_path is not None:
             typer.echo(f"  dataset: {dataset_path}")
+        if result.calibrator is not None:
+            typer.echo(f"  calibrator: {calibrator_path}")
         typer.echo(f"  active:  {not no_activate}")
         if not no_activate:
             typer.echo(
@@ -930,6 +958,12 @@ def cmd_lgb_evaluate(
     ),
     baseline: str | None = typer.Option(
         None, "--baseline", help="drift baseline 模型 ID（默认 = active 或 --model-id）"
+    ),
+    show_calibration: bool = typer.Option(
+        False,
+        "--show-calibration",
+        help="v0.13.1+：附加 Brier score + 10 桶 reliability table（按 scorer 实际"
+        " 输出口径，有 calibrator 时为校准后值，无 calibrator 时为 raw）",
     ),
 ) -> None:
     """对指定窗口跑离线评估（AUC / logloss / Top-K 命中率 vs baseline）。"""
@@ -997,6 +1031,7 @@ def cmd_lgb_evaluate(
             min_float_mv_yi=cfg.min_float_mv_yi,
             force_sync=force_sync,
             on_day=_on_day,
+            show_calibration=show_calibration,
         )
 
         typer.echo("")
@@ -1123,7 +1158,10 @@ def cmd_lgb_prune(
             model_file = lgb_paths.plugin_data_dir() / r.file_path
             meta_file = lgb_paths.models_dir() / lgb_paths.meta_file_name(r.model_id)
             dataset_file = lgb_paths.datasets_dir() / lgb_paths.dataset_file_name(r.model_id)
-            for f in (model_file, meta_file, dataset_file):
+            calibrator_file = (
+                lgb_paths.models_dir() / lgb_paths.calibrator_file_name(r.model_id)
+            )
+            for f in (model_file, meta_file, dataset_file, calibrator_file):
                 if f.is_file():
                     f.unlink()
             if not keep_rows:

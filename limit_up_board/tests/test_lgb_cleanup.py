@@ -33,9 +33,20 @@ from limit_up_board.lgb.cleanup import (
 from limit_up_board.lgb.features import FEATURE_NAMES, SCHEMA_VERSION
 from limit_up_board.lgb.registry import ModelRecord, insert_model
 
-MIGRATION_FILE = (
-    Path(__file__).resolve().parents[1] / "migrations" / "20260601_001_lgb_tables.sql"
-)
+MIGRATION_FILES = [
+    Path(__file__).resolve().parents[1] / "migrations" / "20260601_001_lgb_tables.sql",
+    # v0.13.1：calibration_* 列由后续迁移加上
+    Path(__file__).resolve().parents[1] / "migrations" / "20260524_001_lgb_calibration.sql",
+]
+
+
+def _apply_lgb_migrations(db: Database) -> None:
+    for migration in MIGRATION_FILES:
+        sql_text = migration.read_text(encoding="utf-8")
+        for stmt in sql_text.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                db.execute(stmt)
 
 
 # ---------------------------------------------------------------------------
@@ -56,11 +67,7 @@ def lgb_db(isolated_home: Path) -> Database:  # noqa: ARG001 — chaining
     from deeptrade.core import paths
 
     db = Database(paths.db_path())
-    sql_text = MIGRATION_FILE.read_text(encoding="utf-8")
-    for stmt in sql_text.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            db.execute(stmt)
+    _apply_lgb_migrations(db)
     return db
 
 
@@ -279,9 +286,7 @@ def test_purge_when_models_dir_missing(
     from deeptrade.core import paths as core_paths
 
     db = Database(core_paths.db_path())
-    for stmt in MIGRATION_FILE.read_text(encoding="utf-8").split(";"):
-        if stmt.strip():
-            db.execute(stmt.strip())
+    _apply_lgb_migrations(db)
 
     report = purge_lgb_artifacts(db, models=True, datasets=True, predictions=True)
     assert report.total_files_removed == 0

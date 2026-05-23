@@ -25,6 +25,8 @@ MIGRATION_FILES = [
     Path(__file__).resolve().parents[1] / "migrations" / "20260601_002_prediction_records.sql",
     Path(__file__).resolve().parents[1] / "migrations" / "20260601_003_winrate_reviews.sql",
     Path(__file__).resolve().parents[1] / "migrations" / "20260516_001_evidence_validation.sql",
+    # v0.13.1：lub_lgb_models.calibration_* 列
+    Path(__file__).resolve().parents[1] / "migrations" / "20260524_001_lgb_calibration.sql",
 ]
 
 

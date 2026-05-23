@@ -20,20 +20,23 @@ from limit_up_board.lgb.registry import (
     set_active,
 )
 
-MIGRATION_FILE = (
-    Path(__file__).resolve().parents[1] / "migrations" / "20260601_001_lgb_tables.sql"
-)
+MIGRATION_FILES = [
+    Path(__file__).resolve().parents[1] / "migrations" / "20260601_001_lgb_tables.sql",
+    # v0.13.1: 校准元数据列由后续迁移加上
+    Path(__file__).resolve().parents[1] / "migrations" / "20260524_001_lgb_calibration.sql",
+]
 
 
 @pytest.fixture
 def lgb_db(tmp_path: Path) -> Database:
     db = Database(tmp_path / "test.duckdb")
     # 只应用本 PR 关心的迁移；不引入前置 init 迁移以保持测试隔离。
-    sql_text = MIGRATION_FILE.read_text(encoding="utf-8")
-    for stmt in sql_text.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            db.execute(stmt)
+    for migration in MIGRATION_FILES:
+        sql_text = migration.read_text(encoding="utf-8")
+        for stmt in sql_text.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                db.execute(stmt)
     return db
 
 

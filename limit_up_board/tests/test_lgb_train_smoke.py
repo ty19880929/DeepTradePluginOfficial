@@ -36,9 +36,11 @@ from limit_up_board.lgb.trainer import train_lightgbm
 
 pytestmark = pytest.mark.slow
 
-MIGRATION_FILE = (
-    Path(__file__).resolve().parents[1] / "migrations" / "20260601_001_lgb_tables.sql"
-)
+MIGRATION_FILES = [
+    Path(__file__).resolve().parents[1] / "migrations" / "20260601_001_lgb_tables.sql",
+    # v0.13.1：calibration_* 列由后续迁移加上
+    Path(__file__).resolve().parents[1] / "migrations" / "20260524_001_lgb_calibration.sql",
+]
 
 
 def _seeded_dataset(*, n_per_day: int = 40, n_days: int = 6) -> LgbDataset:
@@ -87,11 +89,12 @@ def lgb_db(isolated_home: Path) -> Database:  # noqa: ARG001 — fixture chained
     from deeptrade.core import paths
 
     db = Database(paths.db_path())
-    sql_text = MIGRATION_FILE.read_text(encoding="utf-8")
-    for stmt in sql_text.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            db.execute(stmt)
+    for migration in MIGRATION_FILES:
+        sql_text = migration.read_text(encoding="utf-8")
+        for stmt in sql_text.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                db.execute(stmt)
     return db
 
 

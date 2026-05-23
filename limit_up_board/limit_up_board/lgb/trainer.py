@@ -74,6 +74,13 @@ class TrainResult:
     # 时优先用它；否则回退到 ``num_boost_round`` 上限（1500）。值同样会写入
     # ``hyperparams_json`` 便于 `lgb info` 输出。
     final_num_boost_round: int = 0
+    # v0.13.1 (P2-2)：CV out-of-fold 拟合的 isotonic 校准器 + 校准前后 Brier。
+    # CV 被跳过 / 全单类 / sklearn 缺包时校准器为 None，scorer 自然走 raw 路径。
+    calibrator: Any | None = None
+    calibration_method: str | None = None
+    calibration_brier: float | None = None  # 校准 *后* 的 Brier（写库）
+    calibration_brier_pre: float | None = None  # 仅用于 CLI 输出对比
+    calibration_samples: int = 0
 
     def top_features(self, n: int = 10) -> list[tuple[str, float]]:
         return self.feature_importance[:n]
@@ -114,16 +121,21 @@ def _crossval_metrics(
     folds: int,
     num_boost_round: int,
     early_stopping_rounds: int,
-) -> tuple[list[float], list[float], int]:
-    """Return (auc_per_fold, logloss_per_fold, mean_best_iter).
+) -> tuple[list[float], list[float], int, np.ndarray]:
+    """Return (auc_per_fold, logloss_per_fold, mean_best_iter, oof_preds).
 
     使用 GroupKFold by trade_date，避免同一交易日的样本跨折泄漏。
+
+    v0.13.1 (P2-2)：``oof_preds`` 是 OOF 拼接预测向量（长度 == 数据集行数）；
+    每个 fold 的 val 切片由该 fold 的 booster 推出，组合后用于训练校准器。
+    GroupKFold 保证每个样本仅作为某一个 fold 的 val，所以 OOF 没有数据泄漏。
     """
     from sklearn.model_selection import GroupKFold  # noqa: PLC0415
 
+    n = len(dataset.feature_matrix)
     splits = list(
         GroupKFold(n_splits=folds).split(
-            np.zeros(len(dataset.feature_matrix)),
+            np.zeros(n),
             dataset.labels.astype("int").to_numpy(),
             groups=dataset.split_groups.astype("int").to_numpy(),
         )
@@ -131,6 +143,7 @@ def _crossval_metrics(
     aucs: list[float] = []
     loglosses: list[float] = []
     best_iters: list[int] = []
+    oof_preds = np.full(n, np.nan, dtype="float64")
     for fold_idx, (train_idx, val_idx) in enumerate(splits, start=1):
         train_X = dataset.feature_matrix.iloc[train_idx]
         train_y = dataset.labels.iloc[train_idx].astype("int")
@@ -153,6 +166,7 @@ def _crossval_metrics(
             callbacks=[lgb_mod.early_stopping(early_stopping_rounds, verbose=False)],
         )
         pred = booster.predict(val_X.to_numpy(dtype="float64"))
+        oof_preds[val_idx] = pred
         aucs.append(_safe_auc(val_y.to_numpy(), pred))
         loglosses.append(_safe_logloss(val_y.to_numpy(), pred))
         best_iters.append(int(booster.best_iteration or num_boost_round))
@@ -164,7 +178,8 @@ def _crossval_metrics(
             loglosses[-1],
             best_iters[-1],
         )
-    return aucs, loglosses, int(np.mean(best_iters)) if best_iters else 0
+    mean_best = int(np.mean(best_iters)) if best_iters else 0
+    return aucs, loglosses, mean_best, oof_preds
 
 
 def _safe_auc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -219,8 +234,9 @@ def train_lightgbm(
     cv_auc_std: float | None = None
     cv_logloss_mean: float | None = None
     mean_best_iter: int = 0
+    oof_preds: np.ndarray | None = None
     if folds >= 2 and dataset.split_groups.nunique() >= folds:
-        aucs, loglosses, mean_best_iter = _crossval_metrics(
+        aucs, loglosses, mean_best_iter, oof_preds = _crossval_metrics(
             lgb_mod,
             dataset,
             params=params,
@@ -282,6 +298,36 @@ def train_lightgbm(
     # 直接展示 hyperparams_json 即能反映"全量 fit 实际跑了多少轮"。
     hyperparams_snapshot = {**params, "final_num_boost_round": final_num_boost_round}
 
+    # ---- Calibrator (P2-2)：用 OOF 预测拟合 isotonic regression ----
+    calibrator: Any | None = None
+    calibration_method: str | None = None
+    calibration_brier: float | None = None
+    calibration_brier_pre: float | None = None
+    calibration_samples: int = 0
+    if oof_preds is not None:
+        from .calibration import train_isotonic_calibrator  # noqa: PLC0415
+
+        calibrator, brier_pre, brier_post, n_used = train_isotonic_calibrator(
+            dataset.labels.astype("int").to_numpy(),
+            oof_preds,
+        )
+        calibration_brier_pre = brier_pre
+        calibration_samples = n_used
+        if calibrator is not None:
+            calibration_method = "isotonic"
+            calibration_brier = brier_post
+            logger.info(
+                "calibrator fitted on %d OOF samples — Brier pre=%.4f post=%.4f",
+                n_used,
+                brier_pre if brier_pre is not None else float("nan"),
+                brier_post if brier_post is not None else float("nan"),
+            )
+        else:
+            logger.warning(
+                "calibrator skipped (single-class or sklearn missing); "
+                "scorer will fall back to raw predictions",
+            )
+
     return TrainResult(
         model=model,
         n_samples=dataset.n_samples,
@@ -294,4 +340,9 @@ def train_lightgbm(
         best_iteration=getattr(model, "best_iteration", None),
         folds=folds,
         final_num_boost_round=final_num_boost_round,
+        calibrator=calibrator,
+        calibration_method=calibration_method,
+        calibration_brier=calibration_brier,
+        calibration_brier_pre=calibration_brier_pre,
+        calibration_samples=calibration_samples,
     )

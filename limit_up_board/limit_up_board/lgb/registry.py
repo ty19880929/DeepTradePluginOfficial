@@ -47,6 +47,10 @@ class ModelRecord:
     git_commit: str | None = None
     is_active: bool = False
     created_at: datetime | None = None
+    # v0.13.1 (P2-2)：校准器元数据；None / 0 表示该模型没有校准器，scorer 走 raw。
+    calibration_method: str | None = None  # "isotonic" / "platt" / None
+    calibration_brier: float | None = None
+    calibration_samples: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +79,9 @@ def _row_to_record(row: tuple[Any, ...]) -> ModelRecord:
         file_path,
         is_active,
         created_at,
+        calibration_method,
+        calibration_brier,
+        calibration_samples,
     ) = row
     return ModelRecord(
         model_id=str(model_id),
@@ -95,6 +102,9 @@ def _row_to_record(row: tuple[Any, ...]) -> ModelRecord:
         file_path=str(file_path),
         is_active=bool(is_active),
         created_at=created_at if isinstance(created_at, datetime) else None,
+        calibration_method=None if calibration_method is None else str(calibration_method),
+        calibration_brier=None if calibration_brier is None else float(calibration_brier),
+        calibration_samples=int(calibration_samples) if calibration_samples is not None else 0,
     )
 
 
@@ -102,7 +112,8 @@ _SELECT_ALL_COLS = (
     "model_id, schema_version, train_start_date, train_end_date, "
     "n_samples, n_positive, cv_auc_mean, cv_auc_std, cv_logloss_mean, "
     "feature_count, feature_list_json, hyperparams_json, framework_version, "
-    "plugin_version, git_commit, file_path, is_active, created_at"
+    "plugin_version, git_commit, file_path, is_active, created_at, "
+    "calibration_method, calibration_brier, calibration_samples"
 )
 
 
@@ -121,8 +132,9 @@ def insert_model(db: Database, record: ModelRecord, *, activate: bool = True) ->
             "model_id, schema_version, train_start_date, train_end_date, "
             "n_samples, n_positive, cv_auc_mean, cv_auc_std, cv_logloss_mean, "
             "feature_count, feature_list_json, hyperparams_json, framework_version, "
-            "plugin_version, git_commit, file_path, is_active"
-            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "plugin_version, git_commit, file_path, is_active, "
+            "calibration_method, calibration_brier, calibration_samples"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 record.model_id,
                 record.schema_version,
@@ -141,6 +153,9 @@ def insert_model(db: Database, record: ModelRecord, *, activate: bool = True) ->
                 record.git_commit,
                 record.file_path,
                 bool(activate),
+                record.calibration_method,
+                record.calibration_brier,
+                int(record.calibration_samples or 0),
             ),
         )
 

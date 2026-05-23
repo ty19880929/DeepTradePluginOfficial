@@ -210,11 +210,17 @@ class TestFinalFitUsesCvBestIter:
     ) -> None:
         captured = self._stub_lgb_module(monkeypatch)
 
-        # 受控 CV 返回 mean_best_iter=42
+        # 受控 CV 返回 mean_best_iter=42（v0.13.1：第 4 个返回值是 oof_preds）
+        import numpy as _np  # noqa: PLC0415
         monkeypatch.setattr(
             trainer_mod,
             "_crossval_metrics",
-            lambda *a, **kw: ([0.7, 0.71], [0.6, 0.6], 42),
+            lambda *a, **kw: (
+                [0.7, 0.71],
+                [0.6, 0.6],
+                42,
+                _np.full(len(a[1].feature_matrix), _np.nan, dtype="float64"),
+            ),
         )
 
         ds = _toy_dataset(n_per_day=4, n_days=4)
@@ -251,10 +257,16 @@ class TestFinalFitUsesCvBestIter:
     ) -> None:
         """病态情景：CV 跑完但 best_iters 全为 0 → 也回退到 num_boost_round。"""
         captured = self._stub_lgb_module(monkeypatch)
+        import numpy as _np  # noqa: PLC0415
         monkeypatch.setattr(
             trainer_mod,
             "_crossval_metrics",
-            lambda *a, **kw: ([0.5, 0.5], [0.7, 0.7], 0),
+            lambda *a, **kw: (
+                [0.5, 0.5],
+                [0.7, 0.7],
+                0,
+                _np.full(len(a[1].feature_matrix), _np.nan, dtype="float64"),
+            ),
         )
 
         ds = _toy_dataset(n_per_day=4, n_days=4)
