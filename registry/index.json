@@ -9,7 +9,7 @@
       "subdir": "limit_up_board",
       "tag_prefix": "limit-up-board/",
       "min_framework_version": "0.4.2",
-      "latest_version": "limit-up-board/v0.13.1"
+      "latest_version": "limit-up-board/v0.13.2"
     },
     "accumulation-probe-washout": {
       "name": "吸筹试盘洗盘主升浪策略",
@@ -19,7 +19,7 @@
       "subdir": "accumulation_probe_washout",
       "tag_prefix": "accumulation-probe-washout/",
       "min_framework_version": "0.4.2",
-      "latest_version": "accumulation-probe-washout/v0.7.9"
+      "latest_version": "accumulation-probe-washout/v0.7.10"
     },
     "checkmate": {
       "name": "Checkmate 趋势跟踪策略",
@@ -29,7 +29,7 @@
       "subdir": "checkmate",
       "tag_prefix": "checkmate/",
       "min_framework_version": "0.4.2",
-      "latest_version": "checkmate/v0.4.0"
+      "latest_version": "checkmate/v0.4.1"
     }
   }
 }

@@ -1,6 +1,6 @@
 plugin_id: checkmate
 name: Checkmate 趋势跟踪策略
-version: 0.4.0
+version: 0.4.1
 type: strategy
 api_version: "1"
 entrypoint: checkmate.plugin:CheckmatePlugin
@@ -32,6 +32,13 @@ permissions:
       - suspend_d
       - index_dailybasic
       - moneyflow
+    # v0.4.1+：框架 API_CACHE_CLASS 未覆盖的 API 显式声明 cache 策略。
+    # - index_daily / index_dailybasic：指数行情/指标，盘后定型
+    # - namechange：曾用名基础信息，变更不频繁（与 stock_basic 同类）
+    cache_overrides:
+      index_daily: trade_day_immutable
+      index_dailybasic: trade_day_immutable
+      namechange: static
   llm: false
   llm_tools: false
 

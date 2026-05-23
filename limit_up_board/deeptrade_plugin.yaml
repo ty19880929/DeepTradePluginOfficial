@@ -1,6 +1,6 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.13.1
+version: 0.13.2
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin
@@ -39,6 +39,12 @@ permissions:
       - limit_list_ths
       - limit_cpt_list
       - suspend_d
+    # v0.13.2+：框架 API_CACHE_CLASS 表未覆盖的 API 必须显式声明 cache 策略，
+    # 否则 TushareClient 会 fallback 到 trade_day_immutable 并发 INFO 警告。
+    # 这两个 API 都属于"盘后一次性结算、不回溯修改"语义，与默认一致。
+    cache_overrides:
+      cyq_perf: trade_day_immutable
+      index_daily: trade_day_immutable
   llm: true
   llm_tools: false
 
