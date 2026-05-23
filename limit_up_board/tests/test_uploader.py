@@ -45,6 +45,25 @@ def test_build_multipart_has_expected_structure() -> None:
     assert text.endswith("\r\n--BOUNDARY-X--\r\n")
 
 
+def test_build_multipart_embeds_extra_text_fields() -> None:
+    """v0.12.2+ — plugin_name / trade_date 走 multipart text part。"""
+    body = _build_multipart(
+        "BOUNDARY-X",
+        field_name="file",
+        filename="summary.json",
+        content=b'{"meta": {}}',
+        mime="application/json",
+        text_fields={"plugin_name": "打板策略", "trade_date": "20260522"},
+    )
+    text = body.decode("utf-8")
+    # 两个 text part 各自有 boundary + Content-Disposition + 空行 + value
+    assert 'Content-Disposition: form-data; name="plugin_name"\r\n\r\n打板策略\r\n' in text
+    assert 'Content-Disposition: form-data; name="trade_date"\r\n\r\n20260522\r\n' in text
+    # 文件 part 仍在尾部
+    assert 'filename="summary.json"' in text
+    assert text.endswith("\r\n--BOUNDARY-X--\r\n")
+
+
 # ---------------------------------------------------------------------------
 # Path / suffix validation
 # ---------------------------------------------------------------------------
@@ -137,6 +156,29 @@ def test_upload_success_returns_decoded_json(tmp_path: Path) -> None:
     # Body must carry the JSON mime in the file part so the server can branch.
     assert b"Content-Type: application/json" in captured_request["data"]
     assert b'filename="summary.json"' in captured_request["data"]
+
+
+def test_upload_forwards_extra_fields_in_multipart(tmp_path: Path) -> None:
+    """v0.12.2+ — upload_summary_json 把 extra_fields 串成 multipart text part。"""
+    json_path = _write_json(tmp_path)
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout):  # noqa: ANN001
+        captured["data"] = req.data or b""
+        return _FakeResp(200, b'{"success": true}')
+
+    with patch("limit_up_board.uploader.urlopen", side_effect=fake_urlopen):
+        upload_summary_json(
+            json_path,
+            extra_fields={"plugin_name": "打板策略", "trade_date": "20260522"},
+        )
+
+    body = captured["data"]
+    assert '打板策略'.encode("utf-8") in body
+    assert b"20260522" in body
+    assert b'name="plugin_name"' in body
+    assert b'name="trade_date"' in body
+    assert b'filename="summary.json"' in body
 
 
 def test_upload_http_error_maps_to_upload_error(tmp_path: Path) -> None:

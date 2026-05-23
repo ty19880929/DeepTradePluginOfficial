@@ -762,7 +762,7 @@ class LubRunner:
                     level=EventLevel.WARNING,
                 )
 
-        yield from self._maybe_upload_summary(lub_cfg, report_path)
+        yield from self._maybe_upload_summary(lub_cfg, report_path, bundle.trade_date)
 
     # ====================================================================
     # Debate mode (multi-LLM)
@@ -1207,10 +1207,10 @@ class LubRunner:
                 "reason": reason,
             },
         )
-        yield from self._maybe_upload_summary(lub_cfg, report_path)
+        yield from self._maybe_upload_summary(lub_cfg, report_path, bundle.trade_date)
 
     def _maybe_upload_summary(
-        self, lub_cfg: LubConfig, report_path: Path
+        self, lub_cfg: LubConfig, report_path: Path, trade_date: str
     ) -> Iterable[StrategyEvent]:
         """Best-effort POST ``summary.json`` to DeepTrade 官网.
 
@@ -1233,6 +1233,10 @@ class LubRunner:
                 json_path,
                 url=lub_cfg.summary_upload_url,
                 timeout=lub_cfg.summary_upload_timeout,
+                extra_fields={
+                    "plugin_name": "打板策略",
+                    "trade_date": trade_date,
+                },
             )
         except UploadError as e:
             yield rt.emit(

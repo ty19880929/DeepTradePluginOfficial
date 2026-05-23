@@ -6,7 +6,9 @@ runtime dependency (e.g. requests). The endpoint contract (v0.12+):
     POST https://deeptrade.tiey.ai/api/reports/upload
     Authorization: Bearer deeptrade
     Content-Type: multipart/form-data; boundary=...
-    field "file" — the JSON file (filename must end with .json)
+    field "file"        — the JSON file (filename must end with .json)
+    field "plugin_name" — 插件中文名（v0.12.2+）
+    field "trade_date"  — 执行策略时的 T 日（YYYYMMDD，v0.12.2+）
 
 On 200 OK the server returns JSON like::
 
@@ -47,8 +49,12 @@ def upload_summary_json(
     url: str = DEFAULT_UPLOAD_URL,
     token: str = DEFAULT_UPLOAD_TOKEN,
     timeout: float = DEFAULT_UPLOAD_TIMEOUT,
+    extra_fields: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """POST *json_path* as form-data ``file`` to the reports endpoint.
+
+    ``extra_fields`` (v0.12.2+) adds additional ``multipart/form-data`` text
+    parts alongside the file — used to send ``plugin_name`` / ``trade_date``.
 
     Returns the decoded JSON response on success. Raises :class:`UploadError`
     on any failure (missing file, non-.json suffix, HTTP non-200, network
@@ -67,6 +73,7 @@ def upload_summary_json(
         filename=json_path.name,
         content=payload,
         mime="application/json",
+        text_fields=extra_fields,
     )
 
     req = Request(
@@ -113,13 +120,23 @@ def _build_multipart(
     filename: str,
     content: bytes,
     mime: str,
+    text_fields: dict[str, str] | None = None,
 ) -> bytes:
-    """Assemble a minimal multipart/form-data body with a single file part."""
-    head = (
+    """Assemble a multipart/form-data body: text parts (if any) + file part."""
+    parts: list[bytes] = []
+    for name, value in (text_fields or {}).items():
+        parts.append(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+        )
+    file_head = (
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="{field_name}"; '
         f'filename="{filename}"\r\n'
         f"Content-Type: {mime}\r\n\r\n"
     ).encode("utf-8")
     tail = f"\r\n--{boundary}--\r\n".encode("ascii")
-    return head + content + tail
+    return b"".join(parts) + file_head + content + tail
