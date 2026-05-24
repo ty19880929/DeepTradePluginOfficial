@@ -67,12 +67,14 @@ class LubConfig:
 
     # ---- v0.15.0 (P3-C)：LLM 响应重放缓存（Phase 3）----
     # 仅在框架版 ``LLMClient.complete_json`` 支持 ``replay=`` 形参时实际生效；
-    # 灰度期默认全部关闭（即使框架就绪也保持 Phase 1 行为不变）。开启后：
+    # 框架未就绪时 ``pipeline._complete_with_set_check`` 检测到不支持会
+    # 静默跳过 replay kwargs，行为与 Phase 1 等价 —— 所以即便默认开启也
+    # 不会破坏旧路径。v0.15.1 起默认开启（``llm_replay_enabled=True``）：
     #   * ``llm_replay_enabled=True``  → 默认尝试从缓存命中读
     #   * ``llm_replay_write=True``    → 成功响应写入缓存
     #   * ``llm_replay_ttl_days=None`` → 永不过期；正整数表示天数 TTL
     # CLI 一次性覆盖：``--fresh-llm`` / ``--no-llm-replay`` / ``--replay-only``。
-    llm_replay_enabled: bool = False
+    llm_replay_enabled: bool = True
     llm_replay_write: bool = True
     llm_replay_ttl_days: int | None = None
 

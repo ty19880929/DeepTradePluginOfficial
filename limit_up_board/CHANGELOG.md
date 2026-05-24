@@ -4,6 +4,25 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.15.1 — 2026-05-24 — LLM Replay 默认开启
+
+将 ``LubConfig.llm_replay_enabled`` 默认值从 ``False`` 改为 ``True``。
+
+### Changed
+
+- **`LubConfig.llm_replay_enabled` 默认值 `False` → `True`**：v0.15.0 已落
+  完整 Phase 3 基础设施，框架未就绪时 ``_complete_with_set_check`` 通过
+  ``complete_json_supports_replay()`` 探测自动跳过 replay kwargs，所以打开
+  默认值在 pre-Phase-2 框架上是 no-op；框架 Phase 2 合并后用户**不需要
+  手动 settings set** 即可享受重放缓存。
+
+### Notes
+
+- 想保留旧行为（不读不写缓存）：`deeptrade limit-up-board settings set
+  lub.llm_replay_enabled false`，或一次性 `--no-llm-replay`。
+- 没有代码改动，只有一行 dataclass default 字段；无新增测试。
+- ``llm_replay_write`` 默认仍 ``True``、``llm_replay_ttl_days`` 默认仍 ``None``。
+
 ## v0.15.0 — 2026-05-24 — Phase 3：接入框架 LLM Replay 缓存
 
 针对连续执行不一致问题的 Phase 3 落地：插件层完整接入框架 `LLMReplayPolicy`
