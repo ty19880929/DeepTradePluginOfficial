@@ -782,16 +782,22 @@ def select_finalists(
       * Sort top_candidate / watchlist by `continuation_score` DESC before
         truncation, so cap = "top by score", not "by batch order".
       * Boundary avoids are also sorted by score before sampling.
+
+    P1-F: explicit tie-breaker ``(-continuation_score, rank, ts_code)``.
+    Python's sort is stable, but the input ``predictions`` list order
+    depends on R2 batch dispatch and worker timing in debate mode — so two
+    candidates with identical scores could swap places across reruns.
+    Adding ``rank`` then ``ts_code`` as deterministic secondary keys closes
+    that gap without changing scoring semantics.
     """
+    _key = lambda c: (-c.continuation_score, c.rank, c.ts_code)  # noqa: E731
     top_and_watch = sorted(
         (c for c in predictions if c.prediction in ("top_candidate", "watchlist")),
-        key=lambda c: c.continuation_score,
-        reverse=True,
+        key=_key,
     )
     avoids = sorted(
         (c for c in predictions if c.prediction == "avoid"),
-        key=lambda c: c.continuation_score,
-        reverse=True,
+        key=_key,
     )
     finalists = top_and_watch
     if batch_size_hint:

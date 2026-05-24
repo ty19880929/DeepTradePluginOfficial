@@ -65,6 +65,26 @@ def render_banners(
 # ---------------------------------------------------------------------------
 
 
+def _render_run_fingerprint_section(input_fingerprint: str | None) -> str:
+    """P1-K: emit the 运行指纹 block at the top of summary.md.
+
+    Phase 1: ``cache_summary`` is hard-coded to indicate replay is not yet
+    wired (framework cache lands in Phase 3). The shape stays stable so the
+    Phase 3 wiring just swaps the placeholder for real numbers without
+    touching this header.
+    """
+    from .profiles import LLM_SCHEMA_VERSION, PROMPT_TEMPLATE_VERSION  # noqa: PLC0415
+
+    fp = input_fingerprint or "_(未计算 — 详见日志)_"
+    return (
+        "\n## 运行指纹\n"
+        f"- input_fingerprint: `{fp}`\n"
+        f"- LLM_SCHEMA_VERSION: `{LLM_SCHEMA_VERSION}`\n"
+        f"- PROMPT_TEMPLATE_VERSION: `{PROMPT_TEMPLATE_VERSION}`\n"
+        "- cache_summary: _Phase 1 — LLM replay 缓存尚未启用（待 v0.15.0 Phase 3 接入框架）_\n"
+    )
+
+
 def render_summary_md(
     *,
     status: RunStatus,
@@ -73,6 +93,7 @@ def render_summary_md(
     predictions: list[ContinuationCandidate],
     final_ranking: FinalRankingResponse | None,
     failed_batch_ids: list[str] | None = None,
+    input_fingerprint: str | None = None,
 ) -> str:
     """Build the full summary.md content."""
     out = [render_banners(status=status, failed_batch_ids=failed_batch_ids)]
@@ -83,6 +104,7 @@ def render_summary_md(
         f"- status: `{status.value}`\n"
         f"- lgb_model_id: {_lgb_model_id_repr(bundle)}\n"
     )
+    out.append(_render_run_fingerprint_section(input_fingerprint))
 
     # Sector strength source label is meaningful — surface it.
     out.append(
@@ -169,6 +191,7 @@ def write_report(
     reports_root: Path | None = None,
     failed_batch_ids: list[str] | None = None,
     debate_results: list[ProviderDebateResult] | None = None,
+    input_fingerprint: str | None = None,
 ) -> Path:
     """Write the report directory and return its path.
 
@@ -187,6 +210,7 @@ def write_report(
             bundle=bundle,
             results=debate_results,
             failed_batch_ids=failed_batch_ids,
+            input_fingerprint=input_fingerprint,
         )
     else:
         md = render_summary_md(
@@ -196,6 +220,7 @@ def write_report(
             predictions=predictions,
             final_ranking=final_ranking,
             failed_batch_ids=failed_batch_ids,
+            input_fingerprint=input_fingerprint,
         )
     (root / "summary.md").write_text(md, encoding="utf-8")
 
@@ -359,6 +384,7 @@ def render_debate_summary_md(
     bundle: Round1Bundle,
     results: list[ProviderDebateResult],
     failed_batch_ids: list[str] | None = None,
+    input_fingerprint: str | None = None,
 ) -> str:
     """Build summary.md content for debate-mode runs.
 
@@ -382,6 +408,7 @@ def render_debate_summary_md(
         f"- providers: {', '.join(f'`{r.provider}`' for r in results)}\n"
         f"- lgb_model_id: {_lgb_model_id_repr(bundle)}\n"
     )
+    out.append(_render_run_fingerprint_section(input_fingerprint))
     out.append(
         f"\n*sector_strength_source*: `{bundle.sector_strength.source}`  "
         f"_(可信度：limit_cpt_list > lu_desc_aggregation > industry_fallback)_\n"

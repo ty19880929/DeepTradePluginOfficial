@@ -151,6 +151,51 @@ def exclude_suspended(df: pd.DataFrame, suspended_codes: set[str]) -> pd.DataFra
     return df[~df["ts_code"].isin(suspended_codes)].reset_index(drop=True)
 
 
+_CANDIDATE_SORT_KEYS: tuple[str, ...] = (
+    "trade_date",
+    "first_time",
+    "limit_times",
+    "fd_amount",
+    "ts_code",
+)
+_CANDIDATE_SORT_ASCENDING: tuple[bool, ...] = (
+    True,   # trade_date asc — usually constant within a single run
+    True,   # first_time asc — earliest 封板时间 first
+    False,  # limit_times desc — 连板高度优先
+    False,  # fd_amount desc — 封单金额优先
+    True,   # ts_code asc — final tie-breaker
+)
+
+
+def _stable_sort_candidates_df(candidates_df: pd.DataFrame) -> pd.DataFrame:
+    """P1-B: stable sort the merged candidate DataFrame.
+
+    Keys: ``trade_date asc, first_time asc, limit_times desc, fd_amount desc,
+    ts_code asc``. Mergesort + ``na_position='last'`` ensure rows with null
+    ``first_time`` are pushed to the bottom rather than reshuffled. Missing
+    columns degrade to ``ts_code`` only (defensive — collect_round1 always
+    merges with limit_list_d so all five keys should exist, but this keeps
+    unit tests with stub DataFrames working).
+
+    Sorting changes prompt input order; it does NOT change which candidates
+    survive filtering (those are decided by ``_apply_market_filter`` etc.).
+    """
+    available_keys: list[str] = []
+    available_asc: list[bool] = []
+    for key, asc in zip(_CANDIDATE_SORT_KEYS, _CANDIDATE_SORT_ASCENDING, strict=True):
+        if key in candidates_df.columns:
+            available_keys.append(key)
+            available_asc.append(asc)
+    if not available_keys:
+        return candidates_df.reset_index(drop=True)
+    return candidates_df.sort_values(
+        by=available_keys,
+        ascending=available_asc,
+        kind="mergesort",
+        na_position="last",
+    ).reset_index(drop=True)
+
+
 def _apply_market_filter(
     candidates_df: pd.DataFrame,
     *,
@@ -509,6 +554,12 @@ def collect_round1(
     if candidates_df.empty:
         bundle.candidates = []
         return bundle
+    # P1-B: stable sort — Tushare merge order is implementation-defined and can
+    # change across cache hits / force_sync runs, which leaks into Prompt input
+    # ordering. Sort by business priority (first_time asc, limit_times desc,
+    # fd_amount desc) with ts_code as final tie-breaker. Mergesort is required
+    # — pandas defaults to quicksort which is NOT stable when NaN is present.
+    candidates_df = _stable_sort_candidates_df(candidates_df)
 
     # 2b. v0.4 — 流通市值 / 股价上限筛选（null → 过滤）。
     candidates_df, market_filter_summary = _apply_market_filter(
@@ -1142,18 +1193,25 @@ def _close_to_avg_cost_pct(
 
 def _famous_seats_hits(seats: list[str]) -> list[str]:
     """Return de-duplicated exalter strings whose substring matches any
-    famous-seat hint (case-insensitive)."""
-    out: list[str] = []
+    famous-seat hint (case-insensitive).
+
+    P1-E: output is sorted by seat name asc so the downstream
+    ``lhb_famous_seats_text = "; ".join(...)`` is stable regardless of
+    Tushare's row order in ``top_inst``. Previously the join inherited
+    insertion order, leaking remote API ordering into the LLM prompt.
+    """
     seen: set[str] = set()
+    hits: list[str] = []
     hints_lower = tuple(h.lower() for h in FAMOUS_SEATS_HINTS)
     for s in seats:
         if not isinstance(s, str) or s in seen:
             continue
         sl = s.lower()
         if any(h in sl for h in hints_lower):
-            out.append(s)
+            hits.append(s)
             seen.add(s)
-    return out
+    hits.sort()
+    return hits
 
 
 def _aggregate_top_list_net(
@@ -1195,6 +1253,8 @@ def _aggregate_top_list_net(
             per_row = [None] * len(group)
             entry["lhb_net_buy_yi"] = None
         # reasons_text：按当行 net_amount 降序，None 视为 -inf；截断。
+        # P1-D: 同净买入额时增加 reason 文本作为 tie-breaker —— 原实现仅按 net_amount
+        # 排序，同金额时取决于 Tushare 返回顺序，会让相同输入产出不同 prompt。
         if has_reason:
             pairs: list[tuple[str, float]] = []
             reasons = group["reason"].tolist()
@@ -1205,7 +1265,11 @@ def _aggregate_top_list_net(
                 if not rs:
                     continue
                 pairs.append((rs, n if n is not None else float("-inf")))
-            pairs.sort(key=lambda kv: kv[1], reverse=True)
+            # 主键：-net_amount（None → +inf 排到最后）；次键：reason 文本字典序升序。
+            pairs.sort(key=lambda kv: (
+                -kv[1] if kv[1] != float("-inf") else float("inf"),
+                kv[0],
+            ))
             joined = ", ".join(p[0] for p in pairs)
             if len(joined) > reasons_text_max_chars:
                 joined = joined[: reasons_text_max_chars - 1].rstrip(", ") + "…"
@@ -1403,6 +1467,11 @@ def _build_candidate_rows(
             cyq.get("cyq_avg_cost_yuan"),
         )
         out.append(rec)
+    # P1-B: ``out`` order reflects ``candidates_df`` iteration order. The
+    # caller (collect_round1) already passes a stably-sorted DataFrame via
+    # ``_stable_sort_candidates_df`` — business priority (first_time asc,
+    # limit_times desc, fd_amount desc, ts_code asc). itertuples preserves
+    # row order, so no extra sort is needed here.
     return out
 
 
@@ -1486,13 +1555,28 @@ def _moneyflow_summary(
 
 
 def _index_by_code(df: pd.DataFrame | None) -> dict[str, list[dict[str, Any]]]:
-    """Group a DataFrame by ts_code into ascending-by-trade_date row lists."""
+    """Group a DataFrame by ts_code into ascending-by-trade_date row lists.
+
+    P1-C: pandas' default quicksort is NOT stable when NaN is present, and
+    Tushare history responses can occasionally include duplicate
+    ``(ts_code, trade_date)`` rows after cache merges. Sort with mergesort
+    on both keys, deduplicate keeping the last row per (ts_code, trade_date),
+    then group. Without this, ``daily / daily_basic / moneyflow / cyq_perf``
+    row order could subtly drift across reruns and break Prompt fingerprint
+    stability even when the underlying cache hasn't changed.
+    """
     if df is None or df.empty or "ts_code" not in df.columns:
         return {}
     if "trade_date" in df.columns:
-        df = df.sort_values("trade_date")
+        df = (
+            df.sort_values(["ts_code", "trade_date"], kind="mergesort", na_position="last")
+              .drop_duplicates(subset=["ts_code", "trade_date"], keep="last")
+              .reset_index(drop=True)
+        )
+    else:
+        df = df.sort_values(["ts_code"], kind="mergesort").reset_index(drop=True)
     out: dict[str, list[dict[str, Any]]] = {}
-    for code, group in df.groupby("ts_code"):
+    for code, group in df.groupby("ts_code", sort=True):
         out[str(code)] = group.to_dict(orient="records")
     return out
 

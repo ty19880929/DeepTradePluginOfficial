@@ -56,6 +56,12 @@ class LubRuntime:
     run_id: str | None = None
     tushare: TushareClient | None = None
     lgb_scorer: LgbScorer | None = None
+    # P1-I/K: deterministic 64-char sha256 of this run's business inputs
+    # (Round1Bundle + LubConfig + LGB model + schema/prompt versions). Set
+    # by :class:`LubRunner` at the end of Step 1; surfaced in summary.md and
+    # available for the future framework LLM replay cache key. Stays ``None``
+    # for sync-only runs (no LLM stage to feed it into).
+    input_fingerprint: str | None = None
 
     def emit(
         self,

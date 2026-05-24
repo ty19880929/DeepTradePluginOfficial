@@ -23,48 +23,72 @@ STAGE_PREDICTION = "continuation_prediction"
 STAGE_FINAL = "final_ranking"
 STAGE_REVISION = "continuation_revision"
 
+# P1-J: 复现性版本号 —— 用于框架 replay cache key 与 input fingerprint。
+#
+# LLM_SCHEMA_VERSION: 当 schemas.py 里的 Pydantic 模型字段、empty-array policy
+# 或 set-check 行为发生变化时 bump。旧 cache 会自然 miss，避免反序列化失败。
+#
+# PROMPT_TEMPLATE_VERSION: 当 prompts.py 的模板文本（含 system / user 段、JSON
+# 示例、注释规则、empty-array 指示）发生语义变化时 bump。Cosmetic 文案修改
+# 不必 bump；任何会改变 LLM 输入语义的改动都必须 bump。
+LLM_SCHEMA_VERSION = "lub-llm-schema-v1"
+PROMPT_TEMPLATE_VERSION = "lub-prompts-v1"
 
+
+# P1-L: All stage temperatures default to 0.0.
+#
+# Previously screening / prediction / revision used 0.1~0.2 to encourage
+# diverse reasoning. In practice this leaked LLM sampling noise into the
+# Prompt-output pipeline and broke "same inputs → same outputs" — even with
+# identical prompt_hash, providers returned slightly different scores /
+# ordering / rationales across reruns.
+#
+# Temperature alone does not guarantee determinism (provider-side sampling,
+# load balancing, and quiet model upgrades can still drift), so this is
+# necessary but not sufficient — the framework LLM replay cache (Phase 3)
+# is the durable fix. Lowering temp to 0.0 narrows the noise floor that
+# replay then makes deterministic.
 PROFILES: dict[str, dict[str, StageProfile]] = {
     "fast": {
         STAGE_SCREENING: StageProfile(
-            thinking=False, reasoning_effort="medium", temperature=0.1, max_output_tokens=32768
+            thinking=False, reasoning_effort="medium", temperature=0.0, max_output_tokens=32768
         ),
         STAGE_PREDICTION: StageProfile(
-            thinking=False, reasoning_effort="medium", temperature=0.2, max_output_tokens=32768
+            thinking=False, reasoning_effort="medium", temperature=0.0, max_output_tokens=32768
         ),
         STAGE_FINAL: StageProfile(
             thinking=False, reasoning_effort="medium", temperature=0.0, max_output_tokens=8192
         ),
         STAGE_REVISION: StageProfile(
-            thinking=False, reasoning_effort="medium", temperature=0.2, max_output_tokens=32768
+            thinking=False, reasoning_effort="medium", temperature=0.0, max_output_tokens=32768
         ),
     },
     "balanced": {
         STAGE_SCREENING: StageProfile(
-            thinking=False, reasoning_effort="medium", temperature=0.1, max_output_tokens=32768
+            thinking=False, reasoning_effort="medium", temperature=0.0, max_output_tokens=32768
         ),
         STAGE_PREDICTION: StageProfile(
-            thinking=True, reasoning_effort="high", temperature=0.2, max_output_tokens=32768
+            thinking=True, reasoning_effort="high", temperature=0.0, max_output_tokens=32768
         ),
         STAGE_FINAL: StageProfile(
             thinking=True, reasoning_effort="high", temperature=0.0, max_output_tokens=8192
         ),
         STAGE_REVISION: StageProfile(
-            thinking=True, reasoning_effort="high", temperature=0.2, max_output_tokens=32768
+            thinking=True, reasoning_effort="high", temperature=0.0, max_output_tokens=32768
         ),
     },
     "quality": {
         STAGE_SCREENING: StageProfile(
-            thinking=True, reasoning_effort="high", temperature=0.2, max_output_tokens=32768
+            thinking=True, reasoning_effort="high", temperature=0.0, max_output_tokens=32768
         ),
         STAGE_PREDICTION: StageProfile(
-            thinking=True, reasoning_effort="high", temperature=0.2, max_output_tokens=32768
+            thinking=True, reasoning_effort="high", temperature=0.0, max_output_tokens=32768
         ),
         STAGE_FINAL: StageProfile(
             thinking=True, reasoning_effort="high", temperature=0.0, max_output_tokens=8192
         ),
         STAGE_REVISION: StageProfile(
-            thinking=True, reasoning_effort="high", temperature=0.2, max_output_tokens=32768
+            thinking=True, reasoning_effort="high", temperature=0.0, max_output_tokens=32768
         ),
     },
 }

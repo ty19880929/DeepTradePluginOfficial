@@ -94,3 +94,120 @@ def test_backfill_trade_date_idempotent(runner_db: Database) -> None:
     )
     assert row is not None
     assert row[0] == "20260530"
+
+
+# ---------------------------------------------------------------------------
+# P1-A: _iter_pipeline / _iter_sync invoke _backfill_run_trade_date in Step 0
+# ---------------------------------------------------------------------------
+
+def _stub_step0(monkeypatch: pytest.MonkeyPatch, T: str = "20260530", T1: str = "20260601") -> None:
+    """Monkeypatch all Step 0 collaborators so the generator can be advanced
+    just past Step 0 without needing real Tushare / calendar fixtures."""
+    from limit_up_board import runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "TradeCalendar", lambda df: MagicMock())
+    monkeypatch.setattr(runner_mod, "fetch_latest_trade_date", lambda ts: T)
+    monkeypatch.setattr(
+        runner_mod, "resolve_trade_date",
+        lambda cal, latest_trade_date=None, user_specified=None: (T, T1),
+    )
+
+
+def _make_runner_with_run_id(
+    db: Database, run_id: str
+) -> LubRunner:
+    """Build runner with run_id already persisted (mimics _record_run_start)."""
+    rt = LubRuntime(db=db, config=MagicMock(), llms=MagicMock())
+    rt.plugin_id = "limit-up-board"
+    rt.run_id = run_id
+    # tushare.call("trade_cal") must be callable; return value ignored downstream.
+    rt.tushare = MagicMock()
+    rt.tushare.call.return_value = MagicMock()
+    runner = LubRunner(rt)
+    db.execute(
+        "INSERT INTO lub_runs(run_id, trade_date, status, is_intraday, started_at, "
+        "params_json) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+        (run_id, "", "running", False, "{}"),
+    )
+    return runner
+
+
+def test_iter_sync_backfills_trade_date_after_step0(
+    runner_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-A: _iter_sync must call _backfill_run_trade_date once T is resolved.
+
+    Prior to this fix, only the debate path (_do_step_0_and_1) backfilled
+    trade_date; the sync path left ``lub_runs.trade_date=''`` whenever
+    ``--trade-date`` was omitted, breaking history/report joins.
+    """
+    from limit_up_board.runner import RunParams
+    from limit_up_board import runner as runner_mod
+
+    run_id = "33333333-3333-3333-3333-333333333333"
+    _stub_step0(monkeypatch, T="20260530", T1="20260601")
+    runner = _make_runner_with_run_id(runner_db, run_id)
+
+    # Short-circuit downstream so the generator stops right after Step 0.
+    monkeypatch.setattr(runner_mod, "load_config", lambda db: MagicMock(
+        min_float_mv_yi=0, max_float_mv_yi=0, max_close_yuan=0,
+    ))
+    monkeypatch.setattr(runner_mod, "_settings_log_event", lambda rt, cfg: MagicMock())
+
+    def _stop(*a, **kw):
+        raise StopIteration  # propagate as generator close
+    monkeypatch.setattr(runner_mod, "collect_round1", _stop)
+
+    params = RunParams(trade_date=None, force_sync=False)
+    gen = runner._iter_sync(params)
+    # Drain until generator hits collect_round1 (StopIteration short-circuit).
+    try:
+        for _ in gen:
+            pass
+    except (StopIteration, RuntimeError):
+        # RuntimeError: PEP 479 wraps generator-internal StopIteration.
+        pass
+
+    row = runner_db.fetchone(
+        "SELECT trade_date FROM lub_runs WHERE run_id=?", (run_id,)
+    )
+    assert row is not None
+    assert row[0] == "20260530", f"expected backfilled 20260530, got {row[0]!r}"
+
+
+def test_iter_pipeline_backfills_trade_date_after_step0(
+    runner_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P1-A: _iter_pipeline (single-LLM path) must backfill trade_date,
+    mirroring the debate path's _do_step_0_and_1 behaviour."""
+    from limit_up_board.runner import RunParams
+    from limit_up_board import runner as runner_mod
+
+    run_id = "44444444-4444-4444-4444-444444444444"
+    _stub_step0(monkeypatch, T="20260530", T1="20260601")
+    runner = _make_runner_with_run_id(runner_db, run_id)
+    runner._rt.config.get_app_config = MagicMock(return_value=MagicMock(app_profile="balanced"))
+
+    monkeypatch.setattr(runner_mod, "load_config", lambda db: MagicMock(
+        min_float_mv_yi=0, max_float_mv_yi=0, max_close_yuan=0,
+        lgb_min_score_floor=None, lgb_decile_in_prompt=False,
+    ))
+    monkeypatch.setattr(runner_mod, "_settings_log_event", lambda rt, cfg: MagicMock())
+
+    def _stop(*a, **kw):
+        raise StopIteration
+    monkeypatch.setattr(runner_mod, "collect_round1", _stop)
+
+    params = RunParams(trade_date=None, force_sync=False)
+    gen = runner._iter_pipeline(params)
+    try:
+        for _ in gen:
+            pass
+    except (StopIteration, RuntimeError):
+        pass
+
+    row = runner_db.fetchone(
+        "SELECT trade_date FROM lub_runs WHERE run_id=?", (run_id,)
+    )
+    assert row is not None
+    assert row[0] == "20260530", f"expected backfilled 20260530, got {row[0]!r}"

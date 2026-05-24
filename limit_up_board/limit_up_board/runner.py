@@ -82,6 +82,47 @@ def _safe_prev_trade_date(cal: TradeCalendar, trade_date: str) -> str | None:
         return None
 
 
+def _run_providers_ordered(
+    providers: list[str],
+    submit_worker,
+    on_complete=None,
+) -> list[Any]:
+    """P1-H: run one worker per provider in parallel; return results in canonical
+    ``providers`` input order regardless of completion order.
+
+    ``submit_worker(provider)`` is called once per provider inside a fresh
+    ``ThreadPoolExecutor`` and must return a value that downstream code
+    consumes (worker exceptions are NOT caught here — callers wrap them into
+    their own per-provider error result types).
+
+    ``on_complete(provider, result)`` is invoked from the main thread as each
+    worker finishes (completion order, not canonical order). Use it to emit
+    real-time UI events; the returned list is what gets persisted / iterated
+    downstream and is ALWAYS in canonical order.
+
+    Why: previous ``as_completed`` accumulation made downstream persistence,
+    peer inputs, and report sections depend on network timing — two runs with
+    identical inputs could swap provider order. Holding events in completion
+    order keeps the dashboard responsive while pinning artifacts to a
+    deterministic provider sequence.
+    """
+    if not providers:
+        return []
+    result_by_provider: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=len(providers)) as pool:
+        futures = {pool.submit(submit_worker, p): p for p in providers}
+        for fut in as_completed(futures):
+            provider = futures[fut]
+            # Caller's submit_worker is responsible for wrapping per-worker
+            # exceptions into a result type; if it raises here it's a bug
+            # we want to surface immediately rather than swallow.
+            result = fut.result()
+            result_by_provider[provider] = result
+            if on_complete is not None:
+                on_complete(provider, result)
+    return [result_by_provider[p] for p in providers]
+
+
 def _settings_log_event(rt: LubRuntime, lub_cfg: LubConfig) -> StrategyEvent:
     """LOG event announcing the active settings before Step 1."""
     return rt.emit(
@@ -556,6 +597,10 @@ class LubRunner:
             latest_trade_date=latest,
             user_specified=params.trade_date,
         )
+        # P1-A: 回填 lub_runs.trade_date —— sync 路径未传 --trade-date 时同样会
+        # 在 _record_run_start 里落空字符串，必须在解析出真实 T 后立即更新。
+        if rt.run_id:
+            self._backfill_run_trade_date(rt.run_id, T)
         yield rt.emit(
             EventType.STEP_FINISHED,
             f"Step 0: T={T} T+1={T1}",
@@ -605,6 +650,10 @@ class LubRunner:
             latest_trade_date=latest,
             user_specified=params.trade_date,
         )
+        # P1-A: 回填 lub_runs.trade_date —— 单 LLM 路径与辩论 _do_step_0_and_1 对齐，
+        # 避免 history / report 按 trade_date 聚合时漏掉单 LLM run。
+        if rt.run_id:
+            self._backfill_run_trade_date(rt.run_id, T)
         yield rt.emit(
             EventType.STEP_FINISHED,
             f"Step 0: T={T} T+1={T1}",
@@ -651,6 +700,13 @@ class LubRunner:
         if not bundle.candidates:
             yield from self._emit_empty_report(bundle, params)
             return
+
+        # P1-I/K: compute input_fingerprint once Step 1 has produced the
+        # full bundle. Stored on the runtime so report writers, future LLM
+        # replay-cache lookups, and the summary header can read it without
+        # rebuilding. Failure to compute the fingerprint MUST NOT block the
+        # run — degrade to None and log so observability still surfaces it.
+        self._set_input_fingerprint(bundle, params, lub_cfg)
 
         # Step 2 — 强势初筛
         preset = cfg.app_profile  # v0.7: per-stage tuning resolved by plugin
@@ -742,6 +798,7 @@ class LubRunner:
             predictions=predictions,
             final_ranking=final_obj,
             failed_batch_ids=failed_batches or None,
+            input_fingerprint=rt.input_fingerprint,
         )
         export_llm_calls(rt.run_id, rt.db)
         json_path = report_path / "summary.json"
@@ -862,6 +919,12 @@ class LubRunner:
                     f"[辩论模式] Phase A — 并行执行 初筛+预测 ({len(providers)} 个 LLM)",
                 )
             )
+            # P1-H: collect by provider key, then materialise the final list in
+            # canonical ``providers`` input order. Events still stream as
+            # workers complete (dashboard UX unchanged); persistence / peer
+            # inputs / reports iterate canonical order so a slow provider
+            # never reshuffles downstream artifacts.
+            result_by_provider: dict[str, ProviderDebateResult] = {}
             with ThreadPoolExecutor(max_workers=len(providers)) as pool:
                 futures = {
                     pool.submit(
@@ -888,11 +951,16 @@ class LubRunner:
                             provider=provider, error=f"{type(e).__name__}: {e}"
                         )
                         logger.exception("debate phase A worker %s failed", provider)
-                    provider_results.append(result)
+                    result_by_provider[provider] = result
                     for ev in result_events(result, "phase_a"):
                         emit(ev)
                         if ev.type == EventType.VALIDATION_FAILED:
                             seen_validation_failed = True
+            # Reorder by canonical providers list (user --debate-llms order
+            # or LLMManager.list_providers fallback). All downstream consumers
+            # iterate this list, so Phase-B survivors and report sections
+            # inherit canonical order automatically.
+            provider_results.extend(result_by_provider[p] for p in providers)
 
             # Persist phase-A stage results
             for r in provider_results:
@@ -1020,6 +1088,7 @@ class LubRunner:
                 final_ranking=None,
                 failed_batch_ids=failed_batches or None,
                 debate_results=provider_results,
+                input_fingerprint=rt.input_fingerprint,
             )
             export_llm_calls(run_id, rt.db)
             emit(
@@ -1188,6 +1257,8 @@ class LubRunner:
             for ev in self._emit_empty_report(bundle, params):
                 emit(ev)
             return None
+        # P1-I/K: same fingerprint contract as the single-LLM path.
+        self._set_input_fingerprint(bundle, params, lub_cfg)
         return bundle
 
     # ----- helpers ------------------------------------------------------
@@ -1225,6 +1296,7 @@ class LubRunner:
             selected=[],
             predictions=[],
             final_ranking=None,
+            input_fingerprint=rt.input_fingerprint,
         )
         export_llm_calls(rt.run_id, rt.db)
         json_path = report_path / "summary.json"
@@ -1500,6 +1572,59 @@ class LubRunner:
             (trade_date, run_id),
         )
 
+    def _set_input_fingerprint(
+        self,
+        bundle: Round1Bundle,
+        params: RunParams,
+        lub_cfg: LubConfig,
+    ) -> None:
+        """P1-I/K: compute & stash the run-level input_fingerprint.
+
+        Called once after Step 1 completes, before any LLM stage runs. The
+        fingerprint hashes the canonical-JSON of Round1Bundle (candidates +
+        market_summary + sector_strength + lgb_model_id), the full
+        :class:`LubConfig`, the four StageProfiles in use, and the
+        ``LLM_SCHEMA_VERSION`` / ``PROMPT_TEMPLATE_VERSION`` sentinels.
+
+        Failure here MUST NOT abort the run — degrades to ``None`` and logs.
+        The fingerprint is observability + Phase 3 cache-key input; missing
+        it just means the summary header shows ``unknown`` for that run.
+        """
+        from .fingerprint import build_input_fingerprint  # noqa: PLC0415
+        from .profiles import (  # noqa: PLC0415
+            LLM_SCHEMA_VERSION,
+            PROFILES,
+            PROMPT_TEMPLATE_VERSION,
+            STAGE_FINAL,
+            STAGE_PREDICTION,
+            STAGE_REVISION,
+            STAGE_SCREENING,
+        )
+
+        try:
+            preset = self._rt.config.get_app_config().app_profile
+            stage_profiles = {
+                STAGE_SCREENING: PROFILES[preset][STAGE_SCREENING],
+                STAGE_PREDICTION: PROFILES[preset][STAGE_PREDICTION],
+                STAGE_FINAL: PROFILES[preset][STAGE_FINAL],
+                STAGE_REVISION: PROFILES[preset][STAGE_REVISION],
+            }
+            digest, _payload = build_input_fingerprint(
+                trade_date=bundle.trade_date,
+                next_trade_date=bundle.next_trade_date,
+                daily_lookback=params.daily_lookback,
+                moneyflow_lookback=params.moneyflow_lookback,
+                lub_config=lub_cfg,
+                bundle=bundle,
+                stage_profiles=stage_profiles,
+                llm_schema_version=LLM_SCHEMA_VERSION,
+                prompt_template_version=PROMPT_TEMPLATE_VERSION,
+            )
+            self._rt.input_fingerprint = digest
+        except Exception:  # noqa: BLE001 — fingerprint is observability-only
+            logger.exception("input_fingerprint computation failed; surfacing as None")
+            self._rt.input_fingerprint = None
+
     def _record_run_finish(
         self,
         run_id: str,
@@ -1705,10 +1830,30 @@ def _write_stage_results(
     ``r1:deepseek``) to keep the (run_id, stage, ts_code) PK unique across
     providers; the explicit ``llm_provider`` column lets queries filter by
     provider without parsing the stage string.
+
+    P1-G: defensively stable-sort ``items`` by ``(rank or final_rank, ts_code)``
+    before inserting. The data-layer / pipeline already produce
+    deterministically-ordered outputs (P1-B candidates → R1; P1-F finalists),
+    but this defensive sort guarantees row order in ``lub_stage_results``
+    stays stable even if a future refactor adds a non-deterministic step.
+    StrongCandidate has no ``rank`` field — those items fall through to
+    ts_code asc.
     """
     if not items:
         return
-    for i, item in enumerate(items):
+
+    def _sort_key(it: Any) -> tuple[int, str]:
+        d_ = it.model_dump(mode="json") if hasattr(it, "model_dump") else dict(it)
+        rank_val = d_.get("rank") or d_.get("final_rank")
+        # Missing rank → sentinel ``10**9`` so unranked StrongCandidate rows
+        # collapse to ts_code-asc among themselves.
+        rank_int = int(rank_val) if rank_val is not None else 10**9
+        ts = str(d_.get("ts_code") or "")
+        return (rank_int, ts)
+
+    items_sorted = sorted(items, key=_sort_key)
+
+    for i, item in enumerate(items_sorted):
         d = item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item)
         rt.db.execute(
             "INSERT INTO lub_stage_results(run_id, stage, batch_no, trade_date, ts_code, "
