@@ -9,7 +9,7 @@
       "subdir": "limit_up_board",
       "tag_prefix": "limit-up-board/",
       "min_framework_version": "0.11.0",
-      "latest_version": "limit-up-board/v0.13.3"
+      "latest_version": "limit-up-board/v0.15.0"
     },
     "accumulation-probe-washout": {
       "name": "吸筹试盘洗盘主升浪策略",
