@@ -159,6 +159,13 @@ class RunParams:
     # v0.5 LGB 开关：用户传 --no-lgb 时设为 False（一次性覆盖 LubConfig.lgb_enabled）。
     # PR-0.3 仅落字段，pipeline 接入在 PR-2.2。
     lgb_enabled: bool = True
+    # v0.15.0 (P3-B) — LLM 响应重放 CLI 三件套（互斥；CLI 层已校验）。
+    # 落 ``lub_runs.params_json`` 便于复盘。运行时由 LubRunner 与 LubConfig
+    # 合并成 LLMReplayPolicy；框架未合并 Phase 2 时这些 flag 退化为 no-op
+    # （--replay-only 会显式报错，因为用户主动要求 replay）。
+    fresh_llm: bool = False
+    no_llm_replay: bool = False
+    replay_only: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +367,21 @@ class LubRunner:
     # ----- public --------------------------------------------------------
 
     def execute(self, params: RunParams) -> RunOutcome:
+        # v0.15.0 (P3-B) — --replay-only is a hard precondition: it only makes
+        # sense once the framework's LLM replay cache has landed. Reject early
+        # (before _record_run_start so no failed run row leaks). The other two
+        # flags (--fresh-llm / --no-llm-replay) silently no-op on pre-Phase-2
+        # framework — they at worst force a fresh LLM call which is the
+        # existing behaviour.
+        from .replay_policy import complete_json_supports_replay  # noqa: PLC0415
+
+        if params.replay_only and not complete_json_supports_replay():
+            raise PreconditionError(
+                "--replay-only 需要框架 Phase 2（LLM replay cache）已合并；"
+                "当前 deeptrade-quant 的 LLMClient.complete_json 未支持 replay 形参。"
+                "请升级框架，或移除 --replay-only。"
+            )
+
         run_id = str(uuid.uuid4())
         self._rt.run_id = run_id
         self._rt.tushare = build_tushare_client(
@@ -708,6 +730,26 @@ class LubRunner:
         # run — degrade to None and log so observability still surfaces it.
         self._set_input_fingerprint(bundle, params, lub_cfg)
 
+        # P3-A/B: resolve replay policy from CLI flags + LubConfig defaults,
+        # activate the ContextVar so _complete_with_set_check picks it up.
+        # The single-LLM path stays on the main thread for all LLM calls, so
+        # one set() (no token) survives until Step 5 finalize. Workers in
+        # debate mode enter their own apply_replay_context() before LLM
+        # calls (ContextVars do NOT auto-propagate across ThreadPoolExecutor).
+        from .replay_policy import (  # noqa: PLC0415
+            _replay_policy_ctx, _stage_fingerprint_ctx,
+        )
+        from .profiles import (  # noqa: PLC0415
+            STAGE_FINAL, STAGE_PREDICTION, STAGE_REVISION, STAGE_SCREENING,
+        )
+        _replay_policy_ctx.set(self._resolve_replay_policy(params, lub_cfg))
+        _stage_fingerprint_ctx.set({
+            STAGE_SCREENING: self._rt.input_fingerprint,
+            STAGE_PREDICTION: self._rt.input_fingerprint,
+            STAGE_FINAL: self._rt.input_fingerprint,
+            STAGE_REVISION: self._rt.input_fingerprint,
+        })
+
         # Step 2 — 强势初筛
         preset = cfg.app_profile  # v0.7: per-stage tuning resolved by plugin
         # v0.5 LGB: thread the configured min_score_floor into the prompts;
@@ -924,6 +966,9 @@ class LubRunner:
             # workers complete (dashboard UX unchanged); persistence / peer
             # inputs / reports iterate canonical order so a slow provider
             # never reshuffles downstream artifacts.
+            # P3-A: hand the resolved policy + fingerprint to each worker so
+            # apply_replay_context can be entered inside the thread.
+            replay_policy = self._resolve_replay_policy(params, lub_cfg)
             result_by_provider: dict[str, ProviderDebateResult] = {}
             with ThreadPoolExecutor(max_workers=len(providers)) as pool:
                 futures = {
@@ -939,6 +984,8 @@ class LubRunner:
                         lgb_floor,
                         include_decile,
                         lub_cfg.empty_array_policy,
+                        replay_policy,
+                        rt.input_fingerprint,
                     ): provider
                     for provider in providers
                 }
@@ -1025,6 +1072,8 @@ class LubRunner:
                             ],
                             config_snapshot,
                             lub_cfg.empty_array_policy,
+                            replay_policy,
+                            rt.input_fingerprint,
                         ): r.provider
                         for r in survivors
                     }
@@ -1259,6 +1308,22 @@ class LubRunner:
             return None
         # P1-I/K: same fingerprint contract as the single-LLM path.
         self._set_input_fingerprint(bundle, params, lub_cfg)
+        # P3-A/B: activate replay policy on the main thread. Workers each
+        # call apply_replay_context() themselves with the policy + fp passed
+        # in as arguments — ContextVars don't propagate across pool threads.
+        from .replay_policy import (  # noqa: PLC0415
+            _replay_policy_ctx, _stage_fingerprint_ctx,
+        )
+        from .profiles import (  # noqa: PLC0415
+            STAGE_FINAL, STAGE_PREDICTION, STAGE_REVISION, STAGE_SCREENING,
+        )
+        _replay_policy_ctx.set(self._resolve_replay_policy(params, lub_cfg))
+        _stage_fingerprint_ctx.set({
+            STAGE_SCREENING: self._rt.input_fingerprint,
+            STAGE_PREDICTION: self._rt.input_fingerprint,
+            STAGE_FINAL: self._rt.input_fingerprint,
+            STAGE_REVISION: self._rt.input_fingerprint,
+        })
         return bundle
 
     # ----- helpers ------------------------------------------------------
@@ -1572,6 +1637,30 @@ class LubRunner:
             (trade_date, run_id),
         )
 
+    def _resolve_replay_policy(
+        self,
+        params: RunParams,
+        lub_cfg: LubConfig,
+    ):
+        """P3-B: turn RunParams CLI flags + LubConfig defaults into an
+        ``LLMReplayPolicy``. Returns the policy regardless of framework
+        support — pipeline-level feature detection short-circuits the
+        per-call pass-through.
+        """
+        from .replay_policy import _ReplayCLIFlags, build_replay_policy  # noqa: PLC0415
+
+        cli = _ReplayCLIFlags(
+            fresh_llm=params.fresh_llm,
+            no_llm_replay=params.no_llm_replay,
+            replay_only=params.replay_only,
+        )
+        return build_replay_policy(
+            cli=cli,
+            cfg_enabled=lub_cfg.llm_replay_enabled,
+            cfg_write=lub_cfg.llm_replay_write,
+            cfg_ttl_days=lub_cfg.llm_replay_ttl_days,
+        )
+
     def _set_input_fingerprint(
         self,
         bundle: Round1Bundle,
@@ -1675,6 +1764,8 @@ def _worker_phase_a(
     lgb_min_score_floor: float | None = 30.0,
     include_decile: bool = True,
     empty_array_policy: str = "repair",
+    replay_policy: Any = None,
+    input_fingerprint: str | None = None,
 ) -> ProviderDebateResult:
     """One provider's 强势初筛 + 连板预测 + (optional) final_ranking. Tagged
     events are attached to the returned ProviderDebateResult; the main thread
@@ -1687,9 +1778,26 @@ def _worker_phase_a(
     v0.13.0 (P1-4): receives a frozen :class:`ProviderConfigSnapshot` instead
     of a live :class:`ConfigService`. The worker never reads from the main
     thread's ``Database._conn`` / ``SecretStore``.
+
+    v0.15.0 (P3-A): ``replay_policy`` + ``input_fingerprint`` are activated
+    via :func:`apply_replay_context` inside this thread (ContextVars don't
+    propagate across ThreadPoolExecutor). When ``replay_policy`` is None
+    (caller used a pre-Phase-3 codepath) the default "off" policy applies.
     """
+    from .replay_policy import LLMReplayPolicy, apply_replay_context  # noqa: PLC0415
+    from .profiles import (  # noqa: PLC0415
+        STAGE_FINAL, STAGE_PREDICTION, STAGE_REVISION, STAGE_SCREENING,
+    )
+
     db, wrt = open_worker_runtime(plugin_id, run_id, config_snapshot=config_snapshot)
     out = ProviderDebateResult(provider=provider)
+    effective_policy = replay_policy or LLMReplayPolicy(read_enabled=False, write_enabled=False)
+    stage_fps = {
+        STAGE_SCREENING: input_fingerprint,
+        STAGE_PREDICTION: input_fingerprint,
+        STAGE_FINAL: input_fingerprint,
+        STAGE_REVISION: input_fingerprint,
+    }
     try:
         llm = wrt.llms.get_client(
             provider, plugin_id=plugin_id, run_id=run_id, reports_dir=reports_dir
@@ -1697,38 +1805,39 @@ def _worker_phase_a(
 
         events: list[StrategyEvent] = []
 
-        for ev, res in run_screening(
-            llm=llm, bundle=bundle, preset=preset,
-            lgb_min_score_floor=lgb_min_score_floor,
-            include_decile=include_decile,
-        ):
-            events.append(ev)
-            if res is not None:
-                out.screening_result = res
-        selected = out.screening_result.selected if out.screening_result else []
-
-        if selected:
-            with apply_empty_array_policy(empty_array_policy):  # type: ignore[arg-type]
-                for ev, res in run_prediction(
-                    llm=llm, selected=selected, bundle=bundle, preset=preset,
-                    lgb_min_score_floor=lgb_min_score_floor,
-                    include_decile=include_decile,
-                ):
-                    events.append(ev)
-                    if res is not None:
-                        out.prediction_result = res
-
-        if out.prediction_result and out.prediction_result.success_batches > 1 and out.prediction_result.predictions:
-            out.final_attempted = True
-            finalists = select_finalists(
-                out.prediction_result.predictions, batch_size_hint=out.prediction_result.batch_size or 20
-            )
-            for ev, fr_obj in run_final_ranking(
-                llm=llm, bundle=bundle, finalists=finalists, preset=preset
+        with apply_replay_context(effective_policy, stage_to_fingerprint=stage_fps):
+            for ev, res in run_screening(
+                llm=llm, bundle=bundle, preset=preset,
+                lgb_min_score_floor=lgb_min_score_floor,
+                include_decile=include_decile,
             ):
                 events.append(ev)
-                if fr_obj is not None:
-                    out.final_initial = fr_obj
+                if res is not None:
+                    out.screening_result = res
+            selected = out.screening_result.selected if out.screening_result else []
+
+            if selected:
+                with apply_empty_array_policy(empty_array_policy):  # type: ignore[arg-type]
+                    for ev, res in run_prediction(
+                        llm=llm, selected=selected, bundle=bundle, preset=preset,
+                        lgb_min_score_floor=lgb_min_score_floor,
+                        include_decile=include_decile,
+                    ):
+                        events.append(ev)
+                        if res is not None:
+                            out.prediction_result = res
+
+            if out.prediction_result and out.prediction_result.success_batches > 1 and out.prediction_result.predictions:
+                out.final_attempted = True
+                finalists = select_finalists(
+                    out.prediction_result.predictions, batch_size_hint=out.prediction_result.batch_size or 20
+                )
+                for ev, fr_obj in run_final_ranking(
+                    llm=llm, bundle=bundle, finalists=finalists, preset=preset
+                ):
+                    events.append(ev)
+                    if fr_obj is not None:
+                        out.final_initial = fr_obj
 
         # Attach events to the result via a sidecar attribute. Cleaner than
         # widening the dataclass since these are only used during emit.
@@ -1749,6 +1858,8 @@ def _worker_phase_b(
     peers: list[tuple[str, list[ContinuationCandidate]]],
     config_snapshot: ProviderConfigSnapshot,
     empty_array_policy: str = "repair",
+    replay_policy: Any = None,
+    input_fingerprint: str | None = None,
 ) -> tuple[list[StrategyEvent], DebateRoundResult]:
     """One provider's 辩论修订 (peer-aware revision).
 
@@ -1757,25 +1868,36 @@ def _worker_phase_b(
 
     v0.13.0 (P1-4): receives a frozen :class:`ProviderConfigSnapshot` instead
     of a live :class:`ConfigService` (worker isolation).
+
+    v0.15.0 (P3-A): replay context activated inside the thread; see
+    :func:`_worker_phase_a` docstring.
     """
+    from .replay_policy import LLMReplayPolicy, apply_replay_context  # noqa: PLC0415
+    from .profiles import STAGE_REVISION  # noqa: PLC0415
+
     db, wrt = open_worker_runtime(plugin_id, run_id, config_snapshot=config_snapshot)
+    effective_policy = replay_policy or LLMReplayPolicy(read_enabled=False, write_enabled=False)
     try:
         llm = wrt.llms.get_client(
             provider, plugin_id=plugin_id, run_id=run_id, reports_dir=reports_dir
         )
         events: list[StrategyEvent] = []
         result: DebateRoundResult | None = None
-        with apply_empty_array_policy(empty_array_policy):  # type: ignore[arg-type]
-            for ev, res in run_debate_revision(
-                llm=llm,
-                bundle=bundle,
-                own_predictions=own_predictions,
-                peers=peers,
-                preset=preset,
-            ):
-                events.append(ev)
-                if res is not None:
-                    result = res
+        with apply_replay_context(
+            effective_policy,
+            stage_to_fingerprint={STAGE_REVISION: input_fingerprint},
+        ):
+            with apply_empty_array_policy(empty_array_policy):  # type: ignore[arg-type]
+                for ev, res in run_debate_revision(
+                    llm=llm,
+                    bundle=bundle,
+                    own_predictions=own_predictions,
+                    peers=peers,
+                    preset=preset,
+                ):
+                    events.append(ev)
+                    if res is not None:
+                        result = res
         if result is None:
             result = DebateRoundResult(error="run_debate_revision yielded no terminal result")
         return events, result

@@ -152,6 +152,33 @@ def cmd_run(
             "也可通过环境变量 DEEPTRADE_NO_DASHBOARD=1 全局禁用。"
         ),
     ),
+    fresh_llm: bool = typer.Option(
+        False,
+        "--fresh-llm",
+        help=(
+            "v0.15.0 — 本次 run 不读 LLM 响应缓存（仍按 LubConfig.llm_replay_write 写）。"
+            "需要框架 Phase 2 已合并；未合并时仅 INFO 日志告知，不报错。"
+            "与 --no-llm-replay / --replay-only 互斥。"
+        ),
+    ),
+    no_llm_replay: bool = typer.Option(
+        False,
+        "--no-llm-replay",
+        help=(
+            "v0.15.0 — 本次 run 既不读也不写 LLM 响应缓存（等价 Phase 1 行为）。"
+            "需要框架 Phase 2 已合并；未合并时仅 INFO 日志告知，不报错。"
+            "与 --fresh-llm / --replay-only 互斥。"
+        ),
+    ),
+    replay_only: bool = typer.Option(
+        False,
+        "--replay-only",
+        help=(
+            "v0.15.0 — 只允许缓存命中；任一阶段 miss 即报错退出，用于离线复盘。"
+            "需要框架 Phase 2 已合并；未合并时显式报错（用户主动要求 replay）。"
+            "与 --fresh-llm / --no-llm-replay 互斥。"
+        ),
+    ),
 ) -> None:
     """Run the full 打板策略 pipeline.
 
@@ -178,6 +205,16 @@ def cmd_run(
             typer.echo("✘ --llm 解析后为空")
             raise typer.Exit(2)
 
+    # v0.15.0 (P3-B) — three replay flags are mutually exclusive. typer can't
+    # express that natively, so we hand-check here before constructing
+    # RunParams. Order matches help text; first violation wins.
+    _replay_count = sum(int(b) for b in (fresh_llm, no_llm_replay, replay_only))
+    if _replay_count > 1:
+        typer.echo(
+            "✘ --fresh-llm / --no-llm-replay / --replay-only 三者最多只能选一个"
+        )
+        raise typer.Exit(2)
+
     db, rt, ctx = _open_runtime()
     try:
         params = RunParams(
@@ -189,6 +226,9 @@ def cmd_run(
             debate_llms=debate_llms_list,
             llm_provider=llm_provider,
             lgb_enabled=not no_lgb,
+            fresh_llm=fresh_llm,
+            no_llm_replay=no_llm_replay,
+            replay_only=replay_only,
         )
         # v0.6 — pick a renderer. ``choose_renderer`` returns the rich
         # dashboard only when stdout is an interactive terminal and none of

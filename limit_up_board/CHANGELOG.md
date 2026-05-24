@@ -4,6 +4,72 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.15.0 — 2026-05-24 — Phase 3：接入框架 LLM Replay 缓存
+
+针对连续执行不一致问题的 Phase 3 落地：插件层完整接入框架 `LLMReplayPolicy`
+基础设施。本版本与 Phase 1 (v0.14.0) 配合后，"相同输入 → 相同输出"成为
+默认行为；不依赖框架 Phase 2 的运行路径与 v0.14.0 等价（向后兼容）。
+
+### Added
+
+- **`limit_up_board/replay_policy.py`** (P3-PRE)：
+  - `LLMReplayPolicy` dataclass —— 优先 import 框架版（`deeptrade.core.llm_client`），
+    缺失时回退本地 stub，shape 与设计方案 §5.1.3 完全对齐；
+  - `apply_replay_context(policy, stage_to_fingerprint=...)` —— ContextVar
+    上下文管理器，借鉴 `apply_empty_array_policy` 模式，避免在多层 API
+    间显式传 policy；
+  - `build_replay_policy(cli=..., cfg_enabled=..., ...)` —— CLI 优先级 >
+    LubConfig 默认值，决策表：`--replay-only` → 只读、`--no-llm-replay`
+    → 全关、`--fresh-llm` → 不读但按 cfg 写、`cfg_enabled=True` → 灰度
+    默认开；
+  - `complete_json_supports_replay()` —— 运行时 inspect 框架 `LLMClient.complete_json`
+    签名是否含 `replay` 形参；不支持时自动降级为 no-op。
+
+- **`LubConfig.llm_replay_enabled` / `llm_replay_write` / `llm_replay_ttl_days`** (P3-C)：
+  灰度期默认全部 `False / True / None`，即使框架就绪也保持 Phase 1 行为不变。
+  `settings show / set` 自动覆盖三个新键；`validate_config` 校验 `ttl_days`
+  为 `None` 或正整数。
+
+- **CLI `--fresh-llm` / `--no-llm-replay` / `--replay-only`** (P3-B)：
+  `cmd_run` 三个新 flag，三者互斥（典型用法见 README）。`--replay-only`
+  在框架 Phase 2 未合并时 `PreconditionError` 提前退出（**不落 `lub_runs`
+  行**，避免 audit 污染）；其余两个 flag 在 pre-Phase-2 框架下 silently
+  no-op。
+
+- **`_complete_with_set_check` attempt_meta** (P3-D)：
+  meta 字典新增 `attempt_count` / `first_error_class` /
+  `repair_hint_hash` / `final_prompt_hash` 四个字段，框架 Phase 2 写
+  replay cache 时会一并持久化，便于复盘 set-mismatch / evidence-validation
+  失败 → 自愈 → 成功的全过程。
+
+### Changed
+
+- **`_complete_with_set_check`** (P3-A) 新增可选 `stage=` kwarg。当传入且
+  `complete_json_supports_replay()` 为 True 时，向 `complete_json` 透传
+  `replay=` (从 ContextVar 取) / `stage=` / `schema_version=LLM_SCHEMA_VERSION`
+  / `input_fingerprint=` (按 stage 查询)。框架不支持时**不**透传，
+  即 pre-Phase-2 框架行为完全不变。
+- 四个 LLM 调用点（screening / prediction / final_ranking / debate_revision）
+  显式传入对应 `STAGE_*` 常量。
+- `_worker_phase_a` / `_worker_phase_b` 接收 `replay_policy` +
+  `input_fingerprint` 参数，在工作线程内重新进入 `apply_replay_context`
+  （ContextVar 不跨 `ThreadPoolExecutor` 自动传播）。
+- `RunParams` 新增 `fresh_llm / no_llm_replay / replay_only` 三个字段；
+  落 `lub_runs.params_json` 便于复盘。
+- `LubRunner.execute()` 在 `_record_run_start` **前**校验
+  `--replay-only` 的框架支持，避免污染 run 历史。
+
+### Notes
+
+- 默认行为（`lub.llm_replay_enabled=False`）下，本版本运行路径与 v0.14.0
+  byte-equivalent —— 灰度策略，验证稳定后通过 `settings set
+  lub.llm_replay_enabled true` 启用，下个版本切换默认值。
+- 框架 Phase 2 合并后，`fingerprint.py` 中 `try: from deeptrade.core.fingerprint`
+  自动切换；`replay_policy.py` 同理。
+- 完整新增测试 26 项：`test_replay_policy.py` (11)、
+  `test_cli_replay_flags.py` (9)、`test_complete_with_set_check_meta.py` (6)，
+  外加 `test_runner.py` 两个 execute() precondition 测试。
+
 ## v0.14.0 — 2026-05-24 — Phase 1：连续执行结果一致性（输入侧规范化）
 
 针对「相同输入、连续两次执行结果不一致」问题的 Phase 1 修复批次，全部为

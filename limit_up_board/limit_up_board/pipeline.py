@@ -27,12 +27,19 @@ from deeptrade.plugins_api import StageProfile
 from deeptrade.plugins_api.events import EventLevel, EventType, StrategyEvent
 
 from .data import Round1Bundle, SectorStrength
+from .fingerprint import hash_text
 from .profiles import (
+    LLM_SCHEMA_VERSION,
     STAGE_FINAL,
     STAGE_PREDICTION,
     STAGE_REVISION,
     STAGE_SCREENING,
     resolve_profile,
+)
+from .replay_policy import (
+    complete_json_supports_replay,
+    get_active_policy,
+    get_stage_fingerprint,
 )
 from .prompts import (
     FINAL_RANKING_SYSTEM,
@@ -287,6 +294,7 @@ def _complete_with_set_check(
     repair_retries: int = 1,
     envelope_defaults: dict[str, Any] | None = None,
     evidence_validator: Callable[[Any], list[str]] | None = None,
+    stage: str | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Call LLM and verify the output's id-set matches. On mismatch, retry
     once with a corrective hint appended to the user prompt.
@@ -303,15 +311,41 @@ def _complete_with_set_check(
             set-equality check passes; on non-empty errors it follows the
             same repair-retry contract as set-mismatch. On final attempt
             with errors → raise :class:`_EvidenceValidationError`.
+        stage: v0.15.0 (P3-A) — stage tag forwarded to ``complete_json``
+            (and the framework's LLM replay cache key) when the framework
+            supports it. ``None`` falls through to legacy behaviour. Use the
+            ``STAGE_*`` constants from :mod:`limit_up_board.profiles`.
 
     On retry, the meta dict carries ``evidence_validation_errors_first_attempt``
     (the first-attempt errors that the LLM self-corrected); callers can fold
     that into ``lub_stage_results.evidence_validation_errors_json`` if they
     want to record near-misses.
+
+    v0.15.0 (P3-D): meta also carries ``attempt_count`` (1 = no retry),
+    ``first_error_class`` (one of ``"set_mismatch"`` / ``"evidence_validation"``
+    / ``None``), ``repair_hint_hash`` (sha256 of the corrective hint, or None),
+    and ``final_prompt_hash`` (sha256 of the user prompt that ultimately
+    succeeded). Framework Phase 2 audit row reads these when replay caching
+    the successful response.
     """
     current_user = user
     last_actual: set[str] = set()
     first_attempt_evidence_errors: list[str] = []
+    # P3-D — attempt audit (recorded whether or not the framework supports
+    # replay; cheap and always useful for retry post-mortems).
+    first_error_class: str | None = None
+    repair_hint: str | None = None
+    # P3-A — only forward replay/stage/schema/input_fingerprint when the
+    # framework version actually accepts these kwargs. Pre-Phase-2 frameworks
+    # would raise TypeError on unknown kwargs.
+    extra_kwargs: dict[str, Any] = {}
+    if stage is not None and complete_json_supports_replay():
+        extra_kwargs = {
+            "replay": get_active_policy(),
+            "stage": stage,
+            "schema_version": LLM_SCHEMA_VERSION,
+            "input_fingerprint": get_stage_fingerprint(stage),
+        }
     for attempt in range(repair_retries + 1):
         raw, meta = llm.complete_json(
             system=system,
@@ -319,6 +353,7 @@ def _complete_with_set_check(
             schema=schema,
             profile=profile,
             envelope_defaults=envelope_defaults,
+            **extra_kwargs,
         )
         obj = raw if isinstance(raw, schema) else schema.model_validate(raw)
         items = getattr(obj, output_attr)
@@ -326,7 +361,10 @@ def _complete_with_set_check(
         if expected_ids != actual_ids:
             last_actual = actual_ids
             if attempt < repair_retries:
-                current_user = user + _set_mismatch_repair_hint(expected_ids, actual_ids)
+                if first_error_class is None:
+                    first_error_class = "set_mismatch"
+                repair_hint = _set_mismatch_repair_hint(expected_ids, actual_ids)
+                current_user = user + repair_hint
                 continue
             raise _SetMismatchError(
                 f"set mismatch after {repair_retries + 1} attempts; "
@@ -335,22 +373,53 @@ def _complete_with_set_check(
             )
         # set OK; now apply evidence-field whitelist if caller wired one in.
         if evidence_validator is None:
-            return obj, meta
+            return obj, _stamp_attempt_meta(
+                meta, attempt + 1, first_error_class, repair_hint, current_user,
+                first_attempt_evidence_errors,
+            )
         ev_errors = evidence_validator(obj)
         if not ev_errors:
-            # Stamp recovery info into meta when this run took retries.
-            meta = {**meta, "evidence_validation_errors_first_attempt": first_attempt_evidence_errors}
-            return obj, meta
+            return obj, _stamp_attempt_meta(
+                meta, attempt + 1, first_error_class, repair_hint, current_user,
+                first_attempt_evidence_errors,
+            )
         # Validator triggered; retry once with a corrective hint, then bail.
         if attempt == 0:
             first_attempt_evidence_errors = list(ev_errors)
+            if first_error_class is None:
+                first_error_class = "evidence_validation"
         if attempt < repair_retries:
-            current_user = user + _evidence_validation_repair_hint(ev_errors)
+            repair_hint = _evidence_validation_repair_hint(ev_errors)
+            current_user = user + repair_hint
             continue
         raise _EvidenceValidationError(ev_errors)
     # Should be unreachable given the loop above always returns or raises;
     # added for type-checker satisfaction.
     raise _SetMismatchError("unreachable")
+
+
+def _stamp_attempt_meta(
+    meta: dict[str, Any],
+    attempt_count: int,
+    first_error_class: str | None,
+    repair_hint: str | None,
+    final_user: str,
+    first_attempt_evidence_errors: list[str],
+) -> dict[str, Any]:
+    """P3-D: merge retry audit fields into the framework's response meta.
+
+    Always called with the FINAL successful attempt's prompt + the captured
+    first-error class / repair hint. ``attempt_count`` is 1-based (1 = first
+    try succeeded, no retry).
+    """
+    return {
+        **meta,
+        "attempt_count": attempt_count,
+        "first_error_class": first_error_class,
+        "repair_hint_hash": hash_text(repair_hint) if repair_hint else None,
+        "final_prompt_hash": hash_text(final_user),
+        "evidence_validation_errors_first_attempt": first_attempt_evidence_errors,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -480,6 +549,7 @@ def run_screening(
                     "batch_summary": "",
                 },
                 evidence_validator=ev_validator,
+                stage=STAGE_SCREENING,
             )
         except (
             LLMValidationError,
@@ -695,6 +765,7 @@ def run_prediction(
                     "risk_disclaimer": "",
                 },
                 evidence_validator=ev_validator,
+                stage=STAGE_PREDICTION,
             )
         except (
             LLMValidationError,
@@ -858,6 +929,7 @@ def run_final_ranking(
                 "trade_date": bundle.trade_date,
                 "next_trade_date": bundle.next_trade_date,
             },
+            stage=STAGE_FINAL,
         )
     except (LLMValidationError, LLMTransportError, _SetMismatchError) as e:
         logger.exception("全局重排 failed")
@@ -1060,6 +1132,7 @@ def run_debate_revision(
                 "revision_summary": "",
             },
             evidence_validator=ev_validator,
+            stage=STAGE_REVISION,
         )
     except (
         LLMValidationError,

@@ -211,3 +211,32 @@ def test_iter_pipeline_backfills_trade_date_after_step0(
     )
     assert row is not None
     assert row[0] == "20260530", f"expected backfilled 20260530, got {row[0]!r}"
+
+
+# ---------------------------------------------------------------------------
+# P3-B: execute() rejects --replay-only when framework doesn't support replay
+# ---------------------------------------------------------------------------
+
+
+def test_execute_rejects_replay_only_when_framework_unsupported(
+    runner_db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--replay-only`` is a hard precondition: it must fail BEFORE
+    _record_run_start so no failed run row leaks into ``lub_runs``."""
+    from limit_up_board.runner import PreconditionError, RunParams
+
+    runner = _make_runner(runner_db)
+    monkeypatch.setattr(
+        "limit_up_board.replay_policy.complete_json_supports_replay",
+        lambda: False,
+    )
+
+    params = RunParams(replay_only=True)
+    with pytest.raises(PreconditionError) as exc:
+        runner.execute(params)
+    assert "Phase 2" in str(exc.value) or "replay" in str(exc.value)
+
+    # And lub_runs has no row for this attempt — the precondition fired
+    # before any state was written.
+    rows = runner_db.fetchall("SELECT run_id FROM lub_runs")
+    assert rows == []
