@@ -31,6 +31,7 @@ from deeptrade.plugins_api.events import EventLevel, EventType, StrategyEvent
 if TYPE_CHECKING:  # pragma: no cover
     from deeptrade.core.config import ConfigService
     from deeptrade.core.llm_client import LLMClient
+    from deeptrade.plugins_api import PluginContext, ReportUploader
 
 from .calendar import TradeCalendar
 from .cancellation import cancel_requested
@@ -56,7 +57,6 @@ from .pipeline import (
 from .prompts import assign_peer_labels
 from .render import export_llm_calls, render_terminal_summary, write_report
 from .schemas import apply_empty_array_policy
-from .uploader import UploadError, upload_summary_json
 from .runtime import (
     LubRuntime,
     ProviderConfigSnapshot,
@@ -281,9 +281,17 @@ class LubRunner:
     """Drives the pipeline generator and persists run / events."""
 
     def __init__(
-        self, rt: LubRuntime, *, renderer: EventRenderer | None = None
+        self,
+        rt: LubRuntime,
+        *,
+        renderer: EventRenderer | None = None,
+        ctx: PluginContext | None = None,
     ) -> None:
         self._rt = rt
+        # v0.13.3 — framework v0.11+ PluginContext (carries make_report_uploader).
+        # ``None`` keeps legacy-test paths working; ``_maybe_upload_summary`` is
+        # the only consumer and bails out cleanly when missing (skipped_disabled).
+        self._ctx = ctx
         # Buffer for events emitted by sub-systems (currently TushareClient)
         # and drained between yields in the pipeline.
         self._pending: list[StrategyEvent] = []
@@ -777,7 +785,7 @@ class LubRunner:
                     level=EventLevel.WARNING,
                 )
 
-        yield from self._maybe_upload_summary(lub_cfg, report_path, bundle.trade_date)
+        yield from self._maybe_upload_summary(report_path, bundle.trade_date)
 
     # ====================================================================
     # Debate mode (multi-LLM)
@@ -1229,93 +1237,60 @@ class LubRunner:
                 "reason": reason,
             },
         )
-        yield from self._maybe_upload_summary(lub_cfg, report_path, bundle.trade_date)
+        yield from self._maybe_upload_summary(report_path, bundle.trade_date)
 
     def _maybe_upload_summary(
-        self, lub_cfg: LubConfig, report_path: Path, trade_date: str
+        self, report_path: Path, trade_date: str
     ) -> Iterable[StrategyEvent]:
-        """Best-effort POST ``summary.json`` to DeepTrade 官网.
+        """Best-effort POST ``summary.json`` via 框架 v0.11 ``ReportUploader``.
 
-        Skips silently when:
-          * ``lub_cfg.summary_upload_enabled`` is False
-          * ``summary.json`` was not written (e.g. debate mode, builder crash)
-
-        Failures emit a WARN-level LOG event and never raise — the run is
-        already finished and should not be marked partial_failed just because
-        the share endpoint was unreachable.
-
-        v0.12.3 起：
-          * 默认 ``summary_upload_enabled=False``；用户显式开启才会进入此路径。
-          * Token 从 ``LubConfig.summary_upload_token`` 读取；空串走匿名（不写
-            ``Authorization``）。
-          * 事件 payload 写入完整审计字段（``enabled / url / status /
-            duration_ms / public_url / public_path / error_class``），**永远不写
-            token / Authorization 字段**。
+        上传开关 / URL / 超时 / token 全部从框架 ``report.upload.*`` 读取；
+        插件只负责传文件路径 + ``plugin_name`` + ``trade_date``。
+        框架返回 ``status="skipped_*"`` 时静默返回（保留旧行为：用户未开启就不打扰）。
         """
-        if not lub_cfg.summary_upload_enabled:
+        if self._ctx is None:
+            # 没有 PluginContext（旧测试 / 未注入）时按"上传未启用"对待。
             return
         json_path = report_path / "summary.json"
-        if not json_path.is_file():
-            return
         rt = self._rt
-        import time as _time
-
-        t0 = _time.monotonic()
-        audit: dict[str, Any] = {
-            "enabled": True,
-            "url": lub_cfg.summary_upload_url,
-            "json_path": str(json_path),
-            "token_configured": bool(lub_cfg.summary_upload_token),
-            "trade_date": trade_date,
-        }
-        try:
-            result = upload_summary_json(
-                json_path,
-                url=lub_cfg.summary_upload_url,
-                token=lub_cfg.summary_upload_token or None,
-                timeout=lub_cfg.summary_upload_timeout,
-                extra_fields={
-                    "plugin_name": "打板策略",
-                    "trade_date": trade_date,
-                },
-            )
-        except UploadError as e:
-            audit["status"] = "failed"
-            audit["error_class"] = type(e).__name__
-            audit["error"] = str(e)
-            audit["duration_ms"] = (_time.monotonic() - t0) * 1000.0
-            yield rt.emit(
-                EventType.LOG,
-                f"⚠ summary.json 上传失败：{e}",
-                level=EventLevel.WARN,
-                payload=audit,
-            )
-            return
-        except Exception as e:  # noqa: BLE001 — network upload never blocks run
-            logger.warning("upload_summary_json raised unexpectedly: %s", e)
-            audit["status"] = "failed"
-            audit["error_class"] = type(e).__name__
-            audit["error"] = str(e)
-            audit["duration_ms"] = (_time.monotonic() - t0) * 1000.0
-            yield rt.emit(
-                EventType.LOG,
-                f"⚠ summary.json 上传失败（未知异常）：{type(e).__name__}: {e}",
-                level=EventLevel.WARN,
-                payload=audit,
-            )
-            return
-        public_url = result.get("url")
-        audit["status"] = "ok"
-        audit["duration_ms"] = (_time.monotonic() - t0) * 1000.0
-        audit["public_url"] = public_url
-        audit["public_path"] = result.get("pathname")
-        audit["date"] = result.get("date")
-        audit["index"] = result.get("index")
-        yield rt.emit(
-            EventType.LOG,
-            f"📤 报告已同步至官网：{public_url}",
-            payload=audit,
+        uploader: ReportUploader = self._ctx.make_report_uploader(run_id=rt.run_id)
+        result = uploader.upload(
+            json_path,
+            plugin_name="打板策略",
+            trade_date=trade_date,
         )
+
+        if result.status.startswith("skipped"):
+            return
+
+        # v0.12.3 事件 payload 兼容：沿用 enabled / url / status / duration_ms /
+        # public_url / public_path / error_class 字段名，便于前端 / 日志无感升级。
+        payload: dict[str, Any] = {
+            "enabled": True,
+            "url": result.public_url,
+            "status": result.status,
+            "duration_ms": result.duration_ms,
+            "public_url": result.public_url,
+            "public_path": result.public_path,
+            "public_index": result.public_index,
+            "public_date": result.public_date,
+            "trade_date": trade_date,
+            "json_path": str(json_path),
+            "error_class": result.error_class,
+        }
+        if result.status == "ok":
+            yield rt.emit(
+                EventType.LOG,
+                f"📤 报告已同步至官网：{result.public_url}",
+                payload=payload,
+            )
+        else:
+            yield rt.emit(
+                EventType.LOG,
+                f"⚠ summary.json 上传失败：{result.error}",
+                level=EventLevel.WARN,
+                payload=payload,
+            )
 
     def _on_tushare_event(self, event_type: str, message: str, payload: dict) -> None:
         try:

@@ -8,8 +8,8 @@
       "repo": "ty19880929/DeepTradePluginOfficial",
       "subdir": "limit_up_board",
       "tag_prefix": "limit-up-board/",
-      "min_framework_version": "0.4.2",
-      "latest_version": "limit-up-board/v0.13.2"
+      "min_framework_version": "0.11.0",
+      "latest_version": "limit-up-board/v0.13.3"
     },
     "accumulation-probe-washout": {
       "name": "吸筹试盘洗盘主升浪策略",

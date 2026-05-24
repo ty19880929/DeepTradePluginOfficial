@@ -47,7 +47,7 @@ def _invoke_cmd_run_with_captured_params(
     captured: dict[str, RunParams] = {}
 
     class _FakeRunner:
-        def __init__(self, rt, renderer=None) -> None:  # noqa: ARG002
+        def __init__(self, rt, renderer=None, ctx=None) -> None:  # noqa: ARG002
             pass
 
         def execute(self, params: RunParams) -> RunOutcome:
@@ -60,7 +60,8 @@ def _invoke_cmd_run_with_captured_params(
         patch("limit_up_board.cli.render_finished_run") as _render,
         patch("limit_up_board.cli.choose_renderer", lambda **_: MagicMock()),
     ):
-        open_rt.return_value = (MagicMock(close=MagicMock()), MagicMock())
+        # v0.13.3 — _open_runtime returns (db, rt, ctx).
+        open_rt.return_value = (MagicMock(close=MagicMock()), MagicMock(), MagicMock())
         _render.return_value = None
         result = runner.invoke(app, ["run", *args])
     return result.exit_code, result.output or "", captured.get("params")

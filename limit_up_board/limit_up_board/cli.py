@@ -32,11 +32,18 @@ from deeptrade.core.config import ConfigService
 from deeptrade.core.db import Database
 from deeptrade.core.llm_manager import LLMManager
 from deeptrade.core.run_status import RunStatus
-from deeptrade.plugins_api import render_exception
+from deeptrade.plugins_api import PluginContext, render_exception
 
 from .calendar import TradeCalendar
 from .cancellation import install_sigint_marker
-from .config import LubConfig, list_for_show, load_config, save_config, validate_config
+from .config import (
+    LubConfig,
+    list_for_show,
+    load_config,
+    migrate_legacy_upload_config,
+    save_config,
+    validate_config,
+)
 from .lgb import checkpoint as lgb_checkpoint
 from .lgb import paths as lgb_paths
 from .lgb import registry as lgb_registry
@@ -84,11 +91,21 @@ from .winrate.cli import winrate_app  # noqa: E402
 app.add_typer(winrate_app, name="winrate")
 
 
-def _open_runtime() -> tuple[Database, LubRuntime]:
+def _open_runtime() -> tuple[Database, LubRuntime, PluginContext]:
+    """Build the per-process services bundle.
+
+    v0.13.3 — also constructs a :class:`PluginContext` (framework v0.11+) so
+    the runner can call ``ctx.make_report_uploader(...)``. The migration from
+    legacy ``lub.summary_upload_*`` keys is one-shot and idempotent; running it
+    here means every CLI entry path picks up the relocation without extra
+    plumbing.
+    """
     db = Database(paths.db_path())
     cfg = ConfigService(db)
+    ctx = PluginContext(db=db, config=cfg, plugin_id="limit-up-board")
+    migrate_legacy_upload_config(db, cfg)
     rt = LubRuntime(db=db, config=cfg, llms=LLMManager(db, cfg))
-    return db, rt
+    return db, rt, ctx
 
 
 @app.command("run")
@@ -161,7 +178,7 @@ def cmd_run(
             typer.echo("✘ --llm 解析后为空")
             raise typer.Exit(2)
 
-    db, rt = _open_runtime()
+    db, rt, ctx = _open_runtime()
     try:
         params = RunParams(
             trade_date=trade_date,
@@ -179,7 +196,7 @@ def cmd_run(
         # TERM=dumb) are in play; everywhere else it returns the
         # byte-compatible legacy renderer (Plan §3.5).
         renderer = choose_renderer(no_dashboard=no_dashboard)
-        runner = LubRunner(rt, renderer=renderer)
+        runner = LubRunner(rt, renderer=renderer, ctx=ctx)
         outcome = runner.execute(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.status == RunStatus.CANCELLED:
@@ -203,7 +220,7 @@ def cmd_sync(
     moneyflow_lookback: int = typer.Option(5, "--moneyflow-lookback"),
 ) -> None:
     """Fetch + persist data only (no LLM stages)."""
-    db, rt = _open_runtime()
+    db, rt, ctx = _open_runtime()
     try:
         params = RunParams(
             trade_date=trade_date,
@@ -212,7 +229,7 @@ def cmd_sync(
             moneyflow_lookback=moneyflow_lookback,
         )
         renderer = choose_renderer(no_dashboard=False)
-        runner = LubRunner(rt, renderer=renderer)
+        runner = LubRunner(rt, renderer=renderer, ctx=ctx)
         outcome = runner.execute_sync_only(params)
         typer.echo(f"\nstatus: {outcome.status.value}  run_id: {outcome.run_id}")
         if outcome.status == RunStatus.CANCELLED:
@@ -691,7 +708,7 @@ def cmd_lgb_train(
         typer.echo("✘ --start 必须 ≤ --end")
         raise typer.Exit(2)
 
-    db, rt = _open_runtime()
+    db, rt, _ctx = _open_runtime()
     try:
         cfg = load_config(db)
         tushare = build_tushare_client(rt)
@@ -988,7 +1005,7 @@ def cmd_lgb_evaluate(
     )
     from .lgb.dataset import collect_training_window as _collect_window  # noqa: PLC0415
 
-    db, rt = _open_runtime()
+    db, rt, _ctx = _open_runtime()
     try:
         cfg = load_config(db)
         tushare = build_tushare_client(rt)

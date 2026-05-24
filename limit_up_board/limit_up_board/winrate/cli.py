@@ -360,7 +360,7 @@ def cmd_summary(
     """
     from ..cli import _open_runtime  # noqa: PLC0415
 
-    db, rt = _open_runtime()
+    db, rt, _ctx = _open_runtime()
     try:
         pipe = _build_pipeline(
             db, rt, start=start, end=end, prediction=prediction, force_sync=force_sync,
@@ -411,7 +411,7 @@ def cmd_export(
         typer.echo(f"✘ {e}")
         raise typer.Exit(2) from e
 
-    db, rt = _open_runtime()
+    db, rt, _ctx = _open_runtime()
     try:
         pipe = _build_pipeline(
             db, rt, start=start, end=end, prediction=prediction, force_sync=force_sync,
@@ -476,7 +476,7 @@ def cmd_purge(
         typer.echo(f"✘ --before 必须是 YYYYMMDD 格式，收到: {before}")
         raise typer.Exit(2)
 
-    db, _ = _open_runtime()
+    db, _rt, _ctx = _open_runtime()
     try:
         # 1) 先 count + 列样本日期
         row = db.fetchone(
@@ -553,7 +553,7 @@ def cmd_llm_review(
         render_markdown_report,
     )
 
-    db, rt = _open_runtime()
+    db, rt, _ctx = _open_runtime()
     try:
         pipe = _build_pipeline(
             db, rt, start=start, end=end, prediction=prediction, force_sync=force_sync,

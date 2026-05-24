@@ -29,6 +29,7 @@ from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:  # pragma: no cover
+    from deeptrade.core.config import ConfigService
     from deeptrade.core.db import Database
 
 EmptyArrayPolicy = Literal["repair", "degraded", "fallback"]
@@ -52,16 +53,11 @@ class LubConfig:
     lgb_train_min_samples: int = 1500
     lgb_max_models_to_keep: int = 5
 
-    # ---- summary.json 上传到 DeepTrade 官网（v0.12+；v0.10/0.11 是 summary.html）----
-    # v0.12.3 起 **默认关闭**（隐私优先）；需要分享报告时显式：
-    #     deeptrade limit-up-board settings set summary_upload_enabled true
-    # 失败时仅记 WARN 日志、不阻断 run。
-    summary_upload_enabled: bool = False
-    summary_upload_url: str = "https://deeptrade.tiey.ai/api/reports/upload"
-    summary_upload_timeout: float = 30.0
-    # 上传鉴权 token。v0.12.3+：从源码硬编码（"deeptrade"）改为可配置；空串表示匿名上传，
-    # 不写 Authorization header，由服务端决定是否拒绝。
-    summary_upload_token: str = ""
+    # v0.13.3 起：summary.json 上传链路已下沉到框架 ``report.upload.*`` 配置族
+    # （需要 ``deeptrade-quant>=0.11.0``）。旧的 ``lub.summary_upload_*`` 行由
+    # :func:`migrate_legacy_upload_config` 在首次 dispatch 时一次性搬到框架配置
+    # （URL / 超时只在框架仍是 default 时覆盖；token 非空则一律写入 secret_store；
+    # enabled=True 写一次性开关），完成即清，无需用户介入。
 
     # ---- v0.12.4 (P1-2)：连板预测 / 辩论修订 阶段的空数组兜底策略 ----
     # "repair"   → LLM 重新生成（默认；与 prompt 文案一致：禁止空数组）
@@ -125,18 +121,6 @@ def validate_config(cfg: LubConfig) -> None:
         raise ValueError(
             f"lgb_max_models_to_keep 必须 >= 1（当前 {cfg.lgb_max_models_to_keep}）"
         )
-    if cfg.summary_upload_enabled and not (
-        cfg.summary_upload_url.startswith("http://")
-        or cfg.summary_upload_url.startswith("https://")
-    ):
-        raise ValueError(
-            "summary_upload_url 必须是 http(s):// 开头的有效 URL"
-            f"（当前 {cfg.summary_upload_url!r}）"
-        )
-    if cfg.summary_upload_timeout <= 0:
-        raise ValueError(
-            f"summary_upload_timeout 必须 > 0（当前 {cfg.summary_upload_timeout}）"
-        )
     if cfg.empty_array_policy not in _VALID_EMPTY_ARRAY_POLICIES:
         raise ValueError(
             f"empty_array_policy 必须为 'repair' / 'degraded' / 'fallback' 之一"
@@ -171,6 +155,58 @@ def save_config(db: Database, cfg: LubConfig) -> None:
                 "INSERT INTO lub_config(key, value_json) VALUES (?, ?)",
                 (key, payload),
             )
+
+
+def migrate_legacy_upload_config(db: Database, config: ConfigService) -> bool:
+    """One-shot：把 ``lub.summary_upload_*`` 搬到框架 v0.11 的 ``report.upload.*``。
+
+    幂等：只要 ``lub_config`` 中还有 ``lub.summary_upload_*`` 行就尝试迁移；迁移
+    结束后 ``DELETE`` 这些行；下一次再调用直接 no-op。返回是否实际搬运过（供
+    事件日志 / 测试断言用）。
+
+    搬运策略：
+      * ``url`` / ``timeout`` —— 仅当框架侧仍是 ``default`` 来源时才覆盖（不抢
+        用户已手动设置的值）。
+      * ``token`` —— 非空则一律写 ``secret_store``（迁移之前没地方存）。
+      * ``enabled=True`` —— 一次性写 ``report.upload.enabled=True``；
+        False / 未设 → 不动框架开关。
+    """
+    legacy_rows = dict(
+        db.fetchall(
+            "SELECT key, value_json FROM lub_config WHERE key LIKE 'lub.summary_upload_%'"
+        )
+    )
+    if not legacy_rows:
+        return False
+
+    def _get(key: str, default: Any = None) -> Any:
+        raw = legacy_rows.get(key)
+        return json.loads(raw) if raw is not None else default
+
+    legacy_url = _get("lub.summary_upload_url")
+    legacy_timeout = _get("lub.summary_upload_timeout")
+    legacy_token = _get("lub.summary_upload_token")
+    legacy_enabled = bool(_get("lub.summary_upload_enabled", False))
+
+    if (
+        isinstance(legacy_url, str)
+        and legacy_url
+        and config.source_of("report.upload.url") == "default"
+    ):
+        config.set("report.upload.url", legacy_url)
+    if (
+        isinstance(legacy_timeout, (int, float))
+        and legacy_timeout > 0
+        and config.source_of("report.upload.timeout") == "default"
+    ):
+        config.set("report.upload.timeout", float(legacy_timeout))
+    if isinstance(legacy_token, str) and legacy_token:
+        config.set("report.upload.token", legacy_token)
+    if legacy_enabled:
+        config.set("report.upload.enabled", True)
+
+    db.execute("DELETE FROM lub_config WHERE key LIKE 'lub.summary_upload_%'")
+    return True
 
 
 def list_for_show(db: Database) -> list[tuple[str, Any, str]]:

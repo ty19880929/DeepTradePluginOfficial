@@ -19,13 +19,6 @@ def test_defaults_pass() -> None:
     validate_config(LubConfig())
 
 
-def test_summary_upload_default_disabled() -> None:
-    """v0.12.3+：summary_upload 默认关闭，token 默认空（匿名）。"""
-    cfg = LubConfig()
-    assert cfg.summary_upload_enabled is False
-    assert cfg.summary_upload_token == ""
-
-
 def test_min_float_mv_yi_must_be_non_negative() -> None:
     cfg = replace(LubConfig(), min_float_mv_yi=-1.0)
     with pytest.raises(ValueError, match="min_float_mv_yi"):
@@ -94,27 +87,3 @@ def test_lgb_max_models_to_keep_minimum() -> None:
         validate_config(cfg)
 
 
-def test_summary_upload_url_must_be_http_or_https() -> None:
-    # v0.12.3+：上传默认关闭，必须显式启用才会触发 URL 校验。
-    cfg = replace(
-        LubConfig(),
-        summary_upload_enabled=True,
-        summary_upload_url="ftp://example.com/upload",
-    )
-    with pytest.raises(ValueError, match="summary_upload_url"):
-        validate_config(cfg)
-
-
-def test_summary_upload_url_ignored_when_disabled() -> None:
-    """Disabling the feature bypasses URL validation (so an empty URL is OK)."""
-    cfg = replace(LubConfig(), summary_upload_enabled=False, summary_upload_url="")
-    validate_config(cfg)
-
-
-def test_summary_upload_timeout_must_be_positive() -> None:
-    cfg = replace(LubConfig(), summary_upload_timeout=0.0)
-    with pytest.raises(ValueError, match="summary_upload_timeout"):
-        validate_config(cfg)
-    cfg = replace(LubConfig(), summary_upload_timeout=-1.0)
-    with pytest.raises(ValueError, match="summary_upload_timeout"):
-        validate_config(cfg)
