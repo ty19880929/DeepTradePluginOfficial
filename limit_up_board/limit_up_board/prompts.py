@@ -69,7 +69,11 @@ def _screening_system_with(lgb_block: str) -> str:
 【硬性纪律】
 1. 严禁使用外部搜索、新闻网站、公告网站、实时行情、社交媒体、机构观点或任何未提供的数据。
 2. 严禁编造新闻、公告、盘口、传闻、龙虎榜席位（除非数据中明确提供）、资金分歧、ETF 申赎流向。
-3. 如果某字段缺失（出现在 data_unavailable 中），必须在该候选股的 missing_data 列出，禁止猜测或虚构。
+3. missing_data 字段语义【严格定义，禁止泛化】：
+   a) missing_data 必须是输入中 data_unavailable 列表的**子集**——只能从 data_unavailable 中的字符串原样挑选，**严禁**填入任何未出现在 data_unavailable 中的字段名（包括但不限于 ma5/ma10/ma20/ma_bull_aligned/up_count_30d/limit_amount_yi/mf_net_5d_sum_yi 等候选行内派生字段）。
+   b) 当 data_unavailable 为 [] 时，所有候选股的 missing_data **必须**为 []。
+   c) 候选行内某字段值为 null **不是**"数据缺失"，而是合法事实（如新股不足 30 日历史导致 up_count_30d=null、Tushare 未返回 limit_amount 导致 limit_amount_yi=null、未上龙虎榜导致 lhb_*=null 等）；这种情况**不写入 missing_data**，仅在 evidence 中避免引用该字段即可，rationale 也不要描述为"缺数据"。
+   d) 严禁猜测、虚构或编造数据。
 4. 本批次中的每一只候选股都必须出现在 candidates 数组中，且 candidate_id 与输入完全一致。
 5. 仅输出 JSON，不要 Markdown 代码块包裹，不要解释性前后缀。
 
@@ -191,7 +195,7 @@ rationale 不超过 80 字（输出截断会触发 JSON 失败）。
 - strength_level:  必须是 "high" / "medium" / "low" 三选一
 - evidence:        每只 1–4 条，每条 4 个字段不可省
 - risk_flags:      空数组或字符串数组，最多 5 条
-- missing_data:    数据缺失字段名数组（参见 data_unavailable）
+- missing_data:    必须是 data_unavailable 的**子集**（原样选取字符串）；data_unavailable 为 [] 时本字段必须为 []；候选行内 null 值不算缺失，不得写入
 - 本批每只候选股都必须出现在 candidates 中，candidate_id 与输入完全一致，不可漏不可加。
 """
 
@@ -249,7 +253,11 @@ _PREDICTION_SYSTEM_TEMPLATE = """\
 1. 严禁使用外部搜索或任何未提供的数据。
 2. 严禁编造盘口、龙虎榜席位（除非输入中明确提供）、消息面、传闻、ETF 申赎流向。
 3. 输入清单中的每一只标的都必须出现在 candidates 数组中，candidate_id 原样回传。
-4. 信息不足时，只能降低 confidence 并在 missing_data 列出缺失字段，禁止猜测。
+4. missing_data 字段语义【严格定义，禁止泛化】：
+   a) missing_data 必须是输入中 data_unavailable 列表的**子集**——只能从 data_unavailable 中的字符串原样挑选，**严禁**填入任何未出现在 data_unavailable 中的字段名（包括但不限于 ma5/ma10/ma20/ma_bull_aligned/up_count_30d/limit_amount_yi/mf_net_5d_sum_yi 等候选行内派生字段）。
+   b) 当 data_unavailable 为 [] 时，missing_data **必须**为 []。
+   c) 候选行内某字段值为 null **不是**"数据缺失"，而是合法事实（如新股不足 30 日历史、未上龙虎榜的 lhb_*、Tushare 未返回 limit_amount 等）；这种情况**不写入 missing_data**，仅在 key_evidence 中避免引用该字段即可。
+   d) 信息不足时通过下调 confidence、在 rationale 中说明来表达不确定性，**不要**用 missing_data 表达"我不确定"。严禁猜测。
 5. 仅输出 JSON。
 
 【判断重点】
