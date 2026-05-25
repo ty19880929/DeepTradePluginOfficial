@@ -192,13 +192,20 @@ def write_report(
     failed_batch_ids: list[str] | None = None,
     debate_results: list[ProviderDebateResult] | None = None,
     input_fingerprint: str | None = None,
-) -> Path:
-    """Write the report directory and return its path.
+) -> tuple[Path, str | None]:
+    """Write the report directory and return ``(path, json_error)``.
 
     In single-LLM mode the existing 6-file layout is preserved. In debate
     mode, ``selected`` / ``predictions`` / ``final_ranking`` are typically
     empty and the per-provider results are persisted under
     ``debate/<provider>/`` plus a 《多 LLM 辩论结果》 section in summary.md.
+
+    ``json_error`` is ``None`` when ``summary.json`` was written successfully
+    (single-LLM mode) **or** intentionally skipped (debate mode — JSON schema
+    extension still pending; see ``# 1b.`` block below). When it is a non-empty
+    string, ``summary.json`` failed to materialise — caller is responsible for
+    surfacing this to the user as a WARN-level event so the silent-skip path
+    documented in v0.16.1 stops biting.
     """
     root = (reports_root or paths.reports_dir()) / str(run_id)
     root.mkdir(parents=True, exist_ok=True)
@@ -225,8 +232,11 @@ def write_report(
     (root / "summary.md").write_text(md, encoding="utf-8")
 
     # 1b. summary.json — v0.12+ 网站使用的结构化报告。单 LLM 模式才出（辩论模式 schema
-    # 扩展见 PR-X，本期沿用 md-only）。失败仅 warn，不阻断 markdown / 其它 JSON 落盘
-    # ——按 CLAUDE.md "UI failure ≠ run failure" 风格降级。
+    # 扩展见 PR-X，本期沿用 md-only）。失败不阻断 markdown / 其它 JSON 落盘，但
+    # v0.16.1 起把错误回传给 runner（``json_error``）以 WARN 事件暴露给用户——
+    # 之前只 logger.warning 静默，summary.json 缺失会导致上传链路一并静默跳过，
+    # 终端看不到任何信号。
+    json_error: str | None = None
     if not debate_results:
         try:
             report_obj = build_strategy_report(
@@ -243,7 +253,10 @@ def write_report(
                 encoding="utf-8",
             )
         except Exception as json_exc:  # noqa: BLE001 — never block markdown / other JSON
-            logger.warning("build_strategy_report failed for run %s: %s", run_id, json_exc)
+            json_error = f"{type(json_exc).__name__}: {json_exc}"
+            logger.warning(
+                "build_strategy_report failed for run %s: %s", run_id, json_exc
+            )
 
     # 2. round1_strong_targets.json
     (root / "round1_strong_targets.json").write_text(
@@ -363,7 +376,7 @@ def write_report(
         for name, content in extra_files.items():
             (root / name).write_text(content, encoding="utf-8")
 
-    return root
+    return root, json_error
 
 
 # ---------------------------------------------------------------------------

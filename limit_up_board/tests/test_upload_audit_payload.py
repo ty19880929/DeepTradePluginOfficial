@@ -153,15 +153,32 @@ def test_skipped_disabled_emits_no_event(tmp_path: Path) -> None:
     assert payloads == []
 
 
-def test_skipped_missing_file_emits_no_event(tmp_path: Path) -> None:
-    """框架返回 ``status="skipped_missing_file"`` 时也静默返回。"""
-    result = _StubResult(status="skipped_missing_file")
+def test_missing_local_summary_short_circuits(tmp_path: Path) -> None:
+    """v0.16.1 (Fix B) — ``summary.json`` 不在磁盘上时直接 short-circuit，emit 一条
+    ``status="skipped_no_local_file"`` 的 INFO，并且**不**调用框架 uploader。
+
+    单 LLM 路径下若 ``build_strategy_report`` 失败（v0.16.1 Fix A 会先 emit
+    WARN），summary.json 缺失会进入本分支；辩论模式当前不写 summary.json，
+    也会落到本分支。两种情况都靠这条事件给用户可见信号，取代过去把"缺失"
+    扔给框架 uploader 走一遍 HTTP 准备栈的静默路径。
+    """
+    result = _StubResult(status="ok")  # would-be result if upload were called
     ctx = _ctx_with_uploader(result)
     runner, payloads = _make_runner_with_mock_rt(ctx=ctx)
 
+    # 注意：故意不调 _write_summary —— summary.json 不存在
     list(runner._maybe_upload_summary(tmp_path, "20260522"))
 
-    assert payloads == []
+    # 框架 uploader 根本没被构造 / 调用
+    ctx.make_report_uploader.assert_not_called()
+
+    # 插件 emit 一条 INFO，说明跳过原因
+    assert len(payloads) == 1
+    payload = payloads[0]
+    assert payload["status"] == "skipped_no_local_file"
+    assert payload["trade_date"] == "20260522"
+    assert payload["enabled"] is True
+    assert payload["json_path"].endswith("summary.json")
 
 
 def test_no_ctx_short_circuits(tmp_path: Path) -> None:

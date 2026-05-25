@@ -834,7 +834,7 @@ class LubRunner:
         if final_ranking_attempted and final_obj is None:
             failed_batches.append("全局重排")
 
-        report_path = write_report(
+        report_path, json_error = write_report(
             rt.run_id,
             status=terminal_status,
             bundle=bundle,
@@ -857,6 +857,8 @@ class LubRunner:
                 "final_ranking_used": final_obj is not None,
             },
         )
+        if json_error is not None:
+            yield from self._emit_json_build_failed(report_path, json_error)
 
         # PR #1 — 单 LLM 模式 T 日预测留痕（胜率分析样本来源）。
         # 失败只 warning：胜率分析是辅助产物，不能影响 run 状态或后续上传。
@@ -1130,7 +1132,10 @@ class LubRunner:
                 terminal_status = RunStatus.PARTIAL_FAILED
 
             # Write report (debate-aware)
-            report_path = write_report(
+            # ``json_error`` 在辩论模式下恒为 None（render.write_report 不为辩论
+            # 模式生成 summary.json），无需 emit 失败事件。即使如此还是把变量解
+            # 出来，未来 PR-X 给辩论 schema 时直接复用同一通路。
+            report_path, json_error = write_report(
                 run_id,
                 status=terminal_status,
                 bundle=bundle,
@@ -1153,6 +1158,16 @@ class LubRunner:
                     },
                 )
             )
+            if json_error is not None:
+                for ev in self._emit_json_build_failed(report_path, json_error):
+                    emit(ev)
+            # v0.16.1 — 辩论模式之前不调上传链路（C 修复）。即使当前 debate 模式
+            # 没有 summary.json 落盘，也走 _maybe_upload_summary：Fix B 的 is_file
+            # 兜底会优雅跳过并 emit 一条 INFO，把"为何不上传"显式告诉用户，而不
+            # 是过去那种神秘静默。一旦 debate-mode JSON schema (PR-X) 合并就立刻
+            # 自动启用上传，无需再改 runner。
+            for ev in self._maybe_upload_summary(report_path, bundle.trade_date):
+                emit(ev)
 
         except KeyboardInterrupt:
             terminal_status = RunStatus.CANCELLED
@@ -1357,7 +1372,7 @@ class LubRunner:
     ) -> Iterable[StrategyEvent]:
         rt = self._rt
         lub_cfg = load_config(rt.db)
-        report_path = write_report(
+        report_path, json_error = write_report(
             rt.run_id,
             status=RunStatus.SUCCESS,
             bundle=bundle,
@@ -1377,7 +1392,31 @@ class LubRunner:
                 "reason": reason,
             },
         )
+        if json_error is not None:
+            yield from self._emit_json_build_failed(report_path, json_error)
         yield from self._maybe_upload_summary(report_path, bundle.trade_date)
+
+    def _emit_json_build_failed(
+        self, report_path: Path, json_error: str
+    ) -> Iterable[StrategyEvent]:
+        """v0.16.1 (Fix A) — emit a single WARN event when ``build_strategy_report``
+        raised inside :func:`render.write_report`. Before this, the failure
+        only landed in ``logger.warning`` (per-run log file) and the missing
+        ``summary.json`` then cascaded into a silent upload skip — terminal
+        looked normal end-to-end. The event payload carries the exception
+        ``repr`` so users can paste it back without trawling log files.
+        """
+        rt = self._rt
+        yield rt.emit(
+            EventType.LOG,
+            f"⚠ summary.json 生成失败：{json_error}",
+            level=EventLevel.WARN,
+            payload={
+                "report_dir": str(report_path),
+                "json_error": json_error,
+                "stage": "build_strategy_report",
+            },
+        )
 
     def _maybe_upload_summary(
         self, report_path: Path, trade_date: str
@@ -1387,12 +1426,35 @@ class LubRunner:
         上传开关 / URL / 超时 / token 全部从框架 ``report.upload.*`` 读取；
         插件只负责传文件路径 + ``plugin_name`` + ``trade_date``。
         框架返回 ``status="skipped_*"`` 时静默返回（保留旧行为：用户未开启就不打扰）。
+
+        v0.16.1 (Fix B) — 入口加 ``json_path.is_file()`` 兜底：文件不存在时直接
+        emit INFO 级 skip 事件并 return，不再让框架 uploader 拿着不存在的路径
+        走一遍 HTTP 准备栈。两种情况会命中：
+        （a）单 LLM 模式 ``build_strategy_report`` 抛异常（v0.16.1 Fix A 已经
+            emit 过一条 WARN，这里再补一条 INFO 描述"上传跳过的具体原因"，
+            两条事件分工清晰：WARN 说 JSON 没写出来、INFO 说所以上传跳了）；
+        （b）辩论模式（debate-mode summary.json 暂未实现，render.write_report
+            主动跳过；现在 _execute_debate 也走 _maybe_upload_summary，本兜底
+            给出可见信号而不是过去的静默）。
         """
         if self._ctx is None:
             # 没有 PluginContext（旧测试 / 未注入）时按"上传未启用"对待。
             return
         json_path = report_path / "summary.json"
         rt = self._rt
+        if not json_path.is_file():
+            yield rt.emit(
+                EventType.LOG,
+                f"summary.json 未生成，跳过上传：{json_path}",
+                level=EventLevel.INFO,
+                payload={
+                    "enabled": True,
+                    "status": "skipped_no_local_file",
+                    "json_path": str(json_path),
+                    "trade_date": trade_date,
+                },
+            )
+            return
         uploader: ReportUploader = self._ctx.make_report_uploader(run_id=rt.run_id)
         result = uploader.upload(
             json_path,

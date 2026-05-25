@@ -29,6 +29,7 @@ from limit_up_board.report.schema import StrategyReportSchema
 from limit_up_board.schemas import (
     ContinuationCandidate,
     EvidenceItem,
+    EvidenceItemStrict,
     FinalRankItem,
     FinalRankingResponse,
     StrongCandidate,
@@ -531,3 +532,78 @@ def test_schema_forbids_unknown_fields_inside_prediction_card() -> None:
     data["step4_prediction"]["top_candidate"][0]["mystery"] = "no"
     with pytest.raises(ValidationError):
         StrategyReportSchema.model_validate(data)
+
+
+# ---------------------------------------------------------------------------
+# v0.16.1 回归：runner 真实喂给 builder 的 evidence 是 EvidenceItemStrict
+# 实例（LLM strict 反序列化产物）。EvidenceItem 是 EvidenceItemStrict 的子类，
+# IS-A 关系只在「子→父」方向 OK；report.schema 之前误把字段标成 list[EvidenceItem]
+# （父类槽位），pydantic v2 拒绝接收 EvidenceItemStrict 实例，导致 summary.json
+# 静默不落盘。这两个 case 直接用 strict 实例构造 fixture，覆盖生产路径。
+# ---------------------------------------------------------------------------
+
+
+def test_screening_accepts_evidence_item_strict() -> None:
+    selected = [
+        StrongCandidate(
+            candidate_id="600519.SH",
+            ts_code="600519.SH",
+            name="茅台",
+            selected=True,
+            score=80.0,
+            strength_level="high",
+            rationale="封板早、量价配合好。",
+            evidence=[
+                EvidenceItemStrict(
+                    field="fd_amount_yi",
+                    value=1.2,
+                    unit="亿",
+                    interpretation="封单 1.2 亿，强势封板",
+                )
+            ],
+            risk_flags=[],
+            missing_data=[],
+        )
+    ]
+    rpt = build_strategy_report(
+        status=RunStatus.SUCCESS,
+        bundle=_make_bundle(),
+        selected=selected,
+        predictions=[],
+        final_ranking=None,
+    )
+    assert rpt.step2_screening[0].evidence[0].field == "fd_amount_yi"
+
+
+def test_prediction_accepts_evidence_item_strict() -> None:
+    predictions = [
+        ContinuationCandidate(
+            candidate_id="600519.SH",
+            ts_code="600519.SH",
+            name="茅台",
+            rank=1,
+            continuation_score=78.0,
+            confidence="high",
+            prediction="top_candidate",
+            rationale="情绪强。",
+            key_evidence=[
+                EvidenceItemStrict(
+                    field="lgb_score",
+                    value=73.0,
+                    unit="none",
+                    interpretation="模型分 73",
+                )
+            ],
+            next_day_watch_points=["盘口"],
+            failure_triggers=["跌停"],
+            missing_data=[],
+        )
+    ]
+    rpt = build_strategy_report(
+        status=RunStatus.SUCCESS,
+        bundle=_make_bundle(),
+        selected=[],
+        predictions=predictions,
+        final_ranking=None,
+    )
+    assert rpt.step4_prediction.top_candidate[0].keyEvidence[0].field == "lgb_score"

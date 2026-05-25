@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..schemas import EvidenceItem
+from ..schemas import EvidenceItemStrict
 
 # ---------------------------------------------------------------------------
 # meta / counts / dataSource
@@ -113,7 +113,7 @@ class ScreeningItem(BaseModel):
     theme: str
     rationale: str
     tags: list[str] = Field(default_factory=list)
-    evidence: list[EvidenceItem]
+    evidence: list[EvidenceItemStrict]
     missingData: list[str] = Field(default_factory=list)
 
 
@@ -138,7 +138,7 @@ class PredictionCard(BaseModel):
     rationale: str
     observationPoints: list[str]
     failureConditions: list[str]
-    keyEvidence: list[EvidenceItem]
+    keyEvidence: list[EvidenceItemStrict]
     missingData: list[str] = Field(default_factory=list)
     # 多批模式专用，单批为 None
     batchLocalRank: int | None

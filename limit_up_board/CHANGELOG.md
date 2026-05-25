@@ -4,6 +4,55 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.16.1 — 2026-05-25 — summary.json 静默失败链路修复
+
+修复用户反馈"run 跑完终端正常但报告没上传到官网"的连锁缺陷。根因是
+`ScreeningItem.evidence` / `PredictionCard.keyEvidence` schema 类型方向错配，
+导致 `build_strategy_report` 静默抛 `ValidationError`，summary.json 不落盘，
+上传链路又把"文件缺失"压成静默 skip——三层降级叠加后用户看不到任何信号。
+
+### Fixed
+
+- **`report/schema.py` 把 evidence 字段从 `EvidenceItem` 改成 `EvidenceItemStrict`**
+  （根因）：``EvidenceItem(EvidenceItemStrict)`` 继承方向是「子类有更宽 value
+  类型」，pydantic v2 拒绝把父类实例传给子类槽位；runner 产出的全是 strict
+  对象，schema 槽位也得跟着 strict。symptoms 一旦出现，单 LLM 模式跑完
+  summary.json 全部丢失。
+- **`render.write_report` 把 `build_strategy_report` 失败回传给 runner**
+  (Fix A)：返回值从 `Path` 改成 `tuple[Path, str | None]`，第二项是异常字符
+  化结果；之前只 `logger.warning` 进每运行一份的本地日志，仪表盘 / 终端完全
+  看不到。runner 新增 `_emit_json_build_failed` 把异常 emit 成 WARN 级
+  `EventType.LOG`，前端 / 复盘脚本无需再翻 `~/.deeptrade/limit_up_board/logs/run-*.log`。
+- **`_maybe_upload_summary` 增加 `json_path.is_file()` 兜底** (Fix B)：文件不存在
+  时 emit 一条 `status="skipped_no_local_file"` 的 INFO 事件并 return，不再让
+  框架 uploader 拿着不存在的路径走完整 HTTP 准备栈。两种触发条件：（a）
+  Fix A 路径下 summary.json 没写出来（WARN 由 Fix A 先报，INFO 由 Fix B
+  说明"所以跳过"）；（b）辩论模式（write_report 当前不为辩论模式生成
+  summary.json，待 PR-X）。
+- **`_execute_debate` 现在也调 `_maybe_upload_summary`** (Fix C)：补齐与
+  `_execute_single` 的对称。当前辩论模式仍无 JSON 故会走 Fix B 的 skip
+  分支并 emit INFO；未来辩论 schema 落地后自动启用上传，无需再改 runner。
+
+### Tests
+
+- `test_report_builder.py` 新增 `test_screening_accepts_evidence_item_strict` /
+  `test_prediction_accepts_evidence_item_strict`，**直接用 `EvidenceItemStrict`
+  构造 fixture**，正向覆盖 runner 真实喂给 builder 的数据形态——原有 fixtures
+  全用 `EvidenceItem`（子类对象传父类槽位 OK，但反向才是生产路径），所以根因
+  bug 长期没被测试发现。
+- `test_upload_audit_payload.py::test_skipped_missing_file_emits_no_event` 改写
+  为 `test_missing_local_summary_short_circuits`，断言新契约：文件缺失时插件
+  emit 一条 `skipped_no_local_file` INFO 且**不**调框架 uploader。
+
+### Notes
+
+- 用户报告的具体异常：``3 validation errors for ScreeningItem.evidence.* — Input
+  should be a valid dictionary or instance of EvidenceItem，input_type=EvidenceItemStrict``。
+- 没改 `EvidenceItem` 类定义（保留给 `lub_stage_results` 历史 row 反序列化用，
+  winrate replay 那条路径依旧依赖宽松 `value` 类型）。
+- ``_maybe_upload_summary`` 的事件 payload 字段名沿用 v0.12.3+ 老约定，前端
+  / 日志聚合无需变更。
+
 ## v0.15.1 — 2026-05-24 — LLM Replay 默认开启
 
 将 ``LubConfig.llm_replay_enabled`` 默认值从 ``False`` 改为 ``True``。
