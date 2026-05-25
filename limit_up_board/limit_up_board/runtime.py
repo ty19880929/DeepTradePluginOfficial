@@ -28,6 +28,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from deeptrade.core.db import Database
     from deeptrade.core.llm_manager import LLMManager
     from deeptrade.core.tushare_client import TushareClient
+    from deeptrade.plugins_api import ConceptRepository
 
     from .lgb.scorer import LgbScorer
 
@@ -56,6 +57,12 @@ class LubRuntime:
     run_id: str | None = None
     tushare: TushareClient | None = None
     lgb_scorer: LgbScorer | None = None
+    # v0.16.0 — 框架级同花顺概念/行业/地域只读快照（来自
+    # ths_concept_board / ths_concept_member；由 `deeptrade data sync-concepts`
+    # 全量同步）。collect_round1 用它给每个候选 candidate 填
+    # industries / concepts / regions 三个列表，供 LLM 综合判断板块归属。
+    # 未注入时（旧测试 / 未升级路径）走 `industry_basic` 单字段降级。
+    concept_repo: ConceptRepository | None = None
     # P1-I/K: deterministic 64-char sha256 of this run's business inputs
     # (Round1Bundle + LubConfig + LGB model + schema/prompt versions). Set
     # by :class:`LubRunner` at the end of Step 1; surfaced in summary.md and

@@ -133,10 +133,15 @@ NA_FILLERS: dict[str, float] = {
 }
 
 # 板块强度来源 → 权威性排名（越小越权威）。
+# v0.16.0 — 资源源缩窄为 limit_cpt_list / unavailable；保留 lu_desc_aggregation /
+# industry_fallback 两个 legacy 键以保证历史训练数据落特征时数值不漂移
+# （旧的 dataset.parquet 快照里仍可能出现这两个标签）。"unavailable" 对齐
+# legacy 末档 = 3，避免对线上模型产生负向 drift。
 _SECTOR_SOURCE_RANK: dict[str, int] = {
     "limit_cpt_list": 1,
     "lu_desc_aggregation": 2,
     "industry_fallback": 3,
+    "unavailable": 3,
 }
 
 

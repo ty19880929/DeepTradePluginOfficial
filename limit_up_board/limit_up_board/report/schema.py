@@ -24,7 +24,7 @@ from ..schemas import EvidenceItem
 
 ReportStatus = Literal["success", "partial_failed", "failed", "cancelled"]
 ThemeStrengthSource = Literal[
-    "limit_cpt_list", "lu_desc_aggregation", "industry_fallback"
+    "limit_cpt_list", "unavailable"
 ]
 
 

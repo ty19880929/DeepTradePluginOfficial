@@ -104,7 +104,20 @@ def _open_runtime() -> tuple[Database, LubRuntime, PluginContext]:
     cfg = ConfigService(db)
     ctx = PluginContext(db=db, config=cfg, plugin_id="limit-up-board")
     migrate_legacy_upload_config(db, cfg)
-    rt = LubRuntime(db=db, config=cfg, llms=LLMManager(db, cfg))
+    # v0.16.0 — make_concept_repository() requires framework ≥ 0.14.0
+    # (manifest declares min_framework_version: 0.14.0). On older frameworks
+    # we degrade to ``concept_repo=None`` so subcommands that don't use board
+    # data (winrate / settings / lgb info / ...) keep working.
+    concept_repo = None
+    make_repo = getattr(ctx, "make_concept_repository", None)
+    if make_repo is not None:
+        concept_repo = make_repo()
+    rt = LubRuntime(
+        db=db,
+        config=cfg,
+        llms=LLMManager(db, cfg),
+        concept_repo=concept_repo,
+    )
     return db, rt, ctx
 
 

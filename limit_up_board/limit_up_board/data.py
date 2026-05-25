@@ -32,6 +32,8 @@ from deeptrade.core.tushare_client import (
 from .calendar import TradeCalendar
 
 if TYPE_CHECKING:  # pragma: no cover
+    from deeptrade.plugins_api import ConceptRepository
+
     from .lgb.scorer import LgbScorer
 
 logger = logging.getLogger(__name__)
@@ -279,7 +281,7 @@ def _apply_market_filter(
 # ---------------------------------------------------------------------------
 
 
-SectorStrengthSource = Literal["limit_cpt_list", "lu_desc_aggregation", "industry_fallback"]
+SectorStrengthSource = Literal["limit_cpt_list", "unavailable"]
 
 
 @dataclass
@@ -287,7 +289,13 @@ class SectorStrength:
     """Sector heat / leadership data fed into the prompt.
 
     `source` is exposed verbatim to the LLM via ``sector_strength_source`` so
-    the model can downweight confidence when it sees a fallback label.
+    the model can downweight confidence when it sees an ``unavailable`` label.
+
+    v0.16.0 — 简化为只接受 ``limit_cpt_list``（官方概念涨停统计）；插件本地
+    基于 ``lu_desc`` 或 ``stock_basic.industry`` 的兜底聚合已移除（其权威性
+    远不及 Tushare 官方排名，且 LLM 拿到也很难真正用上）。题材归属信息已经
+    由 ``ConceptRepository`` 在 candidate 行级别（concepts / industries / regions）
+    全量暴露，板块强度只保留全局热度这一维度。
     """
 
     source: SectorStrengthSource
@@ -296,56 +304,20 @@ class SectorStrength:
 
 def resolve_sector_strength(
     *,
-    candidates: pd.DataFrame,
     limit_cpt_list: pd.DataFrame | None,
-    limit_list_ths: pd.DataFrame | None,
 ) -> SectorStrength:
-    """Pick the best available sector data and aggregate by candidate's sector tag.
+    """Return SectorStrength from Tushare ``limit_cpt_list``.
 
-    Priority: limit_cpt_list > limit_list_ths.lu_desc aggregation >
-    stock_basic.industry aggregation.
+    v0.16.0 起仅保留 Tushare 官方源；``limit_cpt_list`` 缺失时返回
+    ``source="unavailable"`` 让 LLM 知道这次没有全市场板块热度排名可参考。
     """
-    # Tier 1: official concept rankings
     if limit_cpt_list is not None and not limit_cpt_list.empty:
-        # Top-ranked sectors (rank ascending, take first ~10)
         top = limit_cpt_list.sort_values("rank").head(10)
         return SectorStrength(
             source="limit_cpt_list",
-            data={
-                "top_sectors": top.to_dict(orient="records"),
-                "candidates_with_sector_tag": [],  # joined externally if needed
-            },
+            data={"top_sectors": top.to_dict(orient="records")},
         )
-
-    # Tier 2: aggregate THS涨停原因
-    if limit_list_ths is not None and not limit_list_ths.empty:
-        agg = (
-            limit_list_ths.groupby("lu_desc", dropna=True)
-            .agg(up_nums=("ts_code", "count"))
-            .reset_index()
-            .sort_values("up_nums", ascending=False)
-            .head(10)
-        )
-        return SectorStrength(
-            source="lu_desc_aggregation",
-            data={"top_sectors": agg.to_dict(orient="records")},
-        )
-
-    # Tier 3: aggregate by stock_basic.industry  (last resort)
-    if candidates is not None and not candidates.empty and "industry" in candidates.columns:
-        agg = (
-            candidates.groupby("industry", dropna=True)
-            .agg(up_nums=("ts_code", "count"))
-            .reset_index()
-            .sort_values("up_nums", ascending=False)
-            .head(10)
-        )
-        return SectorStrength(
-            source="industry_fallback",
-            data={"top_sectors": agg.to_dict(orient="records")},
-        )
-
-    return SectorStrength(source="industry_fallback", data={"top_sectors": []})
+    return SectorStrength(source="unavailable", data={"top_sectors": []})
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +455,7 @@ class Round1Bundle:
     candidates: list[dict[str, Any]] = field(default_factory=list)
     market_summary: dict[str, Any] = field(default_factory=dict)
     sector_strength: SectorStrength = field(
-        default_factory=lambda: SectorStrength(source="industry_fallback", data={"top_sectors": []})
+        default_factory=lambda: SectorStrength(source="unavailable", data={"top_sectors": []})
     )
     data_unavailable: list[str] = field(default_factory=list)
     lgb_model_id: str | None = None
@@ -503,6 +475,7 @@ def collect_round1(
     min_float_mv_yi: float = 0.0,
     force_sync: bool = False,
     lgb_scorer: LgbScorer | None = None,
+    concept_repo: ConceptRepository | None = None,
 ) -> Round1Bundle:
     """Assemble the 强势初筛 input bundle.
 
@@ -635,11 +608,7 @@ def collect_round1(
     if cpt_err:
         data_unavailable.append(f"limit_cpt_list ({cpt_err})")
 
-    sector = resolve_sector_strength(
-        candidates=candidates_df,
-        limit_cpt_list=cpt_df,
-        limit_list_ths=ths_df,
-    )
+    sector = resolve_sector_strength(limit_cpt_list=cpt_df)
     bundle.sector_strength = sector
 
     # 6. limit_step (required) — for global ladder distribution
@@ -709,6 +678,7 @@ def collect_round1(
         moneyflow_lookback=moneyflow_lookback,
         # P1-3 — propagate "整体空" 信号到每个 candidate 的 lhb_data_quality 三态
         lhb_api_empty=top_list_empty and top_inst_empty,
+        concept_repo=concept_repo,
     )
     bundle.data_unavailable = data_unavailable
 
@@ -1322,6 +1292,7 @@ def _build_candidate_rows(
     moneyflow_lookback: int = 5,  # noqa: ARG001 — v0.8.0 P1-3 同上
     lhb_api_empty: bool = False,
     lhb_api_unavailable: bool = False,
+    concept_repo: ConceptRepository | None = None,
 ) -> list[dict[str, Any]]:
     """Project candidates to a list of dicts with raw + normalized fields + summary derivations.
 
@@ -1360,11 +1331,28 @@ def _build_candidate_rows(
         ts_code = str(row.ts_code)
         fd_amount_raw = getattr(row, "fd_amount", None)
         amount_raw = getattr(row, "amount", None)
+        # v0.16.0 — 概念 / 行业 / 地域板块（同花顺，全量暴露，不截断）。
+        # ConceptRepository 在快照为空时返回 []，等价于「未注入」分支。
+        concepts: list[dict[str, str]] = []
+        industries_full: list[dict[str, str]] = []
+        regions: list[dict[str, str]] = []
+        if concept_repo is not None:
+            for b in concept_repo.boards_by_stock(ts_code):
+                entry = {"ts_code": b.ts_code, "name": b.name}
+                if b.type == "N":
+                    concepts.append(entry)
+                elif b.type == "I":
+                    industries_full.append(entry)
+                elif b.type == "R":
+                    regions.append(entry)
         rec = {
             "candidate_id": ts_code,
             "ts_code": ts_code,
             "name": getattr(row, "name", None),
             "industry": getattr(row, "industry_basic", None) or getattr(row, "industry", None),
+            "industries": industries_full,
+            "concepts": concepts,
+            "regions": regions,
             "first_time": getattr(row, "first_time", None),
             "last_time": getattr(row, "last_time", None),
             "open_times": _opt_int(getattr(row, "open_times", None)),

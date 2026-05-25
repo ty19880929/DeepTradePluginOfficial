@@ -67,7 +67,7 @@ def test_hash_text_basic() -> None:
 
 @dataclass
 class _StubSectorStrength:
-    source: str = "industry_fallback"
+    source: str = "unavailable"
     data: dict = field(default_factory=lambda: {"top_sectors": []})
 
 

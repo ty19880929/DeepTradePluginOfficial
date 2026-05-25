@@ -231,9 +231,7 @@ def collect_day_samples(
     )
 
     sector = resolve_sector_strength(
-        candidates=candidates_df,
         limit_cpt_list=cpt_df if cpt_df is not None else None,
-        limit_list_ths=ths_df if ths_df is not None else None,
     )
 
     # 4. market summary（包含 yesterday context，仅当 prev_trade_date 给出时填）

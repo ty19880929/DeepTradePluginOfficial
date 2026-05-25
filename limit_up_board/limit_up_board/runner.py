@@ -645,6 +645,7 @@ class LubRunner:
             max_close_yuan=lub_cfg.max_close_yuan,
             min_float_mv_yi=lub_cfg.min_float_mv_yi,
             force_sync=params.force_sync,
+            concept_repo=rt.concept_repo,
         )
         yield from self._drain_pending()
         yield rt.emit(
@@ -699,6 +700,7 @@ class LubRunner:
                 min_float_mv_yi=lub_cfg.min_float_mv_yi,
                 force_sync=params.force_sync,
                 lgb_scorer=rt.lgb_scorer,
+                concept_repo=rt.concept_repo,
             )
         except TushareUnauthorizedError as e:
             yield rt.emit(
@@ -1275,6 +1277,7 @@ class LubRunner:
                 min_float_mv_yi=lub_cfg.min_float_mv_yi,
                 force_sync=params.force_sync,
                 lgb_scorer=rt.lgb_scorer,
+                concept_repo=rt.concept_repo,
             )
         except TushareUnauthorizedError as e:
             emit(

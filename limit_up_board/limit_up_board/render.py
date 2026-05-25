@@ -109,7 +109,7 @@ def render_summary_md(
     # Sector strength source label is meaningful — surface it.
     out.append(
         f"\n*sector_strength_source*: `{bundle.sector_strength.source}`  "
-        f"_(可信度：limit_cpt_list > lu_desc_aggregation > industry_fallback)_\n"
+        f"_(来源：limit_cpt_list / unavailable；v0.16.0 起插件本地兜底聚合已移除)_\n"
     )
 
     if bundle.data_unavailable:
@@ -411,7 +411,7 @@ def render_debate_summary_md(
     out.append(_render_run_fingerprint_section(input_fingerprint))
     out.append(
         f"\n*sector_strength_source*: `{bundle.sector_strength.source}`  "
-        f"_(可信度：limit_cpt_list > lu_desc_aggregation > industry_fallback)_\n"
+        f"_(来源：limit_cpt_list / unavailable；v0.16.0 起插件本地兜底聚合已移除)_\n"
     )
     if bundle.data_unavailable:
         out.append(f"\n*data_unavailable*: `{bundle.data_unavailable}`\n")

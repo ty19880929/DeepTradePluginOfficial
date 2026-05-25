@@ -34,8 +34,9 @@ _SCREENING_LGB_FLOOR_BLOCK = (
     "\n  · lgb_score < {floor} 的标的倾向 selected=false；仅当输入字段满足以下任一条件时"
     "才可 selected=true，且 rationale 必须明确写出引用的字段名与数值：\n"
     "    (a) lhb_famous_seats_count > 0 且 lhb_net_buy_yi > 0（一线游资明确净买入）；\n"
-    "    (b) lu_desc / tag 含明显主线题材关键词，且 sector_strength_source ∈ "
-    "{{limit_cpt_list, lu_desc_aggregation}}（题材可信度足够）。"
+    "    (b) lu_desc / tag 含明显主线题材关键词，或候选 concepts 数组中至少一个名称"
+    "出现在 sector_strength_data.top_sectors（题材可信度足够，且 sector_strength_source = "
+    "limit_cpt_list 时尤其可靠）。"
 )
 
 _SCREENING_LGB_TAIL = (
@@ -77,7 +78,13 @@ def _screening_system_with(lgb_block: str) -> str:
 
 【分析维度】
 - 封板强度：first_time / last_time / open_times / fd_amount_yi / limit_amount_yi / fd_amount_ratio（封单/成交额，>10% 为强势封板）
-- 板块强度：参考下方【板块强度摘要】(注意 sector_strength_source；可信度 limit_cpt_list > lu_desc_aggregation > industry_fallback)
+- 板块强度：参考下方【板块强度摘要】(注意 sector_strength_source；
+  ∈ {{limit_cpt_list, unavailable}}；v0.16 起插件本地兜底聚合已移除，
+  unavailable 即代表当日 Tushare 概念板块涨停统计缺失，需结合其他维度判断)
+- 个股板块归属（v0.16 新增）：每个候选行带 industries / concepts / regions 三个数组，
+  分别是同花顺行业 / 概念 / 地域板块，元素形如 {{ts_code, name}}。一只股票常常同时挂多个
+  概念，全部如实列出；判断"是否处于主线板块"时应该把 concepts 与
+  sector_strength_data.top_sectors 做名称交集，而不是仅看单一 industry 字段。
 - 题材内相对地位（v0.8 新增）：sec_intra_rank_by_limit_times（同题材内连板数排名，1=最高）、
   sec_first_to_limit_flag（是否同题材最早封板，1=是）、sec_is_height_board（是否同题材高度板，1=是）、
   sec_fd_amount_rank_pct（同题材封单强度分位，越大越强）。
@@ -246,7 +253,11 @@ _PREDICTION_SYSTEM_TEMPLATE = """\
 5. 仅输出 JSON。
 
 【判断重点】
-- 是否处于主线强势板块（参考输入【板块强度摘要】section；sector_strength_source 越靠 limit_cpt_list 越权威）。
+- 是否处于主线强势板块：sector_strength_source ∈ {limit_cpt_list, unavailable}
+  （v0.16 起仅保留 Tushare 官方源；unavailable 时此维度无信号，须依赖个股板块归属判断）。
+  把候选行 concepts 数组（同花顺概念，v0.16 新增）的 name 与
+  sector_strength_data.top_sectors 求交集；命中即可判定"处于主线"。
+  industries / regions（v0.16 新增）作为辅助上下文，单独命中权重低于 concepts。
 - 是否为板块龙头或具备空间板地位（参考 limit_step 全市场最高连板数）；候选行的
   sec_intra_rank_by_limit_times=1 / sec_is_height_board=1 / sec_first_to_limit_flag=1
   都是同题材龙头/高度板的硬证据。
