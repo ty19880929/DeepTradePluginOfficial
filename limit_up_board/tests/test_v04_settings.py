@@ -46,7 +46,7 @@ class TestApplyMarketFilter:
             df, max_float_mv_yi=100.0, max_close_yuan=15.0
         )
         assert list(out["ts_code"]) == ["A", "B", "C", "D"]
-        # 子集断言：只看核心字段，避免 P2-1 新增 `dropped_top3` 字段影响其它用例
+        # 子集断言：只看核心字段，避免 P2-1 新增 `dropped` 字段影响其它用例
         assert summary["before"] == 5
         assert summary["after"] == 4
         assert summary["min_float_mv_yi"] == 0.0
@@ -112,13 +112,13 @@ class TestApplyMarketFilter:
             df, max_float_mv_yi=100.0, max_close_yuan=15.0
         )
         assert out.empty
-        # P2-1 后 summary 多了一个空 `dropped_top3` 字段；用 subset 校验更稳健。
+        # P2-1 后 summary 多了一个空 `dropped` 字段；用 subset 校验更稳健。
         assert summary["before"] == 0
         assert summary["after"] == 0
         assert summary["min_float_mv_yi"] == 0.0
         assert summary["max_float_mv_yi"] == 100.0
         assert summary["max_close_yuan"] == 15.0
-        assert summary["dropped_top3"] == []
+        assert summary["dropped"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -213,8 +213,8 @@ def _apply_market_filter(
     标的也会通过。Null 仍然被剔除（保守，无法验证"小市值/低价"声明）。
 
     Returns ``(filtered_df, summary)``。除常规 before/after，还在
-    ``summary["dropped_top3"]`` 写入"被剔除的 TOP 3 ts_code + 剔除原因"，
-    便于 render 报告时直接展示。
+    ``summary["dropped"]`` 写入「**全部**被剔除标的的 ts_code + 剔除原因」
+    （按流通市值降序），便于 render 报告 / summary.json 完整展示，而非只看前几只。
     """
     n_before = int(len(candidates_df))
     summary: dict[str, Any] = {
@@ -223,7 +223,7 @@ def _apply_market_filter(
         "min_float_mv_yi": min_float_mv_yi,
         "max_float_mv_yi": max_float_mv_yi,
         "max_close_yuan": max_close_yuan,
-        "dropped_top3": [],
+        "dropped": [],
     }
     if n_before == 0:
         return candidates_df, summary
@@ -239,15 +239,16 @@ def _apply_market_filter(
     filtered = candidates_df[mask].reset_index(drop=True)
     summary["after"] = int(len(filtered))
 
-    # P2-1: 把剔除的 TOP 3（按 float_mv 降序）连同原因写进 summary，
-    # 让 render 报告能展示"为何排除"。空 / 全保留场景下保持空 list。
+    # P2-1 / v0.16.3: 把**全部**被剔除标的（按 float_mv 降序）连同原因写进 summary，
+    # 让 render 报告 / summary.json 能完整展示"为何排除"，而不再截断为前 3 只。
+    # 空 / 全保留场景下保持空 list。
     dropped_df = candidates_df[~mask]
     if not dropped_df.empty:
         dropped_fm = fm_yi.where(~mask)
         # 排序键：先按 float_mv_yi 降序；NaN 排到最后保证有数值的优先。
         ordered_idx = dropped_fm.sort_values(ascending=False, na_position="last").index
-        top3: list[dict[str, Any]] = []
-        for idx in ordered_idx[:3]:
+        dropped_items: list[dict[str, Any]] = []
+        for idx in ordered_idx:
             row = candidates_df.loc[idx]
             mv_val = float(fm_yi.loc[idx]) if pd.notna(fm_yi.loc[idx]) else None
             close_val = float(cl.loc[idx]) if pd.notna(cl.loc[idx]) else None
@@ -263,7 +264,7 @@ def _apply_market_filter(
                 reasons.append("close_null")
             elif close_val > max_close_yuan:
                 reasons.append(f"close>{max_close_yuan}")
-            top3.append(
+            dropped_items.append(
                 {
                     "ts_code": str(row.get("ts_code", "")),
                     "name": row.get("name"),
@@ -272,7 +273,7 @@ def _apply_market_filter(
                     "reasons": reasons or ["unknown"],
                 }
             )
-        summary["dropped_top3"] = top3
+        summary["dropped"] = dropped_items
     return filtered, summary
 
 

@@ -405,7 +405,7 @@ def _build_filtering(bundle: Round1Bundle) -> FilteringLog:
             max_float_mv_yi=_to_float(fs.get("max_float_mv_yi"), default=0.0),
             max_close_yuan=_to_float(fs.get("max_close_yuan"), default=0.0),
         )
-        rejected = [_build_rejected(d) for d in (fs.get("dropped_top3") or [])]
+        rejected = [_build_rejected(d) for d in (fs.get("dropped") or [])]
         return FilteringLog(
             entered=before,
             passed=after,

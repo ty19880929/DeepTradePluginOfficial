@@ -150,14 +150,14 @@ class TestFilterBoundariesInclusive:
             df, max_float_mv_yi=100.0, max_close_yuan=15.0, min_float_mv_yi=30.0
         )
         assert len(kept) == 0
-        # P2-1: dropped_top3 should record the rejection reason
-        top3 = summary["dropped_top3"]
-        assert len(top3) == 1
-        assert top3[0]["ts_code"] == "000001.SZ"
-        assert any("float_mv>" in r for r in top3[0]["reasons"])
+        # P2-1: dropped should record the rejection reason
+        dropped = summary["dropped"]
+        assert len(dropped) == 1
+        assert dropped[0]["ts_code"] == "000001.SZ"
+        assert any("float_mv>" in r for r in dropped[0]["reasons"])
 
-    def test_dropped_top3_truncates_at_3(self) -> None:
-        """5 个被剔除时只展示 TOP 3（按 float_mv 降序）。"""
+    def test_dropped_records_all(self) -> None:
+        """v0.16.3：全部被剔除标的都记录（按 float_mv 降序），不再截断为前 3 只。"""
         df = pd.DataFrame(
             {
                 "ts_code": [f"00000{i}.SZ" for i in range(1, 6)],
@@ -169,10 +169,10 @@ class TestFilterBoundariesInclusive:
         _, summary = _apply_market_filter(
             df, max_float_mv_yi=100.0, max_close_yuan=15.0, min_float_mv_yi=30.0
         )
-        top3 = summary["dropped_top3"]
-        assert len(top3) == 3
-        # 排序：500 → 400 → 300
-        assert [d["float_mv_yi"] for d in top3] == [500.0, 400.0, 300.0]
+        dropped = summary["dropped"]
+        assert len(dropped) == 5
+        # 排序：500 → 400 → 300 → 200 → 150（全部，按流通市值降序）
+        assert [d["float_mv_yi"] for d in dropped] == [500.0, 400.0, 300.0, 200.0, 150.0]
 
 
 class TestRequiredApiEmptyAppendsDataUnavailable:

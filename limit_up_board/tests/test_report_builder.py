@@ -7,7 +7,7 @@
 * step2_screening：英文 strength_level → 中文 level；risk_flags → tags；evidence / missingData 完整透传
 * step4_prediction：三档分组；多批模式 batchLocalRank / deltaVsBatch / reasonVsPeers 注入；单批为 None
 * marketSnapshot：bundle.market_summary 各子结构 + bundle.candidates 投影
-* filteringDetails：candidate_filter_summary 字段平移 + dropped_top3 → rejectedItems
+* filteringDetails：candidate_filter_summary 字段平移 + dropped → rejectedItems
 * extras：未知 market_summary key 兜底
 * partial_failed：failedBatches 暴露失败批次
 * pydantic 严格校验：未知字段会被 forbid
@@ -101,7 +101,7 @@ def _make_bundle(*, with_lgb: bool = True, with_filter: bool = True) -> Round1Bu
             "min_float_mv_yi": 30.0,
             "max_float_mv_yi": 100.0,
             "max_close_yuan": 15.0,
-            "dropped_top3": [
+            "dropped": [
                 {
                     "ts_code": "600000.SH",
                     "name": "浦发银行",

@@ -115,7 +115,7 @@ def render_summary_md(
     if bundle.data_unavailable:
         out.append(f"\n*data_unavailable*: `{bundle.data_unavailable}`\n")
 
-    # ----- 候选筛选 summary (P2-1: 被剔除的 TOP 3) -----
+    # ----- 候选筛选 summary (P2-1 / v0.16.3: 全部被剔除标的) -----
     filter_section = _render_candidate_filter_section(bundle)
     if filter_section:
         out.append(filter_section)
@@ -429,7 +429,7 @@ def render_debate_summary_md(
     if bundle.data_unavailable:
         out.append(f"\n*data_unavailable*: `{bundle.data_unavailable}`\n")
 
-    # ----- 候选筛选 summary (P2-1: 被剔除的 TOP 3) -----
+    # ----- 候选筛选 summary (P2-1 / v0.16.3: 全部被剔除标的) -----
     filter_section = _render_candidate_filter_section(bundle)
     if filter_section:
         out.append(filter_section)
@@ -882,12 +882,12 @@ def _lgb_compact(c: dict[str, Any]) -> str:
 
 
 def _render_candidate_filter_section(bundle: Round1Bundle) -> str:
-    """P2-1 — 候选筛选 summary：before / after + 被剔除 TOP 3。
+    """P2-1 / v0.16.3 — 候选筛选 summary：before / after + **全部**被剔除标的。
 
     依赖 ``data._apply_market_filter`` 在 ``bundle.market_summary[
-    "candidate_filter_summary"]`` 落地的 ``dropped_top3`` 列表（每项含
-    ``ts_code / name / float_mv_yi / close_yuan / reasons``）。当 summary
-    缺失或 dropped_top3 为空时返回空字符串，不污染报告。
+    "candidate_filter_summary"]`` 落地的 ``dropped`` 列表（每项含
+    ``ts_code / name / float_mv_yi / close_yuan / reasons``，按流通市值降序）。
+    当 summary 缺失或 dropped 为空时返回空字符串，不污染报告。
     """
     fs = bundle.market_summary.get("candidate_filter_summary") if isinstance(
         bundle.market_summary, dict
@@ -896,7 +896,7 @@ def _render_candidate_filter_section(bundle: Round1Bundle) -> str:
         return ""
     before = fs.get("before")
     after = fs.get("after")
-    dropped_top3 = fs.get("dropped_top3") or []
+    dropped = fs.get("dropped") or []
     if before is None or after is None or before == after:
         # 没有人被剔除 → 用户无需关心，跳过整节
         return ""
@@ -907,11 +907,11 @@ def _render_candidate_filter_section(bundle: Round1Bundle) -> str:
         f"max_float_mv_yi={fs.get('max_float_mv_yi')}亿、"
         f"max_close_yuan={fs.get('max_close_yuan')}元（闭区间）\n",
     ]
-    if dropped_top3:
-        parts.append("\n剔除 TOP 3（按流通市值降序）：\n")
+    if dropped:
+        parts.append(f"\n剔除明细（共 {len(dropped)} 只，按流通市值降序）：\n")
         parts.append("| Code | Name | float_mv_yi | close_yuan | 剔除原因 |\n")
         parts.append("|------|------|------------:|-----------:|---------|\n")
-        for d in dropped_top3:
+        for d in dropped:
             ts = d.get("ts_code") or ""
             name = d.get("name") or "—"
             mv = d.get("float_mv_yi")

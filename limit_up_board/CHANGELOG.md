@@ -4,6 +4,23 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.16.3 — 2026-05-26 — 候选筛选剔除明细从「前 3 只」改为全量
+
+应用户反馈：summary.md / summary.json 此前只记录进入强势标的筛选前被剔除的
+前 3 只股票，无法复盘"到底哪些标的、因何被排除"。现改为**完整记录全部被剔除
+标的**及其剔除原因（仍按流通市值降序）。
+
+### Changed
+
+- **`data._apply_market_filter` 不再截断为 TOP 3**：`candidate_filter_summary`
+  里的 `dropped_top3` 字段重命名为 `dropped`，遍历全部被剔除标的（去掉
+  `ordered_idx[:3]` 切片），每项仍含 `ts_code / name / float_mv_yi /
+  close_yuan / reasons`。
+- **`render._render_candidate_filter_section`（summary.md）** 消费 `dropped`，
+  小节标题由"剔除 TOP 3"改为"剔除明细（共 N 只，按流通市值降序）"，输出全部行。
+- **`report.builder._build_filtering`（summary.json）** 的 `rejectedItems`
+  现由 `dropped` 全量构建，不再只含前 3 项；schema 结构不变（纯增量）。
+
 ## v0.16.1 — 2026-05-25 — summary.json 静默失败链路修复
 
 修复用户反馈"run 跑完终端正常但报告没上传到官网"的连锁缺陷。根因是
