@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from limit_up_board.data import _apply_market_filter, _build_candidate_rows
+from limit_up_board.data import (
+    _apply_market_filter,
+    _build_candidate_rows,
+    _detect_incomplete_history,
+)
 
 
 def _toy_candidate_frame() -> pd.DataFrame:
@@ -173,6 +177,70 @@ class TestFilterBoundariesInclusive:
         assert len(dropped) == 5
         # 排序：500 → 400 → 300 → 200 → 150（全部，按流通市值降序）
         assert [d["float_mv_yi"] for d in dropped] == [500.0, 400.0, 300.0, 200.0, 150.0]
+
+    def test_dropped_excludes_passed_candidates(self) -> None:
+        """① regression (v0.16.3): when SOME candidates pass, ``dropped`` must
+        list ONLY the rejected ones — never the passed rows tagged 'unknown'."""
+        df = pd.DataFrame(
+            {
+                "ts_code": ["pass1.SZ", "drop_big.SZ", "pass2.SZ", "drop_px.SZ"],
+                "name": ["P1", "BIG", "P2", "PX"],
+                # pass1/pass2 within bounds; drop_big over mv cap; drop_px over price cap
+                "float_mv": [50 * 1e8, 500 * 1e8, 60 * 1e8, 40 * 1e8],
+                "close": [10.0, 10.0, 12.0, 99.0],
+            }
+        )
+        kept, summary = _apply_market_filter(
+            df, max_float_mv_yi=100.0, max_close_yuan=15.0, min_float_mv_yi=30.0
+        )
+        assert len(kept) == 2
+        dropped = summary["dropped"]
+        assert summary["before"] - summary["after"] == len(dropped) == 2
+        dropped_codes = {d["ts_code"] for d in dropped}
+        assert dropped_codes == {"drop_big.SZ", "drop_px.SZ"}
+        # No passed candidate leaks in, and no spurious "unknown" reason appears.
+        for d in dropped:
+            assert d["reasons"] and "unknown" not in d["reasons"]
+
+
+class TestDetectIncompleteHistory:
+    """⑤ — systematic absence of multi-day history must surface as a
+    data_unavailable marker, not be silently swallowed by the prompt's
+    'per-row null is a legal fact' rule."""
+
+    def _cand(self, ts: str, *, close: float | None, ma5: float | None) -> dict:
+        return {"ts_code": ts, "close_yuan": close, "ma5": ma5}
+
+    def test_all_missing_ma5_flags(self) -> None:
+        cands = [self._cand(f"{i}.SZ", close=10.0, ma5=None) for i in range(5)]
+        warn = _detect_incomplete_history(cands)
+        assert warn is not None
+        assert "5/5" in warn and "daily_history_incomplete" in warn
+
+    def test_all_present_no_flag(self) -> None:
+        cands = [self._cand(f"{i}.SZ", close=10.0, ma5=9.8) for i in range(5)]
+        assert _detect_incomplete_history(cands) is None
+
+    def test_minority_missing_no_flag(self) -> None:
+        # 1/5 missing (a lone new IPO) is a legal fact, not a systematic failure.
+        cands = [self._cand(f"{i}.SZ", close=10.0, ma5=9.8) for i in range(4)]
+        cands.append(self._cand("new.SZ", close=10.0, ma5=None))
+        assert _detect_incomplete_history(cands) is None
+
+    def test_majority_missing_flags(self) -> None:
+        cands = [self._cand(f"{i}.SZ", close=10.0, ma5=None) for i in range(3)]
+        cands += [self._cand(f"ok{i}.SZ", close=10.0, ma5=9.8) for i in range(2)]
+        warn = _detect_incomplete_history(cands)
+        assert warn is not None and "3/5" in warn
+
+    def test_candidates_without_close_ignored(self) -> None:
+        # close-less rows don't count toward the denominator (zero-data days).
+        cands = [self._cand("a.SZ", close=None, ma5=None)]
+        assert _detect_incomplete_history(cands) is None
+
+    def test_single_candidate_never_flags(self) -> None:
+        cands = [self._cand("a.SZ", close=10.0, ma5=None)]
+        assert _detect_incomplete_history(cands) is None
 
 
 class TestRequiredApiEmptyAppendsDataUnavailable:

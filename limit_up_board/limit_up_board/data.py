@@ -244,7 +244,13 @@ def _apply_market_filter(
     # 空 / 全保留场景下保持空 list。
     dropped_df = candidates_df[~mask]
     if not dropped_df.empty:
-        dropped_fm = fm_yi.where(~mask)
+        # ⚠ Bug fix (v0.16.3 regression): must sort ONLY the dropped rows.
+        # ``fm_yi.where(~mask)`` keeps all rows (NaN-ing the passed ones) and
+        # ``sort_values(na_position="last")`` does NOT drop those NaN rows — it
+        # returns the full index, so the loop below also walked the *passed*
+        # candidates, tagging them with reason ["unknown"]. Restrict to
+        # ``dropped_df.index`` (genuine float_mv_null drops keep NaN → sort last).
+        dropped_fm = fm_yi.loc[dropped_df.index]
         # 排序键：先按 float_mv_yi 降序；NaN 排到最后保证有数值的优先。
         ordered_idx = dropped_fm.sort_values(ascending=False, na_position="last").index
         dropped_items: list[dict[str, Any]] = []
@@ -514,6 +520,13 @@ def collect_round1(
     if "limit" in limit_list_d.columns:
         limit_list_d = limit_list_d[limit_list_d["limit"] == "U"]
 
+    # Market-wide breadth = every 'U' limit-up that day, captured BEFORE the
+    # main-board / 市值 / 价格 / ST / 停牌 filters below. This is what
+    # ``limit_up_count`` (report 市场快照 + LGB ``f_mkt_total_limit_up``) must
+    # reflect; using ``len(candidates_df)`` (post-filter) understated breadth by
+    # >2× and made the market look far weaker than it was.
+    market_limit_up_count = int(len(limit_list_d))
+
     # join on ts_code
     if limit_list_d.empty:
         bundle.candidates = []
@@ -618,7 +631,7 @@ def collect_round1(
     # update() (not reassign) to preserve candidate_filter_summary set in step 2b.
     bundle.market_summary.update(
         {
-            "limit_up_count": int(len(candidates_df)),
+            "limit_up_count": market_limit_up_count,
             "limit_step_distribution": today_step,
         }
     )
@@ -681,6 +694,15 @@ def collect_round1(
         lhb_api_empty=top_list_empty and top_inst_empty,
         concept_repo=concept_repo,
     )
+    # Data-quality guardrail — the prompt deliberately treats per-row null
+    # ma5/up_count_30d/... as "legal facts" (occasional new-listing gaps), so a
+    # SYSTEMATIC absence of multi-day history (e.g. a broken/truncated daily
+    # window) would otherwise be invisible: missing_data stays [], nothing hits
+    # data_unavailable, and only lgb_feature_missing in the raw snapshot betrays
+    # it. Surface it explicitly so the LLM downweights and the report shows it.
+    history_warn = _detect_incomplete_history(bundle.candidates)
+    if history_warn:
+        data_unavailable.append(history_warn)
     bundle.data_unavailable = data_unavailable
 
     # 9. v0.5 LGB — annotate each candidate dict with lgb_score / lgb_decile /
@@ -809,18 +831,37 @@ def _fetch_history_window(
     *,
     force_sync: bool = False,
 ) -> pd.DataFrame:
-    """Fetch (api_name) for [start_date, end_date]; filter to candidates."""
-    # tushare daily/daily_basic/moneyflow accept start_date/end_date for batch fetch.
-    df = tushare.call(
-        api_name,
-        params={"start_date": start_date, "end_date": end_date},
-        force_sync=force_sync,
-    )
-    if df is None or df.empty:
+    """Fetch (api_name) over [start_date, end_date]; filter to candidates.
+
+    ⚠ History fetch must loop **per trade-date**, not issue a single all-market
+    ``start_date/end_date`` query. Tushare's daily/daily_basic/moneyflow cap a
+    single response at ~6000 rows and the framework transport does NOT paginate
+    (``TushareSDKTransport.call`` = one SDK call). An all-market window spans
+    ~5400 stocks × N days ≫ 6000, so the response silently truncates to the most
+    recent ~1 trade-date — leaving every candidate with a single history row and
+    nulling the entire 动量 / 5 日比率 feature block (ma5/ma10/ma20/up_count_30d/
+    pct_chg_Nd_sum/mf_net_5d_sum/...). Querying by ``trade_date=d`` instead caps
+    each call at one market-day (≤ market size < 6000) AND each per-date frame is
+    ``trade_day_immutable``, so the cache is shared across runs and training days.
+    """
+    cal = TradeCalendar(tushare.call("trade_cal", force_sync=force_sync))
+    open_days = cal.range(start_date, end_date)
+    if not open_days:
         return pd.DataFrame()
-    if "ts_code" in df.columns and candidate_codes:
-        df = df[df["ts_code"].astype(str).isin(candidate_codes)]
-    return df.reset_index(drop=True)
+    frames: list[pd.DataFrame] = []
+    for d in open_days:
+        df = tushare.call(api_name, trade_date=d, force_sync=force_sync)
+        if df is None or df.empty:
+            continue
+        if "ts_code" in df.columns and candidate_codes:
+            df = df[df["ts_code"].astype(str).isin(candidate_codes)]
+        if not df.empty:
+            frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    # _index_by_code re-sorts by (ts_code, trade_date) + dedups, so concat order
+    # is irrelevant here — we keep ascending date order anyway for readability.
+    return pd.concat(frames, ignore_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1101,6 +1142,32 @@ def _ma_metrics(closes: list[float]) -> dict[str, float | bool | None]:
             latest > out["ma5"] > out["ma10"] > out["ma20"]  # type: ignore[operator]
         )
     return out
+
+
+def _detect_incomplete_history(
+    candidates: list[dict[str, Any]], *, min_fraction: float = 0.5
+) -> str | None:
+    """Return a ``data_unavailable`` marker when multi-day history is missing for
+    a suspicious majority of candidates, else None.
+
+    ``ma5`` needs ≥5 trailing daily rows. A handful of recent IPOs legitimately
+    lack it, but if **most** of the day's limit-up leaders have no 5-day MA the
+    daily history window almost certainly under-returned (the failure mode that
+    nulled the entire 动量 block). We gate on candidates that DO have a close
+    (so genuinely empty/zero-candidate days don't trip it) and require a
+    majority, keeping false positives near-zero.
+    """
+    valued = [c for c in candidates if c.get("close_yuan") is not None]
+    n = len(valued)
+    if n < 2:
+        return None
+    missing = sum(1 for c in valued if c.get("ma5") is None)
+    if missing / n >= min_fraction and missing >= 2:
+        return (
+            f"daily_history_incomplete: {missing}/{n} 候选缺失≥5日均线"
+            "（疑似 daily 历史窗口拉取不足，动量/多日特征不可靠）"
+        )
+    return None
 
 
 def _up_count_30d(d_hist: list[dict[str, Any]]) -> int | None:

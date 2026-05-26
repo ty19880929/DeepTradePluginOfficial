@@ -603,20 +603,34 @@ def _mf_block(
     }
 
 
-def _chip_block(cyq: dict[str, Any] | None) -> dict[str, float | None]:
-    """筹码 (3 个)。"""
+def _chip_block(
+    cyq: dict[str, Any] | None, close: float | None = None
+) -> dict[str, float | None]:
+    """筹码 (3 个)。
+
+    ``f_chip_close_to_avg_cost_pct`` is derived here from ``close`` and the cyq
+    weighted-average cost. The cyq lookup (``data._build_cyq_lookup``) only
+    carries ``cyq_avg_cost_yuan`` — it never wrote a ``cyq_close_to_avg_cost_pct``
+    key, so the previous ``cyq.get("cyq_close_to_avg_cost_pct")`` read was always
+    None and this feature was permanently NaN (a dead feature in both train and
+    serve). Compute it the same way ``data._close_to_avg_cost_pct`` does so the
+    booster and the prompt see the same number.
+    """
     if not cyq:
         return {
             "f_chip_winner_pct": None,
             "f_chip_top10_concentration": None,
             "f_chip_close_to_avg_cost_pct": None,
         }
+    avg_cost = _to_float(cyq.get("cyq_avg_cost_yuan"))
+    close_f = _to_float(close)
+    close_to_avg: float | None = None
+    if close_f is not None and avg_cost:
+        close_to_avg = (close_f - avg_cost) / avg_cost * 100
     return {
         "f_chip_winner_pct": _to_float(cyq.get("cyq_winner_pct")),
         "f_chip_top10_concentration": _to_float(cyq.get("cyq_top10_concentration")),
-        "f_chip_close_to_avg_cost_pct": _clip_ratio(
-            _to_float(cyq.get("cyq_close_to_avg_cost_pct"))
-        ),
+        "f_chip_close_to_avg_cost_pct": _clip_ratio(close_to_avg),
     }
 
 
@@ -883,7 +897,7 @@ def build_feature_frame(
         feat.update(_vol_block(cand_dict, daily_rows, daily_basic_rows))
         feat.update(_mom_block(daily_rows, up_count))
         feat.update(_mf_block(moneyflow_rows, cand_dict, daily_rows))
-        feat.update(_chip_block(cyq))
+        feat.update(_chip_block(cyq, _to_float(cand_dict.get("close"))))
         feat.update(_lhb_block(lhb))
 
         # sector — v0.8.0 P1-1 题材内相对地位

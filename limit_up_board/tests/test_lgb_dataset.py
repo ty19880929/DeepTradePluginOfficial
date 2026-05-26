@@ -173,36 +173,6 @@ def _limit_list_d_for(trade_date: str) -> pd.DataFrame:
     )
 
 
-def _daily_window_df(start_date: str, end_date: str) -> pd.DataFrame:
-    """Generate daily rows for 000001.SZ + 600002.SH between start and end (inclusive)."""
-    pd_start = pd.Timestamp(start_date)
-    pd_end = pd.Timestamp(end_date)
-    if pd_start > pd_end:
-        return pd.DataFrame()
-    days = pd.date_range(pd_start, pd_end, freq="D")
-    rows = []
-    for ts_code, base in (("000001.SZ", 10.0), ("600002.SH", 8.0)):
-        close = base
-        for d in days:
-            pre = close
-            close = pre * 1.005
-            rows.append(
-                {
-                    "ts_code": ts_code,
-                    "trade_date": d.strftime("%Y%m%d"),
-                    "open": pre * 1.001,
-                    "high": close + 0.1,
-                    "low": close - 0.1,
-                    "close": close,
-                    "pre_close": pre,
-                    "pct_chg": (close - pre) / pre * 100,
-                    "amount": 5e5,
-                    "vol": 1234,
-                }
-            )
-    return pd.DataFrame(rows)
-
-
 def _daily_t1_df(trade_date: str) -> pd.DataFrame:
     """Single-day daily frame for T+1 label lookup.
 
@@ -286,6 +256,11 @@ def _build_fixtures() -> dict[tuple[str, str], pd.DataFrame]:
     # stock_basic — single static frame
     f[("stock_basic", "*")] = _stock_basic_df()
 
+    # trade_cal — fetch_history_window now builds a TradeCalendar internally to
+    # loop per trade-date, so the stub must answer the parameter-less trade_cal
+    # call (cache_key "*"). Mirrors the calendar fixture handed to the collector.
+    f[("trade_cal", "*")] = _trade_cal_df(_ALL_DATES_INCL_T1)
+
     # per-day limit_list_d + stock_st (empty) + cyq_perf (empty) + step / ths / cpt / lhb
     for T in _TRADE_DATES:
         f[("limit_list_d", T)] = _limit_list_d_for(T)
@@ -336,33 +311,13 @@ def _build_fixtures() -> dict[tuple[str, str], pd.DataFrame]:
     for T in _TRADE_DATES:
         f.setdefault(("daily", T), _daily_t1_df(T))  # context daily(T) — single-day
 
-    # Daily / daily_basic / moneyflow window queries — collect_day_samples uses
-    # start_date / end_date range (cache_key = "start:end"). To keep the fixture
-    # table small we just memoize one big window covering the full month.
-    big_start = "20260301"
-    big_end = "20260601"
-    daily_full = _daily_window_df(big_start, big_end)
-    daily_basic_full = _daily_basic_window_df(big_start, big_end)
-    moneyflow_full = _moneyflow_window_df(big_start, big_end)
-
-    for T in _TRADE_DATES:
-        # mirror the cache_key computation in collect_day_samples._shift_yyyymmdd
-        from limit_up_board.lgb.dataset import _shift_yyyymmdd as _shift
-
-        daily_start = _shift(T, -60)  # daily_lookback * 2 = 30*2 = 60
-        mf_start = _shift(T, -10)
-        f[("daily", f"{daily_start}:{T}")] = daily_full[
-            (daily_full["trade_date"] >= daily_start)
-            & (daily_full["trade_date"] <= T)
-        ]
-        f[("daily_basic", f"{daily_start}:{T}")] = daily_basic_full[
-            (daily_basic_full["trade_date"] >= daily_start)
-            & (daily_basic_full["trade_date"] <= T)
-        ]
-        f[("moneyflow", f"{mf_start}:{T}")] = moneyflow_full[
-            (moneyflow_full["trade_date"] >= mf_start)
-            & (moneyflow_full["trade_date"] <= T)
-        ]
+    # Daily / daily_basic / moneyflow history — fetch_history_window now loops
+    # per trade-date (cache_key = trade_date), NOT a single start:end window.
+    # Register one frame per open trading day. daily(d) is already covered above
+    # (T+1 label frames + per-T context frames); add daily_basic / moneyflow.
+    for d in _ALL_DATES_INCL_T1:
+        f.setdefault(("daily_basic", d), _daily_basic_window_df(d, d))
+        f.setdefault(("moneyflow", d), _moneyflow_window_df(d, d))
 
     return f
 

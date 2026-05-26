@@ -30,11 +30,11 @@ from deeptrade.core.tushare_client import TushareClient
 
 from ..calendar import TradeCalendar
 from ..data import (
-    SectorStrength,
     apply_market_filter,
     build_cyq_lookup,
     build_lhb_rollup,
     exclude_st,
+    fetch_history_window,
     index_by_code,
     main_board_filter,
     resolve_sector_strength,
@@ -177,6 +177,9 @@ def collect_day_samples(
         limit_list_d = limit_list_d[limit_list_d["limit"] == "U"]
     if limit_list_d.empty:
         return _empty_day(trade_date)
+    # Market-wide breadth BEFORE filtering — must match collect_round1 so the
+    # f_mkt_total_limit_up feature carries the same semantics at train & serve.
+    market_limit_up_count = int(len(limit_list_d))
 
     candidates_df = limit_list_d.merge(
         main_pool[["ts_code", "market", "exchange", "industry", "list_date"]].rename(
@@ -237,7 +240,7 @@ def collect_day_samples(
     # 4. market summary（包含 yesterday context，仅当 prev_trade_date 给出时填）
     today_step = summarize_limit_step(step_df) if step_df is not None else {}
     market_summary: dict[str, Any] = {
-        "limit_up_count": int(len(candidates_df)),
+        "limit_up_count": market_limit_up_count,
         "limit_step_distribution": today_step,
     }
     if prev_trade_date is not None:
@@ -253,41 +256,22 @@ def collect_day_samples(
         market_summary.update(yctx)
 
     # 5. 历史窗口（daily / daily_basic / moneyflow）
+    # fetch_history_window loops per trade-date (NOT a single all-market
+    # start_date/end_date query) so the response never hits Tushare's ~6000-row
+    # cap — see data._fetch_history_window. Training MUST use the same grain as
+    # inference or the 动量/5 日比率 feature block ends up NaN at train time only,
+    # creating train/serve skew on a whole feature family.
     daily_start = _shift_yyyymmdd(trade_date, -(daily_lookback * 2))
     mf_start = _shift_yyyymmdd(trade_date, -(moneyflow_lookback + 5))
-    daily_df = tushare.call(
-        "daily",
-        params={"start_date": daily_start, "end_date": trade_date},
-        force_sync=force_sync,
+    daily_df = fetch_history_window(
+        tushare, "daily", daily_start, trade_date, candidate_codes, force_sync=force_sync
     )
-    daily_basic_df = tushare.call(
-        "daily_basic",
-        params={"start_date": daily_start, "end_date": trade_date},
-        force_sync=force_sync,
+    daily_basic_df = fetch_history_window(
+        tushare, "daily_basic", daily_start, trade_date, candidate_codes, force_sync=force_sync
     )
-    moneyflow_df = tushare.call(
-        "moneyflow",
-        params={"start_date": mf_start, "end_date": trade_date},
-        force_sync=force_sync,
+    moneyflow_df = fetch_history_window(
+        tushare, "moneyflow", mf_start, trade_date, candidate_codes, force_sync=force_sync
     )
-    if daily_df is not None and not daily_df.empty and "ts_code" in daily_df.columns:
-        daily_df = daily_df[daily_df["ts_code"].astype(str).isin(candidate_codes)]
-    if (
-        daily_basic_df is not None
-        and not daily_basic_df.empty
-        and "ts_code" in daily_basic_df.columns
-    ):
-        daily_basic_df = daily_basic_df[
-            daily_basic_df["ts_code"].astype(str).isin(candidate_codes)
-        ]
-    if (
-        moneyflow_df is not None
-        and not moneyflow_df.empty
-        and "ts_code" in moneyflow_df.columns
-    ):
-        moneyflow_df = moneyflow_df[
-            moneyflow_df["ts_code"].astype(str).isin(candidate_codes)
-        ]
 
     daily_by_code = index_by_code(daily_df)
     daily_basic_by_code = index_by_code(daily_basic_df)

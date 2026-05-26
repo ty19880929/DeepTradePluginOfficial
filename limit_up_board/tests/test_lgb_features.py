@@ -280,7 +280,10 @@ class TestBuildFeatureFrameHappyPath:
                 cand["ts_code"]: {
                     "cyq_winner_pct": 72.0,
                     "cyq_top10_concentration": 65.0,
-                    "cyq_close_to_avg_cost_pct": 8.0,
+                    # ③: close_to_avg_cost is DERIVED from close + avg_cost, not
+                    # read from the lookup (data._build_cyq_lookup never wrote a
+                    # cyq_close_to_avg_cost_pct key). close=11.0, avg=10.0 → +10%.
+                    "cyq_avg_cost_yuan": 10.0,
                 }
             },
             lhb_rollup={
@@ -374,7 +377,8 @@ class TestBuildFeatureFrameHappyPath:
         row = df_full.iloc[0]
         assert row["f_chip_winner_pct"] == 72.0
         assert row["f_chip_top10_concentration"] == 65.0
-        assert row["f_chip_close_to_avg_cost_pct"] == 8.0
+        # close=11.0, cyq_avg_cost_yuan=10.0 → (11-10)/10*100 = 10.0
+        assert row["f_chip_close_to_avg_cost_pct"] == pytest.approx(10.0)
 
     def test_lhb_block_present(self, df_full: pd.DataFrame) -> None:
         row = df_full.iloc[0]
