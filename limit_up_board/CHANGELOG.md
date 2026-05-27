@@ -4,6 +4,27 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.18.1 — 2026-05-27 — 兼容新框架严格 canonical_json（指纹 NaN/Inf/set 兜底）
+
+新框架（deeptrade-quant ≥ 0.5，本地验证于 0.15.0）把 `deeptrade.core.fingerprint.canonical_json`
+的契约改严：对 `NaN`/`Inf` 抛 `ValueError`、对 `set`/`frozenset` 抛 `TypeError`（不再
+自动归一）。插件 `fingerprint.py` 在框架可用时直接复用框架原语，导致：
+
+- **运行时隐患**：`build_input_fingerprint` 会哈希 Tushare 派生的候选浮点字段
+  （新股常见 `volume_ratio`/`lgb_score` 为 NaN），在新框架下 `hash_json` 会**直接抛错**，
+  使 run 指纹计算崩溃。
+- CI `test_fingerprint.py` 两个断言旧"自动归一"行为的用例失败。
+
+### Fixed
+
+- **`fingerprint._normalize` 提为模块级、并在框架路径生效**：插件的 `canonical_json`
+  现在「先归一（NaN/Inf→None、set→排序 list、dataclass→asdict、Mapping 键→str），
+  再委托框架」，既保留本模块文档化的 NaN-safe 契约，又让框架的
+  datetime/Decimal/numpy/BaseModel 富类型处理与版本化契约继续作为单一事实源。
+  对新旧框架均兼容（0.4.2 与 0.15.0 全套测试通过）。
+- 新增回归测试：`test_input_fingerprint_survives_nan_and_inf_in_candidates`
+  （直接走 `build_input_fingerprint` 的 NaN/Inf 候选路径）。
+
 ## v0.18.0 — 2026-05-27 — 强势筛选→强势分析（全量进连板预测）+ 数据层确定性 + 双结论展示
 
 应用户反馈："相同交易日、相同 LGB 模型、相同因子连续执行，连板预测结果每次都有

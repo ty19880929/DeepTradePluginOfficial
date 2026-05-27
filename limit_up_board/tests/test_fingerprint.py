@@ -185,6 +185,34 @@ def test_input_fingerprint_payload_data_unavailable_sorted() -> None:
     assert payload["data_unavailable"] == ["a_dc", "m_dc", "z_dc"]
 
 
+def test_input_fingerprint_survives_nan_and_inf_in_candidates() -> None:
+    """Regression: framework canonical_json (≥0.5) RAISES on NaN/Inf, so the
+    plugin must normalize before hashing. Tushare-derived candidate floats are
+    routinely NaN (e.g. missing volume_ratio / lgb_score on new listings); the
+    run-level fingerprint must not crash on them."""
+    bundle = _StubBundle(
+        candidates=[
+            {
+                "ts_code": "000001.SZ",
+                "name": "平安银行",
+                "limit_times": 1,
+                "close": math.nan,
+                "pct_chg": math.inf,
+                "lgb_score": -math.inf,
+            },
+        ],
+        market_summary={"limit_up_count": float("nan")},
+    )
+    h, payload = _build(bundle=bundle)
+    assert len(h) == 64  # produced a sha256, did not raise on NaN/Inf
+    # deterministic on rerun
+    h2, _ = _build(bundle=bundle)
+    assert h == h2
+    # the returned payload is the pre-normalization view (normalization happens
+    # inside hash_json); canonical_json on it must still be NaN-safe.
+    assert len(hash_json(payload)) == 64
+
+
 def test_input_fingerprint_payload_filters_candidate_fields() -> None:
     """Allowlist: only declared fields enter the payload (extra fields stripped)."""
     bundle = _StubBundle(
