@@ -29,38 +29,65 @@ from typing import Any, Mapping
 # ---------------------------------------------------------------------------
 # Primitives — try framework first, fall back to local implementation.
 # ---------------------------------------------------------------------------
-try:  # pragma: no cover — exercised once framework merges its helpers
+
+
+def _normalize(obj: Any) -> Any:
+    """Recursively normalize values into the subset the framework's strict
+    ``canonical_json`` accepts, preserving this module's documented contract
+    (``no NaN`` + deterministic set ordering).
+
+    The framework's ``canonical_json`` (deeptrade-quant ≥ 0.5) deliberately
+    **raises** on ``NaN``/``Inf`` (``ValueError``) and on ``set``/``frozenset``
+    (``TypeError``) rather than coercing them — see its module docstring. But
+    ``build_input_fingerprint`` feeds it Tushare-derived floats (which can be
+    NaN) and occasionally set-valued fields, so without pre-normalization the
+    run-level fingerprint would crash at runtime. We therefore:
+
+    * NaN/Inf → ``None`` (incl. numpy NaN — ``np.float64`` is a ``float`` subclass);
+    * ``set``/``frozenset`` → list sorted by canonical JSON of each element;
+    * dataclasses → ``asdict``; tuples → lists; Mapping keys → ``str``.
+
+    Rich scalars the framework handles natively (``datetime`` / ``Decimal`` /
+    numpy scalars / ``BaseModel``) are passed through unchanged so the framework
+    can encode them — we only sand off the values it refuses to encode.
+    """
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+    if isinstance(obj, float):  # numpy float64 is a float subclass → covered
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, Mapping):
+        return {str(k): _normalize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_normalize(v) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        # Sets have no intrinsic order; sort for determinism.
+        return sorted(
+            (_normalize(v) for v in obj),
+            key=lambda x: json.dumps(x, sort_keys=True, default=str),
+        )
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return _normalize(dataclasses.asdict(obj))
+    return obj
+
+
+try:
     from deeptrade.core.fingerprint import (  # type: ignore[import-not-found]
-        canonical_json,
-        hash_json,
+        canonical_json as _framework_canonical_json,
         hash_text,
     )
-except ImportError:  # pragma: no cover branch — local fallback
 
-    def _normalize(obj: Any) -> Any:
-        """Recursively normalize values into JSON-safe primitives.
+    def canonical_json(obj: Any) -> str:
+        # Normalize first (NaN/Inf/sets), then delegate to the framework so its
+        # rich datetime/Decimal/numpy/BaseModel handling + frozen versioned
+        # contract remain the source of truth for everything else.
+        return _framework_canonical_json(_normalize(obj))
 
-        NaN/Inf become ``None`` (so ``allow_nan=False`` doesn't blow up on
-        Tushare-derived floats); dataclasses are converted via ``asdict``;
-        sets/tuples become lists; anything else falls back to ``str`` via
-        ``json.dumps(default=str)`` downstream.
-        """
-        if obj is None or isinstance(obj, (bool, int, str)):
-            return obj
-        if isinstance(obj, float):
-            if math.isnan(obj) or math.isinf(obj):
-                return None
-            return obj
-        if isinstance(obj, Mapping):
-            return {str(k): _normalize(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple)):
-            return [_normalize(v) for v in obj]
-        if isinstance(obj, (set, frozenset)):
-            # Sets have no intrinsic order; sort for determinism.
-            return sorted((_normalize(v) for v in obj), key=lambda x: json.dumps(x, sort_keys=True, default=str))
-        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-            return _normalize(dataclasses.asdict(obj))
-        return obj
+    def hash_json(obj: Any) -> str:
+        return hashlib.sha256(canonical_json(obj).encode("utf-8")).hexdigest()
+
+except ImportError:  # pragma: no cover branch — local fallback when framework absent
 
     def canonical_json(obj: Any) -> str:
         return json.dumps(
