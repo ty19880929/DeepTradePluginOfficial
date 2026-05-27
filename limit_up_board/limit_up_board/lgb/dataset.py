@@ -263,13 +263,22 @@ def collect_day_samples(
     # creating train/serve skew on a whole feature family.
     daily_start = _shift_yyyymmdd(trade_date, -(daily_lookback * 2))
     mf_start = _shift_yyyymmdd(trade_date, -(moneyflow_lookback + 5))
-    daily_df = fetch_history_window(
-        tushare, "daily", daily_start, trade_date, candidate_codes, force_sync=force_sync
+    # ``retry_empty_days=True`` on daily mirrors inference (data.collect_round1) so
+    # the trailing-MA window membership is the same at train time — preserving the
+    # train/serve parity this block already guards.
+    daily_df, _ = fetch_history_window(
+        tushare,
+        "daily",
+        daily_start,
+        trade_date,
+        candidate_codes,
+        force_sync=force_sync,
+        retry_empty_days=True,
     )
-    daily_basic_df = fetch_history_window(
+    daily_basic_df, _ = fetch_history_window(
         tushare, "daily_basic", daily_start, trade_date, candidate_codes, force_sync=force_sync
     )
-    moneyflow_df = fetch_history_window(
+    moneyflow_df, _ = fetch_history_window(
         tushare, "moneyflow", mf_start, trade_date, candidate_codes, force_sync=force_sync
     )
 

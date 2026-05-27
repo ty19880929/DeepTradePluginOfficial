@@ -31,12 +31,13 @@ _SCREENING_LGB_DECILE_LINE = (
 
 # P1-5 — 例外字段化：仅允许引用输入字段，避免 LLM 自由补全"突发题材/一线游资"。
 _SCREENING_LGB_FLOOR_BLOCK = (
-    "\n  · lgb_score < {floor} 的标的倾向 selected=false；仅当输入字段满足以下任一条件时"
-    "才可 selected=true，且 rationale 必须明确写出引用的字段名与数值：\n"
+    "\n  · lgb_score < {floor} 的标的倾向 selected=false（不列为强势推荐）；仅当输入字段满足以下"
+    "任一条件时才宜 selected=true，且 rationale 必须明确写出引用的字段名与数值：\n"
     "    (a) lhb_famous_seats_count > 0 且 lhb_net_buy_yi > 0（一线游资明确净买入）；\n"
     "    (b) lu_desc / tag 含明显主线题材关键词，或候选 concepts 数组中至少一个名称"
     "出现在 sector_strength_data.top_sectors（题材可信度足够，且 sector_strength_source = "
-    "limit_cpt_list 时尤其可靠）。"
+    "limit_cpt_list 时尤其可靠）。\n"
+    "    （注：selected 只是推荐标签，selected=false 的标的仍会进入下一轮，score 请如实给出。）"
 )
 
 _SCREENING_LGB_TAIL = (
@@ -78,7 +79,12 @@ def _screening_system_with(lgb_block: str) -> str:
 5. 仅输出 JSON，不要 Markdown 代码块包裹，不要解释性前后缀。
 
 【任务】
-对本批次 T 日涨停候选股进行"强势标的分析"，判断其是否具备进入下一轮"次日连板/高位溢价预测"的资格。
+对本批次 T 日涨停候选股进行"强势标的分析"：逐只给出强弱评分（score）、强弱等级
+（strength_level）与核心判断（rationale + evidence）。
+**重要：本批每一只候选股都会进入下一轮"次日连板/高位溢价预测"，强势分析不再做筛选淘汰。**
+`selected` 仅是你给出的**建议性「强势推荐」标签**（true=你认为值得重点关注的强势标的），
+用于报告高亮与人工参考，**不决定**任何标的是否进入下一轮——请如实评分，不要为了"让它进入
+下一轮"而抬高 selected/score。
 
 【分析维度】
 - 封板强度：first_time / last_time / open_times / fd_amount_yi / limit_amount_yi / fd_amount_ratio（封单/成交额，>10% 为强势封板）
@@ -190,7 +196,7 @@ rationale 不超过 80 字（输出截断会触发 JSON 失败）。
 }
 
 【字段值约束】
-- selected:        true 或 false（true 表示进入下一轮）
+- selected:        true 或 false（建议性「强势推荐」标签；true=重点关注。**不影响**是否进入下一轮——全部候选都会进入连板预测）
 - score:           0–100 的浮点数
 - strength_level:  必须是 "high" / "medium" / "low" 三选一
 - evidence:        每只 1–4 条，每条 4 个字段不可省
@@ -232,7 +238,8 @@ def screening_user_prompt(
         data_unavailable=data_unavailable,
         instruction=(
             "请对本批次每一只候选股输出 StrongCandidate；candidate_id 与输入一一对应；"
-            "selected=true 表示进入下一轮；rationale ≤ 80 字。"
+            "selected=true 仅表示「强势推荐」建议标签（不影响是否进入下一轮，全部候选都会进入"
+            "连板预测）；rationale ≤ 80 字。"
         ),
     )
 

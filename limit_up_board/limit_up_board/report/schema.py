@@ -31,6 +31,9 @@ ThemeStrengthSource = Literal[
 class Counts(BaseModel):
     model_config = ConfigDict(extra="forbid")
     initial: int = Field(ge=0)
+    # v0.18 — ``analyzed`` = 强势分析覆盖的候选数（= 进入连板预测的数量）。
+    # ``selected`` 自此仅表示 LLM 的「强势推荐」建议数（advisory），不再是过滤后的数量。
+    analyzed: int = Field(ge=0, default=0)
     selected: int = Field(ge=0)
     predicted: int = Field(ge=0)
 
@@ -115,6 +118,9 @@ class ScreeningItem(BaseModel):
     tags: list[str] = Field(default_factory=list)
     evidence: list[EvidenceItemStrict]
     missingData: list[str] = Field(default_factory=list)
+    # v0.18 — LLM 的「强势推荐」建议标签（advisory，原 ``selected``）。强势分析现在
+    # 覆盖全部候选，本字段仅用于前端高亮，不再决定是否进入连板预测。
+    strongRecommended: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +150,12 @@ class PredictionCard(BaseModel):
     batchLocalRank: int | None
     deltaVsBatch: DeltaVsBatch | None
     reasonVsPeers: str | None
+    # v0.18 — 同一标的的「强势分析结论」并列展示（双结论）。当某预测标的在强势分析
+    # 阶段缺少对应裁决时为 None。
+    strongScore: float | None = None
+    strongLevel: Literal["强", "中", "弱"] | None = None
+    strongRationale: str | None = None
+    strongRecommended: bool = False
 
 
 class Step4Prediction(BaseModel):

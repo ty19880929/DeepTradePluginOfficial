@@ -94,8 +94,15 @@ def render_summary_md(
     final_ranking: FinalRankingResponse | None,
     failed_batch_ids: list[str] | None = None,
     input_fingerprint: str | None = None,
+    analyzed: list[StrongCandidate] | None = None,
 ) -> str:
-    """Build the full summary.md content."""
+    """Build the full summary.md content.
+
+    v0.18 — ``analyzed`` 是全部强势分析裁决（连板预测对其全量运行）；缺省退回
+    ``selected`` 兼容旧调用。强势分析段展示全部 analyzed，连板预测段并列展示每只
+    标的的强势分析结论（双结论）。"""
+    analyzed = analyzed if analyzed is not None else selected
+    r1_by_id = {c.candidate_id: c for c in analyzed}
     out = [render_banners(status=status, failed_batch_ids=failed_batch_ids)]
     out.append("# 打板策略报告\n")
     out.append(
@@ -125,47 +132,69 @@ def render_summary_md(
     if lgb_section:
         out.append(lgb_section)
 
-    # ----- 强势初筛 -----
-    out.append(f"\n## 强势初筛入选（{len(selected)}/{len(bundle.candidates)}）\n")
-    if selected:
-        out.append("| Rank | Code | Name | T收盘 (元) | Score | LGB | Level | Theme/Industry | Rationale |\n")
-        out.append("|------|------|------|-----------|-------|----:|-------|----------------|-----------|\n")
-        for i, c in enumerate(selected, 1):
+    # ----- 强势标的分析（v0.18：全量分析，不再过滤；★=强势推荐建议） -----
+    n_recommended = sum(1 for c in analyzed if c.selected)
+    out.append(
+        f"\n## 强势标的分析（分析 {len(analyzed)}/{len(bundle.candidates)} 只，"
+        f"强势推荐 {n_recommended} 只 ★，全部进入连板预测）\n"
+    )
+    if analyzed:
+        out.append("| Rank | ★ | Code | Name | T收盘 (元) | Score | LGB | Level | Theme/Industry | Rationale |\n")
+        out.append("|------|---|------|------|-----------|-------|----:|-------|----------------|-----------|\n")
+        for i, c in enumerate(
+            sorted(analyzed, key=lambda x: (-float(x.score), x.ts_code)), 1
+        ):
             theme = _industry_for(c.candidate_id, bundle.candidates)
+            star = "★" if c.selected else ""
             out.append(
-                f"| {i} | `{c.ts_code}` | {c.name} | {_close_for(c.candidate_id, bundle.candidates)} | "
+                f"| {i} | {star} | `{c.ts_code}` | {c.name} | {_close_for(c.candidate_id, bundle.candidates)} | "
                 f"{c.score:.1f} | {_lgb_cell(c.candidate_id, bundle.candidates)} | {c.strength_level} | {theme} | {c.rationale} |\n"
             )
     else:
         out.append("_(本轮无强势标的)_\n")
 
-    # ----- 连板预测 / 全局重排 -----
+    # ----- 连板预测（双结论：强势分析结论 ‖ 连板预测结论） -----
+    def _r1_cols(cid: str) -> str:
+        r1 = r1_by_id.get(cid)
+        if r1 is None:
+            return " — | — |"
+        star = "★" if r1.selected else ""
+        return f"{r1.score:.1f}{star} {r1.strength_level} | {r1.rationale} |"
+
     if predictions:
         if final_ranking is not None:
-            out.append("\n## 次日连板预测（按 final_rank 排序）\n")
-            out.append("| # | Code | Name | T收盘 (元) | LGB | Final Pred | Conf. | Δ vs batch | Reason |\n")
-            out.append("|---|------|------|-----------|----:|-----------|-------|-----------|--------|\n")
+            out.append("\n## 次日连板预测（按 final_rank 确定性排序；双结论）\n")
+            out.append(
+                "| # | Code | Name | T收盘 (元) | LGB | 强势分析(分/级) | 强势理由 | "
+                "连板分(Pred/Conf) | 连板理由 |\n"
+            )
+            out.append("|---|------|------|-----------|----:|----------------|---------|------------------|---------|\n")
+            pred_by_id = {p.candidate_id: p for p in predictions}
             for fi in sorted(final_ranking.finalists, key=lambda f: f.final_rank):
+                p = pred_by_id.get(fi.candidate_id)
+                cont_rationale = p.rationale if p else ""
                 out.append(
                     f"| {fi.final_rank} | `{fi.ts_code}` | "
                     f"{_name_for(fi.candidate_id, predictions)} | "
                     f"{_close_for(fi.candidate_id, bundle.candidates)} | "
                     f"{_lgb_cell(fi.candidate_id, bundle.candidates)} | "
-                    f"{fi.final_prediction} | {fi.final_confidence} | "
-                    f"{fi.delta_vs_batch} | {fi.reason_vs_peers} |\n"
+                    f"{_r1_cols(fi.candidate_id)} "
+                    f"{fi.final_prediction}/{fi.final_confidence} | {cont_rationale} |\n"
                 )
         else:
-            out.append("\n## 次日连板预测（单批）\n")
-            out.append("| Rank | Code | Name | T收盘 (元) | Score | LGB | Conf. | Pred | Rationale |\n")
-            out.append("|------|------|------|-----------|-------|----:|-------|------|-----------|\n")
+            out.append("\n## 次日连板预测（单批；双结论）\n")
+            out.append(
+                "| Rank | Code | Name | T收盘 (元) | LGB | 强势分析(分/级) | 强势理由 | "
+                "连板分 | Pred/Conf | 连板理由 |\n"
+            )
+            out.append("|------|------|------|-----------|----:|----------------|---------|------:|----------|---------|\n")
             for p in sorted(predictions, key=lambda x: x.rank):
                 out.append(
                     f"| {p.rank} | `{p.ts_code}` | {p.name} | "
                     f"{_close_for(p.candidate_id, bundle.candidates)} | "
-                    f"{p.continuation_score:.1f} | "
                     f"{_lgb_cell(p.candidate_id, bundle.candidates)} | "
-                    f"{p.confidence} | "
-                    f"{p.prediction} | {p.rationale} |\n"
+                    f"{_r1_cols(p.candidate_id)} "
+                    f"{p.continuation_score:.1f} | {p.prediction}/{p.confidence} | {p.rationale} |\n"
                 )
     else:
         out.append("\n## 次日连板预测\n_(本轮无候选标的)_\n")
@@ -192,6 +221,7 @@ def write_report(
     failed_batch_ids: list[str] | None = None,
     debate_results: list[ProviderDebateResult] | None = None,
     input_fingerprint: str | None = None,
+    analyzed: list[StrongCandidate] | None = None,
 ) -> tuple[Path, str | None]:
     """Write the report directory and return ``(path, json_error)``.
 
@@ -209,6 +239,9 @@ def write_report(
     """
     root = (reports_root or paths.reports_dir()) / str(run_id)
     root.mkdir(parents=True, exist_ok=True)
+
+    # v0.18 — 强势分析覆盖全部候选；``analyzed`` 缺省退回 ``selected`` 兼容旧调用。
+    analyzed_all = analyzed if analyzed is not None else selected
 
     # 1. summary.md
     if debate_results:
@@ -228,6 +261,7 @@ def write_report(
             final_ranking=final_ranking,
             failed_batch_ids=failed_batch_ids,
             input_fingerprint=input_fingerprint,
+            analyzed=analyzed_all,
         )
     (root / "summary.md").write_text(md, encoding="utf-8")
 
@@ -247,6 +281,7 @@ def write_report(
                 final_ranking=final_ranking,
                 failed_batch_ids=failed_batch_ids,
                 run_id=str(run_id),
+                analyzed=analyzed_all,
             )
             (root / "summary.json").write_text(
                 report_obj.model_dump_json(by_alias=True, indent=2),
@@ -258,9 +293,11 @@ def write_report(
                 "build_strategy_report failed for run %s: %s", run_id, json_exc
             )
 
-    # 2. round1_strong_targets.json
+    # 2. round1_strong_targets.json — v0.18: 全部强势分析裁决（含 selected 建议标签）
     (root / "round1_strong_targets.json").write_text(
-        json.dumps([s.model_dump(mode="json") for s in selected], ensure_ascii=False, indent=2),
+        json.dumps(
+            [s.model_dump(mode="json") for s in analyzed_all], ensure_ascii=False, indent=2
+        ),
         encoding="utf-8",
     )
 
@@ -327,19 +364,21 @@ def write_report(
         for r in debate_results:
             pdir = debate_dir / r.provider
             pdir.mkdir(parents=True, exist_ok=True)
-            if r.r1_result and r.r1_result.selected:
+            # v0.18 — 修正属性名（原 r.r1_result / r.r2_result 实际并不存在，会触发
+            # AttributeError）；round1 改为导出全部强势分析裁决（analyzed）。
+            if r.screening_result and r.screening_result.analyzed:
                 (pdir / "round1_strong_targets.json").write_text(
                     json.dumps(
-                        [s.model_dump(mode="json") for s in r.r1_result.selected],
+                        [s.model_dump(mode="json") for s in r.screening_result.analyzed],
                         ensure_ascii=False,
                         indent=2,
                     ),
                     encoding="utf-8",
                 )
-            if r.r2_result and r.r2_result.predictions:
+            if r.prediction_result and r.prediction_result.predictions:
                 (pdir / "round2_initial.json").write_text(
                     json.dumps(
-                        [p.model_dump(mode="json") for p in r.r2_result.predictions],
+                        [p.model_dump(mode="json") for p in r.prediction_result.predictions],
                         ensure_ascii=False,
                         indent=2,
                     ),
@@ -441,10 +480,13 @@ def render_debate_summary_md(
 
     # ----- §1 参与 LLM 状态 ------------------------------------------------
     out.append("\n## 1. 参与 LLM 状态\n\n")
-    out.append("| Provider | 初筛入选 | 预测产出 | 预测失败批 | 全局重排 | 辩论修订 | Error |\n")
+    out.append("| Provider | 强势分析(推荐) | 预测产出 | 预测失败批 | 全局重排 | 辩论修订 | Error |\n")
     out.append("|----------|--------:|--------:|----------:|:--------:|:--------:|-------|\n")
     for r in results:
-        n_screen = len(r.screening_result.selected) if r.screening_result else 0
+        if r.screening_result:
+            n_screen = f"{len(r.screening_result.analyzed)}({len(r.screening_result.selected)}★)"
+        else:
+            n_screen = "0"
         n_pred = len(r.prediction_result.predictions) if r.prediction_result else 0
         pred_fails = (
             r.prediction_result.failed_batches

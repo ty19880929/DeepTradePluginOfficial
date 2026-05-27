@@ -32,7 +32,9 @@ STAGE_REVISION = "continuation_revision"
 # 示例、注释规则、empty-array 指示）发生语义变化时 bump。Cosmetic 文案修改
 # 不必 bump；任何会改变 LLM 输入语义的改动都必须 bump。
 LLM_SCHEMA_VERSION = "lub-llm-schema-v1"
-PROMPT_TEMPLATE_VERSION = "lub-prompts-v1"
+# v0.18 — 强势分析改为全量分析（不再过滤）；selected 降为建议性「强势推荐」标签。
+# 强势分析 system / user prompt 的 selected 语义随之改变 → bump。
+PROMPT_TEMPLATE_VERSION = "lub-prompts-v2"
 
 
 # P1-L: All stage temperatures default to 0.0.
