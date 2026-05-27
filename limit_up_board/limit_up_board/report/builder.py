@@ -77,16 +77,28 @@ def build_strategy_report(
     failed_batch_ids: list[str] | None = None,
     run_id: str | None = None,
     generated_at: datetime | None = None,
+    analyzed: list[StrongCandidate] | None = None,
 ) -> StrategyReportSchema:
-    """主入口。所有参数与 ``render.write_report`` 对齐。"""
+    """主入口。所有参数与 ``render.write_report`` 对齐。
+
+    v0.18 — ``analyzed`` 是全部强势分析裁决（连板预测对其全量运行）；``selected``
+    现在仅是其中 ``selected==true`` 的「强势推荐」子集（advisory）。为兼容旧调用，
+    ``analyzed`` 缺省时退回 ``selected``。强势分析段展示 ``analyzed`` 全量，连板预测
+    卡片并列展示对应标的的强势分析结论（双结论）。
+    """
     generated_at = generated_at or datetime.now(timezone.utc).astimezone()
     cand_by_id = {c.get("candidate_id"): c for c in bundle.candidates}
+    analyzed = analyzed if analyzed is not None else selected
+    # r1 裁决按 candidate_id 索引，供连板预测卡片并列展示强势分析结论。
+    r1_by_id: dict[str, StrongCandidate] = {c.candidate_id: c for c in analyzed}
+    n_recommended = sum(1 for c in analyzed if c.selected)
 
     return StrategyReportSchema(
         meta=_build_meta(
             status=status,
             bundle=bundle,
-            n_selected=len(selected),
+            n_analyzed=len(analyzed),
+            n_selected=n_recommended,
             n_predictions=len(predictions),
             failed_batch_ids=failed_batch_ids,
             run_id=run_id,
@@ -94,8 +106,10 @@ def build_strategy_report(
         ),
         marketSnapshot=_build_market_snapshot(bundle),
         scoreDistribution=_build_score_distribution(bundle),
-        step2_screening=_build_screening(selected, cand_by_id),
-        step4_prediction=_build_predictions(predictions, final_ranking, cand_by_id),
+        step2_screening=_build_screening(analyzed, cand_by_id),
+        step4_prediction=_build_predictions(
+            predictions, final_ranking, cand_by_id, r1_by_id
+        ),
         filteringDetails=_build_filtering(bundle),
         extras=_build_extras(bundle),
     )
@@ -110,6 +124,7 @@ def _build_meta(
     *,
     status: RunStatus,
     bundle: Round1Bundle,
+    n_analyzed: int,
     n_selected: int,
     n_predictions: int,
     failed_batch_ids: list[str] | None,
@@ -125,6 +140,7 @@ def _build_meta(
         model_version=bundle.lgb_model_id or "disabled",
         counts=Counts(
             initial=len(bundle.candidates),
+            analyzed=n_analyzed,
             selected=n_selected,
             predicted=n_predictions,
         ),
@@ -197,11 +213,17 @@ def _quantile(sorted_arr: list[float], q: float) -> float:
 
 
 def _build_screening(
-    selected: list[StrongCandidate],
+    analyzed: list[StrongCandidate],
     cand_by_id: dict[str | None, dict[str, Any]],
 ) -> list[ScreeningItem]:
+    """强势分析段：展示全部已分析候选（v0.18，不再只列 selected 子集）。
+
+    排序确定性优先 —— 按 ``(-score, ts_code)``，使强者居前且重复运行顺序稳定。
+    ``strongRecommended`` 携带 LLM 的 advisory 推荐标签供前端高亮。
+    """
+    ordered = sorted(analyzed, key=lambda c: (-float(c.score), c.ts_code))
     items: list[ScreeningItem] = []
-    for i, c in enumerate(selected, start=1):
+    for i, c in enumerate(ordered, start=1):
         src = cand_by_id.get(c.candidate_id, {}) or {}
         theme = src.get("industry") or src.get("lu_desc") or ""
         items.append(
@@ -218,6 +240,7 @@ def _build_screening(
                 tags=list(c.risk_flags or []),
                 evidence=list(c.evidence),
                 missingData=list(c.missing_data or []),
+                strongRecommended=bool(c.selected),
             )
         )
     return items
@@ -232,6 +255,7 @@ def _build_predictions(
     predictions: list[ContinuationCandidate],
     final_ranking: FinalRankingResponse | None,
     cand_by_id: dict[str | None, dict[str, Any]],
+    r1_by_id: dict[str, StrongCandidate] | None = None,
 ) -> Step4Prediction:
     """单批用 ``ContinuationCandidate.rank``，多批用 ``FinalRankingResponse.finalists[].final_rank``。
 
@@ -255,12 +279,14 @@ def _build_predictions(
         "avoid": [],
     }
 
+    r1_by_id = r1_by_id or {}
     for p in predictions:
         fr = final_map.get(p.candidate_id)
         pred_key = (fr["final_prediction"] if fr else p.prediction) or p.prediction
         conf_en = (fr["final_confidence"] if fr else p.confidence) or p.confidence
         effective_rank = (fr["final_rank"] if fr else p.rank) if multi_batch else p.rank
         src = cand_by_id.get(p.candidate_id, {}) or {}
+        r1 = r1_by_id.get(p.candidate_id)
 
         card = PredictionCard(
             rank=int(effective_rank),
@@ -279,6 +305,11 @@ def _build_predictions(
             batchLocalRank=int(p.rank) if multi_batch else None,
             deltaVsBatch=(fr["delta_vs_batch"] if multi_batch and fr else None),
             reasonVsPeers=(fr["reason_vs_peers"] if multi_batch and fr else None),
+            # v0.18 — 并列展示强势分析结论（双结论）
+            strongScore=float(r1.score) if r1 else None,
+            strongLevel=to_strength_zh(r1.strength_level) if r1 else None,  # type: ignore[arg-type]
+            strongRationale=r1.rationale if r1 else None,
+            strongRecommended=bool(r1.selected) if r1 else False,
         )
         groups.setdefault(pred_key, []).append(card)
 

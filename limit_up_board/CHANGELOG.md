@@ -4,6 +4,48 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.18.0 — 2026-05-27 — 强势筛选→强势分析（全量进连板预测）+ 数据层确定性 + 双结论展示
+
+应用户反馈："相同交易日、相同 LGB 模型、相同因子连续执行，连板预测结果每次都有
+差异"。排查两次同日报告（`data_snapshot.json` 逐字段 diff）定位到不确定性主要在
+**LLM 上游**，按影响排序：
+
+1. **数据层特征漂移（主因）**：`data._fetch_history_window` 逐交易日抓 `daily`，
+   对瞬时返回空的交易日 `continue` 静默丢弃，且空结果不写缓存（→ 每次重抓、结果
+   可能不同）。这使 `daily_df` 近端窗口成员在两次运行间漂移 —— 同一交易日两次运行
+   `ma10` 34/34、`ma20` 33/34、`ma5` 31/34 候选都不同，`lgb_score` 随之变化。
+   结果是 `prompt_hash` 每次都变 → 框架 LLM replay 缓存永远 miss → 每次真打 LLM。
+2. **漏斗放大**：强势分析阶段同时打分 + 筛选，仅 `selected==true` 进入连板预测；
+   打分噪声（同一只 55 vs 70）使入选集 17 vs 28，连板预测看到完全不同的票池。
+3. **LLM 采样噪声**：deepseek-v4-pro 即便 temp=0 仍非完全确定（次要）。
+
+### Fixed — 数据层确定性
+
+- **`data._fetch_history_window` 不再静默丢日**：新增 `retry_empty_days`，对 `daily`
+  这类必需 API 的空交易日做一次 `force_sync=True` 重取（把该日写进 immutable 缓存，
+  使后续运行命中冻结缓存），返回 `(frame, missing_days)`；`collect_round1` 把 `daily`
+  窗口的残余缺口写入 `data_unavailable`（`daily_window_gap: …`），漂移从「静默+抖动」
+  变为「确定+可见」。`lgb.dataset` 同步该行为，保持 train/serve 一致。
+
+### Changed — 强势分析不再过滤（全量进连板预测）+ 确定性全局重排
+
+- **连板预测对全部已分析候选运行**（`RoundResult.analyzed`）：`run_prediction` 入参
+  `selected` 更名为 `candidates`；runner 单 LLM / 辩论两条路径都改为传 `analyzed`。
+  候选集自此在重复运行间稳定，消除漏斗放大。
+- **`selected` 降为建议性「强势推荐」标签**（advisory）：强势分析 system / user prompt
+  相应改写（`PROMPT_TEMPLATE_VERSION` → `lub-prompts-v2`），不再用于淘汰候选。
+- **Step 4.5 全局重排改为确定性**：`build_final_ranking_deterministic` 按
+  `(-continuation_score, ts_code)` 排序合并多批结果，**不再调用 LLM**（移除第二个
+  采样噪声源）；`run_final_ranking` 不再接收 `llm`。
+
+### Changed — 报告双结论展示
+
+- summary.md 强势分析段展示**全部已分析候选**（★ 标记强势推荐），连板预测段并列展示
+  每只标的的**强势分析结论（分/级/理由）‖ 连板预测结论（分/Pred/Conf/理由）**。
+- summary.json：`Counts.analyzed` 新增；`ScreeningItem.strongRecommended`、
+  `PredictionCard.{strongScore,strongLevel,strongRationale,strongRecommended}` 新增
+  （纯增量字段）。`round1_strong_targets.json` 改为导出全部强势分析裁决。
+
 ## v0.16.3 — 2026-05-26 — 候选筛选剔除明细从「前 3 只」改为全量
 
 应用户反馈：summary.md / summary.json 此前只记录进入强势标的筛选前被剔除的

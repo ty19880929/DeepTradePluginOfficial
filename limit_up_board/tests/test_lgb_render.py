@@ -178,9 +178,9 @@ def test_summary_md_r2_table_has_lgb_column() -> None:
         predictions=_make_predictions(),
         final_ranking=None,
     )
-    # Both the 连板预测 single-batch header row and the body should mention LGB
-    assert "Pred | Rationale" in md
-    # The candidate's LGB cell is 73 (d8) → present in 强势初筛 + 连板预测 rows
+    # v0.18 双结论：单批连板预测表头含 强势分析 + 连板列
+    assert "Pred/Conf | 连板理由" in md
+    # The candidate's LGB cell is 73 (d8) → present in 强势分析 + 连板预测 rows
     assert md.count("73 (d8)") >= 2
 
 

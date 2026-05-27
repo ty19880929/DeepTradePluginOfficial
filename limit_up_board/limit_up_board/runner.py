@@ -52,7 +52,6 @@ from .pipeline import (
     run_final_ranking,
     run_prediction,
     run_screening,
-    select_finalists,
 )
 from .prompts import assign_peer_labels
 from .render import export_llm_calls, render_terminal_summary, write_report
@@ -772,12 +771,15 @@ class LubRunner:
             yield ev
             if res is not None:
                 screening_result = res
+        # v0.18 — 强势分析不再过滤：``selected`` 仅作"强势推荐"建议标签，连板预测
+        # 对 ``analyzed``（全部候选）运行，使候选集在重复运行间稳定。
+        analyzed = screening_result.analyzed if screening_result else []
         selected = screening_result.selected if screening_result else []
-        if not selected:
-            yield from self._emit_empty_report(bundle, params, reason="强势初筛后无候选股")
+        if not analyzed:
+            yield from self._emit_empty_report(bundle, params, reason="强势分析后无候选股")
             return
 
-        # Step 4 — 连板预测
+        # Step 4 — 连板预测（对全部已分析候选运行）
         # v0.12.4 (P1-2)：空数组兜底策略由 lub_cfg 驱动；schema 内的
         # ``model_validator`` 通过 ContextVar 读取此策略，决定 repair / degraded /
         # fallback 三种行为。
@@ -785,7 +787,7 @@ class LubRunner:
         with apply_empty_array_policy(lub_cfg.empty_array_policy):
             for ev, res in run_prediction(
                 llm=self._llm,
-                selected=selected,
+                candidates=analyzed,
                 bundle=bundle,
                 preset=preset,
                 lgb_min_score_floor=lgb_floor,
@@ -796,17 +798,14 @@ class LubRunner:
                     prediction_result = res
         predictions = prediction_result.predictions if prediction_result else []
 
-        # Step 4.5 — final_ranking when 连板预测 was multi-batch
+        # Step 4.5 — 确定性全局重排 when 连板预测 was multi-batch (v0.18：不再调用 LLM)
         final_obj: FinalRankingResponse | None = None
         final_ranking_attempted = False
         if prediction_result and prediction_result.success_batches > 1 and predictions:
             final_ranking_attempted = True
-            finalists = select_finalists(predictions, batch_size_hint=prediction_result.batch_size or 20)
             for ev, fr_obj in run_final_ranking(
-                llm=self._llm,
                 bundle=bundle,
-                finalists=finalists,
-                preset=preset,
+                predictions=predictions,
             ):
                 yield ev
                 if fr_obj is not None:
@@ -821,7 +820,7 @@ class LubRunner:
         if final_ranking_attempted and final_obj is None:
             terminal_status = RunStatus.PARTIAL_FAILED
 
-        _write_stage_results(rt, "r1", selected)
+        _write_stage_results(rt, "r1", analyzed)
         _write_stage_results(rt, "r2", predictions)
         if final_obj is not None:
             _write_stage_results(rt, "final_ranking", final_obj.finalists)
@@ -843,6 +842,7 @@ class LubRunner:
             final_ranking=final_obj,
             failed_batch_ids=failed_batches or None,
             input_fingerprint=rt.input_fingerprint,
+            analyzed=analyzed,
         )
         export_llm_calls(rt.run_id, rt.db)
         json_path = report_path / "summary.json"
@@ -1015,9 +1015,9 @@ class LubRunner:
 
             # Persist phase-A stage results
             for r in provider_results:
-                if r.screening_result and r.screening_result.selected:
+                if r.screening_result and r.screening_result.analyzed:
                     _write_stage_results(
-                        rt, f"r1:{r.provider}", r.screening_result.selected,
+                        rt, f"r1:{r.provider}", r.screening_result.analyzed,
                         llm_provider=r.provider,
                     )
                 if r.prediction_result and r.prediction_result.predictions:
@@ -1879,12 +1879,13 @@ def _worker_phase_a(
                 events.append(ev)
                 if res is not None:
                     out.screening_result = res
-            selected = out.screening_result.selected if out.screening_result else []
+            # v0.18 — 连板预测对全部已分析候选运行（不再过滤到 selected 子集）。
+            analyzed = out.screening_result.analyzed if out.screening_result else []
 
-            if selected:
+            if analyzed:
                 with apply_empty_array_policy(empty_array_policy):  # type: ignore[arg-type]
                     for ev, res in run_prediction(
-                        llm=llm, selected=selected, bundle=bundle, preset=preset,
+                        llm=llm, candidates=analyzed, bundle=bundle, preset=preset,
                         lgb_min_score_floor=lgb_min_score_floor,
                         include_decile=include_decile,
                     ):
@@ -1894,11 +1895,8 @@ def _worker_phase_a(
 
             if out.prediction_result and out.prediction_result.success_batches > 1 and out.prediction_result.predictions:
                 out.final_attempted = True
-                finalists = select_finalists(
-                    out.prediction_result.predictions, batch_size_hint=out.prediction_result.batch_size or 20
-                )
                 for ev, fr_obj in run_final_ranking(
-                    llm=llm, bundle=bundle, finalists=finalists, preset=preset
+                    bundle=bundle, predictions=out.prediction_result.predictions
                 ):
                     events.append(ev)
                     if fr_obj is not None:

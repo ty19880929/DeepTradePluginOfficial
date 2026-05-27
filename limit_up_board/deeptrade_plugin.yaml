@@ -1,6 +1,6 @@
 plugin_id: limit-up-board
 name: 打板策略
-version: 0.17.0
+version: 0.18.0
 type: strategy
 api_version: "1"
 entrypoint: limit_up_board.plugin:LimitUpBoardPlugin

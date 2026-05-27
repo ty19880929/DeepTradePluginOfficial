@@ -54,6 +54,7 @@ from .prompts import (
 from .schemas import (
     ContinuationCandidate,
     ContinuationResponse,
+    FinalRankItem,
     FinalRankingResponse,
     RevisedContinuationCandidate,
     RevisionResponse,
@@ -160,7 +161,14 @@ class RoundResult:
     failed_batches: int = 0
     candidates_in: int = 0
     candidates_out: int = 0
+    # ``selected`` = the LLM's 强势推荐 (selected==true) — v0.18 KEEPS it as an
+    # advisory label only (highlighted in the report), no longer a hard filter.
+    # ``analyzed`` = EVERY analysed candidate; the 连板预测 stage now runs over
+    # ``analyzed`` so the candidate set is stable across reruns (removing the
+    # funnel-amplification that turned small screening-score noise into a wholly
+    # different prediction pool — see CHANGELOG v0.18).
     selected: list[StrongCandidate] = field(default_factory=list)
+    analyzed: list[StrongCandidate] = field(default_factory=list)
     predictions: list[ContinuationCandidate] = field(default_factory=list)
     final_items: list[Any] = field(default_factory=list)
     # F-L3 — concrete failed batch ordinals (1-based, e.g. ``["3", "5"]``)
@@ -579,6 +587,7 @@ def run_screening(
 
         result.success_batches += 1
         result.candidates_out += len(obj.candidates)
+        result.analyzed.extend(obj.candidates)
         result.selected.extend(c for c in obj.candidates if c.selected)
         yield (
             StrategyEvent(
@@ -597,7 +606,8 @@ def run_screening(
                 type=EventType.LIVE_STATUS,
                 message=(
                     f"[强势标的分析] 第 {i + 1}/{plan.n_batches} 批响应已收到 "
-                    f"(累计入选 {sum(1 for c in result.selected)} 只)"
+                    f"(累计分析 {len(result.analyzed)} 只，其中强势推荐 "
+                    f"{sum(1 for c in result.selected)} 只)"
                 ),
             ),
             None,
@@ -607,7 +617,8 @@ def run_screening(
         StrategyEvent(
             type=EventType.LIVE_STATUS,
             message=(
-                f"[强势标的分析] 完成 — 入选 {len(result.selected)}/{result.candidates_in}"
+                f"[强势标的分析] 完成 — 分析 {len(result.analyzed)}/{result.candidates_in} 只，"
+                f"强势推荐 {len(result.selected)} 只（全部进入连板预测）"
             ),
         ),
         None,
@@ -615,10 +626,11 @@ def run_screening(
     yield (
         StrategyEvent(
             type=EventType.STEP_FINISHED,
-            message="Step 2: 强势初筛",
+            message="Step 2: 强势标的分析",
             payload={
                 "success_batches": result.success_batches,
                 "failed_batches": result.failed_batches,
+                "analyzed": len(result.analyzed),
                 "selected": len(result.selected),
             },
         ),
@@ -649,7 +661,7 @@ def _strip_decile(row: dict[str, Any]) -> dict[str, Any]:
 def run_prediction(
     *,
     llm: LLMClient,
-    selected: list[StrongCandidate],
+    candidates: list[StrongCandidate],
     bundle: Round1Bundle,
     preset: str,
     input_budget: int = DEFAULT_PREDICTION_INPUT_BUDGET,
@@ -658,12 +670,16 @@ def run_prediction(
 ) -> Iterable[tuple[StrategyEvent, RoundResult | None]]:
     """Run 连板预测; multi-batch + 全局重排 if the candidate set exceeds the budget.
 
+    v0.18 — ``candidates`` is the FULL set of analysed 强势 candidates (formerly
+    only the ``selected==true`` subset); each carries its 强势分析 verdict, which
+    ``_prediction_row_from_selected`` threads into the prompt as ``r1_*`` fields.
+
     ``include_decile`` (v0.7 / P2-2) — see ``run_screening`` docstring; same
     semantics applied to the 连板预测 payload + system prompt.
     """
     profile = resolve_profile(preset, STAGE_PREDICTION)
     plan = plan_llm_batches(
-        n_candidates=len(selected),
+        n_candidates=len(candidates),
         input_budget=input_budget,
         output_budget=profile.max_output_tokens,
     )
@@ -674,7 +690,7 @@ def run_prediction(
     yield (
         StrategyEvent(
             type=EventType.LIVE_STATUS,
-            message=f"[连板预测] 待处理 {len(selected)} 只，分 {plan.n_batches} 批提交...",
+            message=f"[连板预测] 待处理 {len(candidates)} 只，分 {plan.n_batches} 批提交...",
         ),
         None,
     )
@@ -682,12 +698,12 @@ def run_prediction(
         StrategyEvent(
             type=EventType.STEP_STARTED,
             message="Step 4: 连板预测",
-            payload={"n_candidates": len(selected), "n_batches": plan.n_batches},
+            payload={"n_candidates": len(candidates), "n_batches": plan.n_batches},
         ),
         None,
     )
 
-    result = RoundResult(candidates_in=len(selected), batch_size=plan.batch_size)
+    result = RoundResult(candidates_in=len(candidates), batch_size=plan.batch_size)
     if plan.n_batches == 0:
         yield (
             StrategyEvent(
@@ -699,15 +715,15 @@ def run_prediction(
         )
         return
 
-    # Build candidate dicts for the prompt (初筛 selected → minimal payload)
+    # Build candidate dicts for the prompt (强势分析 verdict + raw fields → payload)
     payload_rows: list[dict[str, Any]] = [
-        _prediction_row_from_selected(c, bundle.candidates) for c in selected
+        _prediction_row_from_selected(c, bundle.candidates) for c in candidates
     ]
     if not include_decile:
         payload_rows = [_strip_decile(r) for r in payload_rows]
 
     for i in range(plan.n_batches):
-        batch_objs = selected[i * plan.batch_size : (i + 1) * plan.batch_size]
+        batch_objs = candidates[i * plan.batch_size : (i + 1) * plan.batch_size]
         batch_rows = payload_rows[i * plan.batch_size : (i + 1) * plan.batch_size]
         yield (
             StrategyEvent(
@@ -879,100 +895,84 @@ def select_finalists(
     return finalists
 
 
+def build_final_ranking_deterministic(
+    predictions: list[ContinuationCandidate],
+    *,
+    trade_date: str,
+    next_trade_date: str,
+) -> FinalRankingResponse:
+    """Deterministically merge multi-batch 连板预测 into one global ordering.
+
+    v0.18 — replaces the former LLM 全局重排 (Step 4.5). The LLM re-rank was a
+    second sampling-noise source: even with identical batch inputs the reconciled
+    order drifted across reruns. Because each batch already returns a calibrated
+    ``continuation_score``, a stable cross-batch order needs no extra model call —
+    sort every prediction by ``(-continuation_score, ts_code)`` (ts_code as a
+    deterministic tie-breaker) and assign dense ``final_rank`` 1..N. ``final_*``
+    fields mirror each candidate's own 连板预测 verdict (the deterministic merge
+    never upgrades/downgrades a call), so ``delta_vs_batch`` is always ``kept``.
+    """
+    ordered = sorted(predictions, key=lambda c: (-c.continuation_score, c.ts_code))
+    finalists = [
+        FinalRankItem(
+            candidate_id=p.candidate_id,
+            ts_code=p.ts_code,
+            final_rank=i + 1,
+            final_prediction=p.prediction,
+            final_confidence=p.confidence,
+            reason_vs_peers="确定性全局排序：按 continuation_score 降序、ts_code 升序合并多批结果。",
+            delta_vs_batch="kept",
+        )
+        for i, p in enumerate(ordered)
+    ]
+    return FinalRankingResponse(
+        stage=STAGE_FINAL,
+        trade_date=trade_date,
+        next_trade_date=next_trade_date,
+        finalists=finalists,
+    )
+
+
 def run_final_ranking(
     *,
-    llm: LLMClient,
     bundle: Round1Bundle,
-    finalists: list[ContinuationCandidate],
-    preset: str,
+    predictions: list[ContinuationCandidate],
 ) -> Iterable[tuple[StrategyEvent, FinalRankingResponse | None]]:
-    profile = resolve_profile(preset, STAGE_FINAL)
+    """Deterministic Step 4.5 — emit progress events + a globally re-ranked
+    :class:`FinalRankingResponse` covering ALL ``predictions`` (no LLM call)."""
     yield (
         StrategyEvent(
             type=EventType.LIVE_STATUS,
-            message=(
-                f"[全局重排] 合并 {len(finalists)} 只 finalists，等待 LLM 响应..."
-            ),
+            message=f"[全局重排] 确定性合并 {len(predictions)} 只多批预测结果...",
         ),
         None,
     )
     yield (
         StrategyEvent(
             type=EventType.STEP_STARTED,
-            message="Step 4.5: 全局重排（多批合并）",
-            payload={"n_finalists": len(finalists)},
+            message="Step 4.5: 全局重排（确定性合并）",
+            payload={"n_predictions": len(predictions)},
         ),
         None,
     )
 
-    finalist_payload = [_final_row_from_pred(c) for c in finalists]
-    user = final_ranking_user_prompt(
+    obj = build_final_ranking_deterministic(
+        predictions,
         trade_date=bundle.trade_date,
         next_trade_date=bundle.next_trade_date,
-        finalists=finalist_payload,
-        market_context=bundle.market_summary,
     )
-    expected_ids = {f.candidate_id for f in finalists}
-    try:
-        # F-H1 — final_ranking now also checks candidate_id set equality
-        # (previously only `final_rank` 1..N denseness was validated).
-        obj, meta = _complete_with_set_check(
-            llm,
-            system=FINAL_RANKING_SYSTEM,
-            user=user,
-            schema=FinalRankingResponse,
-            profile=profile,
-            expected_ids=expected_ids,
-            output_attr="finalists",
-            envelope_defaults={
-                "stage": STAGE_FINAL,
-                "trade_date": bundle.trade_date,
-                "next_trade_date": bundle.next_trade_date,
-            },
-            stage=STAGE_FINAL,
-        )
-    except (LLMValidationError, LLMTransportError, _SetMismatchError) as e:
-        logger.exception("全局重排 failed")
-        yield (
-            StrategyEvent(
-                type=EventType.VALIDATION_FAILED,
-                level=EventLevel.ERROR,
-                message=f"final_ranking failed: {e}",
-            ),
-            None,
-        )
-        yield (
-            StrategyEvent(
-                type=EventType.STEP_FINISHED,
-                message="Step 4.5: 全局重排（多批合并）",
-                payload={"success": False},
-            ),
-            None,
-        )
-        return
 
-    yield (
-        StrategyEvent(
-            type=EventType.LLM_FINAL_RANK,
-            message="final_ranking complete",
-            payload={
-                "input_tokens": meta["input_tokens"],
-                "output_tokens": meta["output_tokens"],
-            },
-        ),
-        None,
-    )
     yield (
         StrategyEvent(
             type=EventType.LIVE_STATUS,
-            message=f"[全局重排] 完成 — {len(obj.finalists)} 只全局重排完毕",
+            message=f"[全局重排] 完成 — {len(obj.finalists)} 只确定性排序完毕",
         ),
         None,
     )
     yield (
         StrategyEvent(
             type=EventType.STEP_FINISHED,
-            message="Step 4.5: 全局重排（多批合并）",
+            message="Step 4.5: 全局重排（确定性合并）",
             payload={"success": True, "finalists": len(obj.finalists)},
         ),
         obj,

@@ -657,10 +657,20 @@ def collect_round1(
     # lookback (= ma20 + up_count_30d) reliably yields ≥30 trade rows.
     candidate_codes = set(candidates_df["ts_code"].astype(str))
     start_date = _shift_date(trade_date, -(daily_lookback * 2))
-    daily_df = _fetch_history_window(
-        tushare, "daily", start_date, trade_date, candidate_codes, force_sync=force_sync
+    # ``daily`` feeds ma5/ma10/ma20 + up_count_30d, the most determinism-sensitive
+    # features (a single missing trailing day shifts every MA window). Retry empty
+    # days so the immutable cache is repopulated and reruns are stable; surface any
+    # residual gap via data_unavailable (see _fetch_history_window docstring).
+    daily_df, daily_missing = _fetch_history_window(
+        tushare,
+        "daily",
+        start_date,
+        trade_date,
+        candidate_codes,
+        force_sync=force_sync,
+        retry_empty_days=True,
     )
-    daily_basic_df = _fetch_history_window(
+    daily_basic_df, _ = _fetch_history_window(
         tushare,
         "daily_basic",
         start_date,
@@ -669,7 +679,7 @@ def collect_round1(
         force_sync=force_sync,
     )
     mf_start = _shift_date(trade_date, -(moneyflow_lookback + 5))
-    moneyflow_df = _fetch_history_window(
+    moneyflow_df, _ = _fetch_history_window(
         tushare,
         "moneyflow",
         mf_start,
@@ -677,6 +687,16 @@ def collect_round1(
         candidate_codes,
         force_sync=force_sync,
     )
+    if daily_missing:
+        # Loud + deterministic: the trailing-close window has a hole. After the
+        # force_sync retry this should be rare (genuinely unpublished days only),
+        # but when it happens the MAs/动量 features for the affected window are
+        # unreliable — make it visible rather than letting the prompt drift silently.
+        data_unavailable.append(
+            "daily_window_gap: 日线历史窗口缺失交易日 "
+            f"{','.join(daily_missing)}（force_sync 重取后仍空；"
+            "均线/动量特征可能在不同运行间漂移）"
+        )
 
     # 8. Build normalized rows
     bundle.candidates = _build_candidate_rows(
@@ -830,8 +850,13 @@ def _fetch_history_window(
     candidate_codes: set[str],
     *,
     force_sync: bool = False,
-) -> pd.DataFrame:
+    retry_empty_days: bool = False,
+) -> tuple[pd.DataFrame, list[str]]:
     """Fetch (api_name) over [start_date, end_date]; filter to candidates.
+
+    Returns ``(frame, missing_days)`` where ``missing_days`` lists the calendar
+    open-days whose **whole-market** per-date frame came back empty (an anomaly
+    for settled days, distinct from a day that simply had no *candidate* rows).
 
     ⚠ History fetch must loop **per trade-date**, not issue a single all-market
     ``start_date/end_date`` query. Tushare's daily/daily_basic/moneyflow cap a
@@ -843,25 +868,43 @@ def _fetch_history_window(
     pct_chg_Nd_sum/mf_net_5d_sum/...). Querying by ``trade_date=d`` instead caps
     each call at one market-day (≤ market size < 6000) AND each per-date frame is
     ``trade_day_immutable``, so the cache is shared across runs and training days.
+
+    Determinism (v0.18): a whole-market per-date frame that returns empty is NOT
+    cached as ``ok``, so the framework re-fetches it on the next run. A transient
+    upstream blip on a *single* open-day therefore silently dropped that day from
+    one run but not the next — shifting the trailing ``closes[-N:]`` membership and
+    making ma5/ma10/ma20 (and the LGB features / score derived from them, and thus
+    the whole LLM prompt) drift across otherwise-identical reruns. ``retry_empty_days``
+    re-fetches an empty day once with ``force_sync=True`` to repopulate the immutable
+    cache (so subsequent runs hit a frozen row), and any day still empty after the
+    retry is reported via ``missing_days`` so the caller can surface it loudly
+    instead of letting the gap stay invisible.
     """
     cal = TradeCalendar(tushare.call("trade_cal", force_sync=force_sync))
     open_days = cal.range(start_date, end_date)
     if not open_days:
-        return pd.DataFrame()
+        return pd.DataFrame(), []
     frames: list[pd.DataFrame] = []
+    missing_days: list[str] = []
     for d in open_days:
         df = tushare.call(api_name, trade_date=d, force_sync=force_sync)
+        if (df is None or df.empty) and retry_empty_days and not force_sync:
+            # Force a fresh upstream fetch so an ``ok`` row lands in the immutable
+            # cache; future runs then read a frozen value rather than re-rolling
+            # the dice on a transient empty.
+            df = tushare.call(api_name, trade_date=d, force_sync=True)
         if df is None or df.empty:
+            missing_days.append(d)
             continue
         if "ts_code" in df.columns and candidate_codes:
             df = df[df["ts_code"].astype(str).isin(candidate_codes)]
         if not df.empty:
             frames.append(df)
     if not frames:
-        return pd.DataFrame()
+        return pd.DataFrame(), missing_days
     # _index_by_code re-sorts by (ts_code, trade_date) + dedups, so concat order
     # is irrelevant here — we keep ascending date order anyway for readability.
-    return pd.concat(frames, ignore_index=True)
+    return pd.concat(frames, ignore_index=True), missing_days
 
 
 # ---------------------------------------------------------------------------
