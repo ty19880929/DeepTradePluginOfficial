@@ -76,6 +76,9 @@ def test_topk_aggregates_per_day_and_compares_to_baseline() -> None:
     assert m5.delta_hit_rate_pct == round(
         m5.hit_rate_pct - m5.baseline_hit_rate_pct, 2
     )
+    assert m5.delta_hit_rate_ci_low_pct is not None
+    assert m5.delta_hit_rate_ci_high_pct is not None
+    assert m5.reliability_note is not None
 
     # K=10 > n_day → picks compress to 6/day.
     m10 = by_k[10]
@@ -165,6 +168,8 @@ def test_format_evaluate_table_smoke() -> None:
                 hit_rate_pct=40.0, avg_upside_pct=3.4,
                 baseline_hit_rate_pct=30.0, baseline_avg_upside_pct=2.0,
                 delta_hit_rate_pct=10.0, delta_avg_upside_pct=1.4,
+                delta_hit_rate_ci_low_pct=2.0,
+                delta_hit_rate_ci_high_pct=18.0,
             )
         ],
     )
@@ -174,6 +179,43 @@ def test_format_evaluate_table_smoke() -> None:
     # Header / first data row mention K and the deltas
     assert " 5 " in text
     assert "+10.0" in text  # delta hit rate column
+    assert "[+2.0,+18.0]" in text
+
+
+def test_format_evaluate_table_shows_overlap_warning() -> None:
+    result = EvaluateResult(
+        model_id="20260530_1_demo",
+        window_start="20260101",
+        window_end="20260530",
+        label_threshold_pct=9.7,
+        n_samples=120,
+        n_labeled=110,
+        n_positive=33,
+        n_trade_dates=20,
+        auc=0.71,
+        logloss=0.55,
+        topk=[],
+        train_window=("20260115", "20260501"),
+        overlap_trade_dates=10,
+        overlap_metrics={
+            "n_samples": 60,
+            "n_labeled": 55,
+            "n_trade_dates": 10,
+            "auc": 0.8,
+            "logloss": 0.4,
+        },
+        out_of_sample_metrics={
+            "n_samples": 60,
+            "n_labeled": 55,
+            "n_trade_dates": 10,
+            "auc": 0.62,
+            "logloss": 0.7,
+        },
+    )
+    text = format_evaluate_table(result)
+    assert "评估窗口与训练窗口重叠 10 个交易日" in text
+    assert "Overlap subset" in text
+    assert "Out-of-sample subset" in text
 
 
 def test_format_evaluate_table_shows_schema_mismatch() -> None:

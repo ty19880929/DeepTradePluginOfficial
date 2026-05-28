@@ -18,6 +18,7 @@ import json
 import logging
 import subprocess
 import sys
+from dataclasses import asdict
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,7 @@ from .lgb import checkpoint as lgb_checkpoint
 from .lgb import paths as lgb_paths
 from .lgb import registry as lgb_registry
 from .lgb.checkpoint import CheckpointFingerprint, CheckpointMismatch
-from .lgb.dataset import _enumerate_trade_dates, collect_training_window
+from .lgb.dataset import LgbDataset, _enumerate_trade_dates, collect_training_window
 from .lgb.features import FEATURE_NAMES, SCHEMA_VERSION
 from .lgb.registry import ModelRecord, ensure_unique_model_id, insert_model, mint_model_id
 from .lgb.trainer import train_lightgbm
@@ -559,6 +560,91 @@ def _lightgbm_version() -> str | None:
         return None
 
 
+def _subset_lgb_dataset(ds: LgbDataset, mask: Any) -> LgbDataset:
+    return LgbDataset(
+        feature_matrix=ds.feature_matrix.loc[mask].reset_index(drop=True),
+        labels=ds.labels.loc[mask].reset_index(drop=True).astype("Int64"),
+        sample_index=ds.sample_index.loc[mask].reset_index(drop=True),
+        split_groups=ds.split_groups.loc[mask].reset_index(drop=True),
+        schema_version=ds.schema_version,
+        daily_lookback=ds.daily_lookback,
+        moneyflow_lookback=ds.moneyflow_lookback,
+        label_threshold_pct=ds.label_threshold_pct,
+        trade_dates=sorted(
+            set(ds.sample_index.loc[mask, "trade_date"].astype(str).tolist())
+        ),
+    )
+
+
+def _split_oot_dataset(
+    ds: LgbDataset,
+    *,
+    oot_frac: float,
+    embargo_days: int,
+) -> tuple[LgbDataset, LgbDataset | None, list[str], list[str]]:
+    if ds.n_samples == 0:
+        return ds, None, [], []
+    trade_dates = sorted(set(ds.sample_index["trade_date"].astype(str).tolist()))
+    if len(trade_dates) < 3:
+        return ds, None, [], []
+    n_oot = max(1, int(round(len(trade_dates) * oot_frac)))
+    n_oot = min(n_oot, len(trade_dates) - 1)
+    oot_dates = trade_dates[-n_oot:]
+    first_oot_pos = len(trade_dates) - n_oot
+    train_end_pos = first_oot_pos - max(0, embargo_days) - 1
+    if train_end_pos < 0:
+        return ds, None, [], []
+    train_dates = set(trade_dates[: train_end_pos + 1])
+    oot_date_set = set(oot_dates)
+    train_mask = ds.sample_index["trade_date"].astype(str).isin(train_dates).to_numpy()
+    oot_mask = ds.sample_index["trade_date"].astype(str).isin(oot_date_set).to_numpy()
+    train_ds = _subset_lgb_dataset(ds, train_mask)
+    oot_ds = _subset_lgb_dataset(ds, oot_mask)
+    embargoed_dates = trade_dates[train_end_pos + 1:first_oot_pos]
+    return train_ds, oot_ds, oot_dates, embargoed_dates
+
+
+def _lgb_dataset_window(ds: LgbDataset) -> tuple[str, str]:
+    dates = sorted(set(ds.sample_index["trade_date"].astype(str).tolist()))
+    if not dates:
+        return "", ""
+    return dates[0], dates[-1]
+
+
+def _evaluate_oot_result(result: Any, oot_ds: LgbDataset) -> dict[str, Any]:
+    import pandas as pd  # noqa: PLC0415
+
+    from .lgb.calibration import apply_calibrator  # noqa: PLC0415
+    from .lgb.evaluate import _compute_topk_metrics, _safe_auc, _safe_logloss  # noqa: PLC0415
+
+    raw = result.model.predict(oot_ds.feature_matrix.to_numpy(dtype="float64"))
+    scores = apply_calibrator(result.calibrator, raw) if result.calibrator is not None else raw
+    labels = oot_ds.labels.astype("int").to_numpy()
+    eval_df = pd.concat(
+        [
+            oot_ds.sample_index.reset_index(drop=True),
+            pd.Series(scores, name="lgb_score"),
+            oot_ds.labels.reset_index(drop=True).rename("label"),
+        ],
+        axis=1,
+    )
+    return {
+        "auc": _safe_auc(labels, scores),
+        "logloss": _safe_logloss(labels, scores),
+        "topk": [asdict(tk) for tk in _compute_topk_metrics(eval_df, k_values=(5, 10, 20))],
+    }
+
+
+def _load_model_meta(model_id: str) -> dict[str, Any]:
+    meta_path = lgb_paths.models_dir() / lgb_paths.meta_file_name(model_id)
+    if not meta_path.is_file():
+        return {}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 @lgb_app.command("list")
 def cmd_lgb_list() -> None:
     """列出所有已注册的 LightGBM 模型。★ 标记当前 active 的那一行。"""
@@ -632,6 +718,7 @@ def cmd_lgb_info(
                 raise typer.Exit(2)
             model_id = active.model_id
         record = _safe_get_model(db, model_id)
+        meta = _load_model_meta(model_id) if record is not None else {}
         usage = _safe_predictions_usage(db, model_id) if record is not None else None
         recent = (
             _safe_predictions_recent(db, model_id, recent_n)
@@ -658,6 +745,33 @@ def cmd_lgb_info(
         )
     if record.cv_logloss_mean is not None:
         table.add_row("CV logloss", f"{record.cv_logloss_mean:.4f}")
+    if meta.get("cv_scheme"):
+        table.add_row("CV scheme", str(meta.get("cv_scheme")))
+    if meta.get("embargo_days") is not None:
+        table.add_row("embargo_days", str(meta.get("embargo_days")))
+    if meta.get("train_auc") is not None:
+        table.add_row("train_auc (diagnostic)", f"{float(meta['train_auc']):.4f}")
+    if meta.get("train_cv_gap") is not None:
+        table.add_row("train-CV gap", f"{float(meta['train_cv_gap']):.4f}")
+    if meta.get("oot_window"):
+        table.add_row("OOT window", " .. ".join(str(x) for x in meta["oot_window"]))
+    if meta.get("oot_auc") is not None:
+        table.add_row("OOT AUC", f"{float(meta['oot_auc']):.4f}")
+    if meta.get("oot_logloss") is not None:
+        table.add_row("OOT logloss", f"{float(meta['oot_logloss']):.4f}")
+    if meta.get("oot_topk"):
+        topk_bits = []
+        for row in meta["oot_topk"]:
+            if row.get("hit_rate_pct") is None:
+                continue
+            delta = row.get("delta_hit_rate_pct")
+            delta_str = "—" if delta is None else f"{float(delta):+.1f}%"
+            topk_bits.append(
+                f"K={row.get('k')} hit={float(row.get('hit_rate_pct')):.1f}% "
+                f"Δ={delta_str}"
+            )
+        if topk_bits:
+            table.add_row("OOT Top-K", " | ".join(topk_bits))
     table.add_row("feature_count", str(record.feature_count))
     table.add_row("plugin_version", record.plugin_version)
     if record.framework_version:
@@ -725,7 +839,32 @@ def cmd_lgb_info(
 def cmd_lgb_train(
     start: str = typer.Option(..., "--start", help="训练窗口起始日期 YYYYMMDD"),
     end: str = typer.Option(..., "--end", help="训练窗口结束日期 YYYYMMDD"),
-    folds: int = typer.Option(5, "--folds", help="GroupKFold 折数（≥2 才做 CV）"),
+    folds: int = typer.Option(5, "--folds", help="CV 折数（≥2 才做 CV）"),
+    cv_scheme: str = typer.Option(
+        "groupkfold",
+        "--cv-scheme",
+        help="CV 方案：groupkfold / walk_forward / purged",
+    ),
+    embargo_days: int = typer.Option(
+        1,
+        "--embargo-days",
+        help="CV/OOT 与标签 T+1 邻接窗口的交易日隔离带，默认 1",
+    ),
+    oot_frac: float = typer.Option(
+        0.10,
+        "--oot-frac",
+        help="自动预留末尾交易日作为 OOT holdout 的比例，默认 0.10",
+    ),
+    no_oot: bool = typer.Option(
+        False,
+        "--no-oot",
+        help="关闭 OOT holdout（样本接近下限时使用）",
+    ),
+    overfit_gap_threshold: float = typer.Option(
+        0.15,
+        "--overfit-gap-threshold",
+        help="train_auc - cv_auc_mean 超过该值时输出过拟合告警",
+    ),
     no_activate: bool = typer.Option(
         False, "--no-activate", help="训练完成后不切换 active 模型"
     ),
@@ -759,6 +898,15 @@ def cmd_lgb_train(
 
     if start > end:
         typer.echo("✘ --start 必须 ≤ --end")
+        raise typer.Exit(2)
+    if cv_scheme not in ("groupkfold", "walk_forward", "purged"):
+        typer.echo("✘ --cv-scheme 必须是 groupkfold / walk_forward / purged")
+        raise typer.Exit(2)
+    if embargo_days < 0:
+        typer.echo("✘ --embargo-days 必须 ≥ 0")
+        raise typer.Exit(2)
+    if not no_oot and not (0.0 < oot_frac < 0.5):
+        typer.echo("✘ --oot-frac 必须在 (0, 0.5) 之间，或使用 --no-oot")
         raise typer.Exit(2)
 
     db, rt, _ctx = _open_runtime()
@@ -845,12 +993,6 @@ def cmd_lgb_train(
             trade_dates=full_trade_dates,
         )
         ds = ds.filter_labeled()
-        if ds.n_samples < cfg.lgb_train_min_samples:
-            typer.echo(
-                f"✘ labeled samples = {ds.n_samples} < lgb_train_min_samples="
-                f"{cfg.lgb_train_min_samples}（窗口太短或缺 T+1 数据）"
-            )
-            raise typer.Exit(2)
         if ds.n_positive == 0 or ds.n_positive == ds.n_samples:
             typer.echo(
                 f"✘ 标签类别退化（n_positive={ds.n_positive}, n_samples={ds.n_samples}），"
@@ -858,18 +1000,83 @@ def cmd_lgb_train(
             )
             raise typer.Exit(2)
 
+        train_ds = ds
+        oot_ds: LgbDataset | None = None
+        oot_dates: list[str] = []
+        embargoed_dates: list[str] = []
+        if not no_oot:
+            train_ds, oot_ds, oot_dates, embargoed_dates = _split_oot_dataset(
+                ds,
+                oot_frac=oot_frac,
+                embargo_days=embargo_days,
+            )
+            if oot_ds is None or oot_ds.n_samples == 0:
+                typer.echo(
+                    "✘ OOT holdout 无法切分（交易日过少或 embargo 过大）；"
+                    "请放宽窗口或使用 --no-oot"
+                )
+                raise typer.Exit(2)
+            if oot_ds.n_positive == 0 or oot_ds.n_positive == oot_ds.n_samples:
+                typer.echo(
+                    f"⚠ OOT 标签类别退化（n_positive={oot_ds.n_positive}, "
+                    f"n_samples={oot_ds.n_samples}），oot_auc 将不可用"
+                )
+            typer.echo(
+                f"  OOT holdout: {oot_dates[0]}..{oot_dates[-1]} "
+                f"({len(oot_dates)} 个交易日, n={oot_ds.n_samples}); "
+                f"embargo_dates={len(embargoed_dates)}"
+            )
+
+        if train_ds.n_samples < cfg.lgb_train_min_samples:
+            typer.echo(
+                f"✘ labeled samples after OOT = {train_ds.n_samples} "
+                f"< lgb_train_min_samples={cfg.lgb_train_min_samples}"
+                "（窗口太短或缺 T+1 数据；可放宽窗口或使用 --no-oot）"
+            )
+            raise typer.Exit(2)
+        if train_ds.n_positive == 0 or train_ds.n_positive == train_ds.n_samples:
+            typer.echo(
+                f"✘ 训练集标签类别退化（n_positive={train_ds.n_positive}, "
+                f"n_samples={train_ds.n_samples}），无法训练二分类"
+            )
+            raise typer.Exit(2)
+
         typer.echo(
-            f"🚂 训练（folds={folds}, n_samples={ds.n_samples}, "
-            f"n_positive={ds.n_positive}）..."
+            f"🚂 训练（folds={folds}, cv_scheme={cv_scheme}, "
+            f"embargo_days={embargo_days}, n_samples={train_ds.n_samples}, "
+            f"n_positive={train_ds.n_positive}）..."
         )
-        result = train_lightgbm(ds, folds=folds)
+        result = train_lightgbm(
+            train_ds,
+            folds=folds,
+            cv_scheme=cv_scheme,  # type: ignore[arg-type]
+            embargo_days=embargo_days,
+        )
         if result.cv_auc_mean is not None and result.cv_auc_mean < 0.55:
             typer.echo(f"⚠ CV AUC mean = {result.cv_auc_mean:.4f} < 0.55；质量较弱")
+        train_cv_gap = (
+            result.train_auc - result.cv_auc_mean
+            if result.train_auc is not None and result.cv_auc_mean is not None
+            else None
+        )
+        if train_cv_gap is not None and train_cv_gap > overfit_gap_threshold:
+            typer.echo(
+                "⚠ 过拟合迹象：train_auc="
+                f"{result.train_auc:.4f} 显著高于 cv_auc={result.cv_auc_mean:.4f}；"
+                "train_auc 仅作样本内差距诊断，绝不可作为选模指标"
+            )
+
+        oot_metrics: dict[str, Any] | None = None
+        if oot_ds is not None and oot_ds.n_samples > 0:
+            oot_metrics = _evaluate_oot_result(result, oot_ds)
 
         # ---- mint + paths ----
         git_commit = _git_short_commit()
+        train_start, train_end = _lgb_dataset_window(train_ds)
         base_id = mint_model_id(
-            train_end_date=end, schema_version=SCHEMA_VERSION, git_commit=git_commit
+            train_end_date=train_end or end,
+            schema_version=SCHEMA_VERSION,
+            git_commit=git_commit,
         )
         model_id = ensure_unique_model_id(db, base_id)
 
@@ -898,22 +1105,32 @@ def cmd_lgb_train(
         meta: dict[str, Any] = {
             "model_id": model_id,
             "schema_version": SCHEMA_VERSION,
-            "train_window": [start, end],
-            "n_samples": ds.n_samples,
-            "n_positive": ds.n_positive,
+            "train_window": [train_start, train_end],
+            "requested_window": [start, end],
+            "n_samples": train_ds.n_samples,
+            "n_positive": train_ds.n_positive,
             "cv_auc_mean": result.cv_auc_mean,
             "cv_auc_std": result.cv_auc_std,
             "cv_logloss_mean": result.cv_logloss_mean,
+            "cv_scheme": cv_scheme,
+            "embargo_days": embargo_days,
+            "oot_window": [oot_dates[0], oot_dates[-1]] if oot_dates else None,
+            "oot_auc": None if oot_metrics is None else oot_metrics["auc"],
+            "oot_logloss": None if oot_metrics is None else oot_metrics["logloss"],
+            "oot_topk": None if oot_metrics is None else oot_metrics["topk"],
+            "train_auc": result.train_auc,
+            "train_cv_gap": train_cv_gap,
             "feature_count": len(FEATURE_NAMES),
             "feature_names": FEATURE_NAMES,
             "feature_importance_top20": result.feature_importance,
+            "feature_health_suspects": result.feature_health,
             "hyperparams": result.hyperparams,
             "label_threshold_pct": cfg.lgb_label_threshold_pct,
             "git_commit": git_commit,
             "plugin_version": _plugin_version(),
             "framework_version": _framework_version(),
             "lightgbm_version": _lightgbm_version(),
-            "trade_dates_count": len(ds.trade_dates),
+            "trade_dates_count": len(train_ds.trade_dates),
         }
         meta_path.write_text(
             json.dumps(meta, ensure_ascii=False, indent=2),
@@ -925,9 +1142,9 @@ def cmd_lgb_train(
 
             full = pd.concat(
                 [
-                    ds.feature_matrix.reset_index(drop=True),
-                    ds.labels.reset_index(drop=True).rename("label"),
-                    ds.sample_index.reset_index(drop=True),
+                    train_ds.feature_matrix.reset_index(drop=True),
+                    train_ds.labels.reset_index(drop=True).rename("label"),
+                    train_ds.sample_index.reset_index(drop=True),
                 ],
                 axis=1,
             )
@@ -941,10 +1158,10 @@ def cmd_lgb_train(
         record = ModelRecord(
             model_id=model_id,
             schema_version=SCHEMA_VERSION,
-            train_start_date=start,
-            train_end_date=end,
-            n_samples=ds.n_samples,
-            n_positive=ds.n_positive,
+            train_start_date=train_start,
+            train_end_date=train_end,
+            n_samples=train_ds.n_samples,
+            n_positive=train_ds.n_positive,
             cv_auc_mean=result.cv_auc_mean,
             cv_auc_std=result.cv_auc_std,
             cv_logloss_mean=result.cv_logloss_mean,
@@ -973,6 +1190,22 @@ def cmd_lgb_train(
             )
         if result.cv_logloss_mean is not None:
             typer.echo(f"  CV logloss = {result.cv_logloss_mean:.4f}")
+        if result.train_auc is not None:
+            typer.echo(
+                f"  train_auc = {result.train_auc:.4f} "
+                "(样本内诊断，不作为选模指标)"
+            )
+        if oot_metrics is not None:
+            oot_auc = oot_metrics["auc"]
+            oot_logloss = oot_metrics["logloss"]
+            typer.echo(
+                "  OOT AUC = "
+                f"{oot_auc:.4f}" if oot_auc is not None else "  OOT AUC = —"
+            )
+            typer.echo(
+                "  OOT logloss = "
+                f"{oot_logloss:.4f}" if oot_logloss is not None else "  OOT logloss = —"
+            )
         if result.calibration_method:
             typer.echo(
                 f"  Calibrator = {result.calibration_method} "
@@ -985,6 +1218,14 @@ def cmd_lgb_train(
         typer.echo("  Top-10 feature importance:")
         for name, score in result.top_features(10):
             typer.echo(f"    {name:<40} {score:.0f}")
+        if result.feature_health:
+            typer.echo("  候选可疑因子（仅诊断，不自动删列）:")
+            for item in result.feature_health[:10]:
+                typer.echo(
+                    f"    {item['feature']:<40} "
+                    f"gain={item['gain']} missing={item['missing_rate']:.1%} "
+                    f"var={item['variance']} reasons={','.join(item['reasons'])}"
+                )
         typer.echo(f"  file:    {model_path}")
         typer.echo(f"  meta:    {meta_path}")
         if dataset_path is not None:

@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_K_VALUES: tuple[int, ...] = (5, 10, 20)
+TOPK_MIN_STABLE_DAYS: int = 10
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +63,9 @@ class TopKMetrics:
     baseline_avg_upside_pct: float | None  # day-wise mean pct_chg_t1
     delta_hit_rate_pct: float | None
     delta_avg_upside_pct: float | None
+    delta_hit_rate_ci_low_pct: float | None = None
+    delta_hit_rate_ci_high_pct: float | None = None
+    reliability_note: str | None = None
 
 
 @dataclass
@@ -83,6 +87,10 @@ class EvaluateResult:
     schema_version_match: bool = True
     schema_mismatch_detail: str | None = None
     notes: list[str] = field(default_factory=list)
+    train_window: tuple[str, str] | None = None
+    overlap_trade_dates: int = 0
+    overlap_metrics: dict[str, Any] | None = None
+    out_of_sample_metrics: dict[str, Any] | None = None
     # v0.13.1 (P2-2)：--show-calibration 时填充；不开启时为 None / 空。
     # ``brier`` 是 scorer 实际输出（校准过则为校准后）对应的 Brier；
     # ``calibration_method`` 复制自 scorer 加载结果，便于 JSON 消费者识别。
@@ -167,6 +175,7 @@ def evaluate_model(
         logloss=None,
         topk=[],
     )
+    result.train_window = scorer.train_window
 
     if ds.n_samples == 0:
         result.notes.append("collect_training_window returned 0 samples")
@@ -207,6 +216,28 @@ def evaluate_model(
     # ---- Top-K aggregates --------------------------------------------
     result.topk = _compute_topk_metrics(eval_df, k_values=k_values)
 
+    # ---- Train/evaluate window overlap warning -----------------------
+    if scorer.train_window is not None:
+        train_start, train_end = scorer.train_window
+        trade_dates = eval_df["trade_date"].astype(str)
+        overlap_mask = (trade_dates >= train_start) & (trade_dates <= train_end)
+        overlap_dates = sorted(set(trade_dates.loc[overlap_mask].tolist()))
+        result.overlap_trade_dates = len(overlap_dates)
+        if result.overlap_trade_dates > 0:
+            result.notes.append(
+                "评估窗口与训练窗口重叠 "
+                f"{result.overlap_trade_dates} 个交易日，AUC/Top-K 为样本内估计，偏乐观"
+            )
+            result.overlap_metrics = _metrics_for_frame(
+                eval_df.loc[overlap_mask].copy(),
+                k_values=k_values,
+            )
+            out_mask = ~overlap_mask
+            result.out_of_sample_metrics = _metrics_for_frame(
+                eval_df.loc[out_mask].copy(),
+                k_values=k_values,
+            )
+
     # ---- v0.13.1 (P2-2)：可选校准评估 --------------------------------
     if show_calibration and not labeled.empty:
         from .calibration import brier_score, reliability_table  # noqa: PLC0415
@@ -223,6 +254,35 @@ def evaluate_model(
             )
 
     return result
+
+
+def _metrics_for_frame(
+    eval_df: pd.DataFrame, *, k_values: tuple[int, ...]
+) -> dict[str, Any]:
+    labeled = eval_df.dropna(subset=["label", "lgb_score"]).copy()
+    auc = None
+    logloss = None
+    if not labeled.empty:
+        auc = _safe_auc(
+            labeled["label"].astype(int).to_numpy(),
+            labeled["lgb_score"].astype(float).to_numpy(),
+        )
+        logloss = _safe_logloss(
+            labeled["label"].astype(int).to_numpy(),
+            labeled["lgb_score"].astype(float).to_numpy(),
+        )
+    return {
+        "n_samples": int(len(eval_df)),
+        "n_labeled": int(len(labeled)),
+        "n_trade_dates": (
+            int(eval_df["trade_date"].nunique())
+            if "trade_date" in eval_df.columns and not eval_df.empty
+            else 0
+        ),
+        "auc": auc,
+        "logloss": logloss,
+        "topk": [asdict(tk) for tk in _compute_topk_metrics(eval_df, k_values=k_values)],
+    }
 
 
 def _safe_auc(y_true: np.ndarray, y_score: np.ndarray) -> float | None:
@@ -282,6 +342,7 @@ def _compute_topk_metrics(
         upside_pick_count = 0  # for upside avg (some rows have null upside)
         baseline_hit_rates: list[float] = []
         baseline_upsides: list[float] = []
+        day_delta_hit_rates: list[float] = []
         n_days_evaluated = 0
         for _td, group in grouped:
             # Drop NaN scores so they don't end up in top-K via stable sort.
@@ -304,9 +365,11 @@ def _compute_topk_metrics(
             # Day-wise baseline rate over labeled rows
             group_labeled = scored.dropna(subset=["label"])
             if not group_labeled.empty:
-                baseline_hit_rates.append(
-                    float(group_labeled["label"].astype(int).mean())
-                )
+                baseline_rate = float(group_labeled["label"].astype(int).mean())
+                baseline_hit_rates.append(baseline_rate)
+                if not top_labeled.empty:
+                    top_rate = float(top_labeled["label"].astype(int).mean())
+                    day_delta_hit_rates.append((top_rate - baseline_rate) * 100.0)
             group_upsides = pd.to_numeric(
                 scored["pct_chg_t1"], errors="coerce"
             ).dropna()
@@ -327,6 +390,12 @@ def _compute_topk_metrics(
         baseline_avg_upside_pct = (
             float(np.mean(baseline_upsides)) if baseline_upsides else None
         )
+        ci_low, ci_high = _delta_ci(day_delta_hit_rates)
+        reliability_note = (
+            f"样本不足，结论不稳：仅 {n_days_evaluated} 个交易日"
+            if 0 < n_days_evaluated < TOPK_MIN_STABLE_DAYS
+            else None
+        )
 
         out.append(
             TopKMetrics(
@@ -344,9 +413,22 @@ def _compute_topk_metrics(
                 delta_avg_upside_pct=_safe_delta(
                     avg_upside_pct, baseline_avg_upside_pct
                 ),
+                delta_hit_rate_ci_low_pct=ci_low,
+                delta_hit_rate_ci_high_pct=ci_high,
+                reliability_note=reliability_note,
             )
         )
     return out
+
+
+def _delta_ci(day_deltas_pct: list[float]) -> tuple[float | None, float | None]:
+    if len(day_deltas_pct) < 2:
+        return None, None
+    arr = np.asarray(day_deltas_pct, dtype="float64")
+    sem = float(np.std(arr, ddof=1) / np.sqrt(len(arr)))
+    mean = float(np.mean(arr))
+    margin = 1.96 * sem
+    return round(mean - margin, 2), round(mean + margin, 2)
 
 
 def _round_or_none(v: float | None, ndigits: int = 2) -> float | None:
@@ -371,6 +453,11 @@ def format_evaluate_table(result: EvaluateResult) -> str:
         f"LGB evaluate · model={result.model_id or '<none>'} · "
         f"{result.window_start}..{result.window_end}"
     )
+    if result.overlap_trade_dates > 0:
+        lines.append(
+            "⚠ 评估窗口与训练窗口重叠 "
+            f"{result.overlap_trade_dates} 个交易日，AUC/Top-K 为样本内估计，偏乐观"
+        )
     lines.append(
         f"samples={result.n_samples}  labeled={result.n_labeled}  "
         f"positive={result.n_positive}  trade_dates={result.n_trade_dates}  "
@@ -390,19 +477,33 @@ def format_evaluate_table(result: EvaluateResult) -> str:
         lines.append("")
         lines.append("Top-K vs baseline (hit_rate% · avg_upside%):")
         lines.append(
-            " K  | hit%   | up%   | base_hit% | base_up% | Δhit%   | Δup%"
+            " K  | days | picks | hit%   | up%   | base_hit% | Δhit%   | Δhit 95% CI"
         )
-        lines.append("----+--------+-------+-----------+----------+---------+--------")
+        lines.append("----+------+-------+--------+-------+-----------+---------+----------------")
         for tk in result.topk:
+            ci = (
+                f"[{tk.delta_hit_rate_ci_low_pct:+.1f},{tk.delta_hit_rate_ci_high_pct:+.1f}]"
+                if tk.delta_hit_rate_ci_low_pct is not None
+                and tk.delta_hit_rate_ci_high_pct is not None
+                else "—"
+            )
             lines.append(
                 f" {tk.k:2d} | "
+                f"{tk.n_days_evaluated:>4} | "
+                f"{tk.pick_count:>5} | "
                 f"{_fmt(tk.hit_rate_pct, '5.1f'):>6} | "
                 f"{_fmt(tk.avg_upside_pct, '4.2f'):>5} | "
                 f"{_fmt(tk.baseline_hit_rate_pct, '5.1f'):>9} | "
-                f"{_fmt(tk.baseline_avg_upside_pct, '4.2f'):>8} | "
                 f"{_fmt(tk.delta_hit_rate_pct, '+5.1f'):>7} | "
-                f"{_fmt(tk.delta_avg_upside_pct, '+5.2f'):>6}"
+                f"{ci:>14}"
             )
+            if tk.reliability_note:
+                lines.append(f"      note: K={tk.k} {tk.reliability_note}")
+    if result.overlap_metrics is not None:
+        lines.append("")
+        lines.append(_format_window_metrics("Overlap subset", result.overlap_metrics))
+    if result.out_of_sample_metrics is not None:
+        lines.append(_format_window_metrics("Out-of-sample subset", result.out_of_sample_metrics))
     # v0.13.1 (P2-2)：calibration 段（仅 --show-calibration 触发时填充）。
     if result.brier is not None:
         lines.append("")
@@ -444,6 +545,31 @@ def format_evaluate_table(result: EvaluateResult) -> str:
 
 def _is_nan(v: float) -> bool:
     return v != v  # noqa: PLR0124 — IEEE NaN check
+
+
+def _format_window_metrics(title: str, metrics: dict[str, Any]) -> str:
+    auc = metrics.get("auc")
+    logloss = metrics.get("logloss")
+    auc_str = f"{auc:.4f}" if auc is not None else "—"
+    logloss_str = f"{logloss:.4f}" if logloss is not None else "—"
+    line = (
+        f"{title}: samples={metrics.get('n_samples', 0)}  "
+        f"labeled={metrics.get('n_labeled', 0)}  "
+        f"trade_dates={metrics.get('n_trade_dates', 0)}  "
+        f"AUC={auc_str}  logloss={logloss_str}"
+    )
+    topk = metrics.get("topk") or []
+    topk_bits: list[str] = []
+    for row in topk[:3]:
+        hit = row.get("hit_rate_pct")
+        delta = row.get("delta_hit_rate_pct")
+        if hit is None:
+            continue
+        delta_str = "—" if delta is None else f"{float(delta):+.1f}%"
+        topk_bits.append(f"K={row.get('k')} hit={float(hit):.1f}% Δ={delta_str}")
+    if topk_bits:
+        line = f"{line}  Top-K: " + " | ".join(topk_bits)
+    return line
 
 
 def _fmt(v: float | None, spec: str) -> str:

@@ -74,6 +74,7 @@ class _LoadedModel:
     model_id: str
     booster: Any  # lightgbm.Booster
     feature_names: tuple[str, ...]
+    train_window: tuple[str, str] | None = None
     # v0.13.1 (P2-2)：isotonic 校准器实例；None 表示该模型未训练校准器或
     # 校准器加载失败，scorer 返回 raw booster 输出。
     calibrator: Any | None = None
@@ -153,6 +154,10 @@ class LgbScorer:
         ``lgb_score`` 应当被理解为 raw 排序分而非概率。
         """
         return self._loaded.calibration_method if self._loaded is not None else None
+
+    @property
+    def train_window(self) -> tuple[str, str] | None:
+        return self._loaded.train_window if self._loaded is not None else None
 
     @property
     def has_calibrator(self) -> bool:
@@ -359,6 +364,7 @@ class LgbScorer:
             model_id=record.model_id,
             booster=booster,
             feature_names=feat_names,
+            train_window=(record.train_start_date, record.train_end_date),
             calibrator=calibrator,
             calibration_method=calibration_method,
         )

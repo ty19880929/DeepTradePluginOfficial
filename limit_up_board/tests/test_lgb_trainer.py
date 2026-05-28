@@ -186,6 +186,9 @@ class TestFinalFitUsesCvBestIter:
             ) -> list[int]:  # noqa: ARG002
                 return [1] * len(FEATURE_NAMES)
 
+            def predict(self, data: Any) -> np.ndarray:
+                return np.full(len(data), 0.5, dtype="float64")
+
         class _FakeDataset:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 pass
@@ -276,3 +279,41 @@ class TestFinalFitUsesCvBestIter:
 
         assert result.final_num_boost_round == 77
         assert captured[-1]["num_boost_round"] == 77
+
+
+class TestCvSplits:
+    def test_walk_forward_respects_embargo_boundary(self) -> None:
+        ds = _toy_dataset(n_per_day=2, n_days=8)
+        splits = trainer_mod._make_cv_splits(
+            ds,
+            folds=3,
+            cv_scheme="walk_forward",
+            embargo_days=1,
+        )
+        assert splits
+        dates = ds.sample_index["trade_date"].astype(str).to_numpy()
+        ordered = sorted(set(dates.tolist()))
+        pos = {d: i for i, d in enumerate(ordered)}
+        for train_idx, val_idx in splits:
+            max_train = max(pos[d] for d in dates[train_idx])
+            min_val = min(pos[d] for d in dates[val_idx])
+            assert min_val > max_train
+            assert min_val - max_train >= 2
+
+    def test_purged_group_splits_remove_adjacent_train_dates(self) -> None:
+        ds = _toy_dataset(n_per_day=2, n_days=8)
+        splits = trainer_mod._make_cv_splits(
+            ds,
+            folds=4,
+            cv_scheme="purged",
+            embargo_days=1,
+        )
+        assert splits
+        dates = ds.sample_index["trade_date"].astype(str).to_numpy()
+        ordered = sorted(set(dates.tolist()))
+        pos = {d: i for i, d in enumerate(ordered)}
+        for train_idx, val_idx in splits:
+            train_positions = {pos[d] for d in dates[train_idx]}
+            val_positions = {pos[d] for d in dates[val_idx]}
+            for vp in val_positions:
+                assert all(abs(tp - vp) > 1 for tp in train_positions)
