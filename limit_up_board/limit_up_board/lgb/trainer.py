@@ -34,17 +34,23 @@ logger = logging.getLogger(__name__)
 
 
 # 设计文档 §6.3 — v1 默认超参。后续若需调参，请新建 schema_version 并重训。
+# v0.18.3 (因子过拟合优化方案 §3.1)：收敛模型复杂度——
+#   num_leaves 63→31、min_gain_to_split 0→0.02、lambda_l1 0→0.5、lambda_l2 1.0→2.0。
+# 不动 SCHEMA_VERSION（仅超参变更，FEATURE_NAMES 未改）；既有落盘模型按旧
+# hyperparams 继续推理，需重训后 `lgb activate` 才切到新参。
 LGB_PARAMS: dict[str, Any] = {
     "objective": "binary",
     "metric": ["binary_logloss", "auc"],
     "learning_rate": 0.05,
-    "num_leaves": 63,
+    "num_leaves": 31,
     "max_depth": -1,
     "min_data_in_leaf": 80,
+    "min_gain_to_split": 0.02,
     "feature_fraction": 0.85,
     "bagging_fraction": 0.85,
     "bagging_freq": 5,
-    "lambda_l2": 1.0,
+    "lambda_l1": 0.5,
+    "lambda_l2": 2.0,
     "verbosity": -1,
     "is_unbalance": True,
     "deterministic": True,
