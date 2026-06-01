@@ -164,6 +164,27 @@ def build_universe(
     )
 
 
+def build_window_universes(
+    db: Database,
+    trade_dates: tuple[str, ...] | list[str],
+    *,
+    exclude_north_exchange: bool = False,
+) -> dict[str, UniverseSnapshot]:
+    """Convenience: per-day :class:`UniverseSnapshot` keyed by ``trade_date``.
+
+    Metric modules iterate the window's open days and need the per-day
+    universe one at a time (stocks suspend / un-suspend across days). This
+    helper just loops :func:`build_universe`; the underlying SQL hits the
+    same three tables for each call, but each call only does a handful of
+    cheap queries (a few hundred ts_codes in result set), so the loop is
+    well within v0.1's perf budget (§12: < 8s for 60-day metric aggregation).
+    """
+    return {
+        d: build_universe(db, trade_date=d, exclude_north_exchange=exclude_north_exchange)
+        for d in trade_dates
+    }
+
+
 def _scalar(db: Database, sql: str, params: list[object]) -> int:
     row = db.fetchone(sql, params)
     if row is None:

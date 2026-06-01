@@ -306,6 +306,84 @@ def sync_window(
     return res
 
 
+def sync_sector_quotes(
+    rt: MrRuntime,
+    window: Window,
+    *,
+    force_sync: bool = False,
+) -> SyncResult:
+    """Fetch + materialize ``ths_daily`` (per-day full board catalog) and
+    ``dc_index`` (anchor-day only) — §5.2 board-quote rows that PR-2 deferred.
+
+    Split out from :func:`sync_window` because sectors data is consumed only
+    by :mod:`market_review.metrics.sectors`; runs that only need breadth /
+    sentiment / capital / risk metrics can skip this step.
+
+    ``ths_daily`` is the primary source: it returns every同花顺 board's
+    daily line. ``dc_index`` is fetched only for ``window.anchor`` per
+    design §5.2 (东财 mirror exists for互验 spot-checks; persisting full
+    window doubles cost for negligible value).
+
+    Tushare's ``ths_daily`` doesn't accept ``trade_date``; we issue a
+    one-day range query (``start_date=end_date=d``) per open day.
+    """
+    if rt.tushare is None:
+        raise RuntimeError(
+            "MrRuntime.tushare is None; call build_tushare_client(rt) first"
+        )
+    tushare = rt.tushare
+
+    started = datetime.now()
+    res = SyncResult()
+    open_days = list(window.trade_dates)
+
+    for d in open_days:
+        df = tushare.call(
+            "ths_daily",
+            params={"start_date": d, "end_date": d},
+            force_sync=force_sync,
+        )
+        if df is None or df.empty:
+            res.empty_days.setdefault("ths_daily", []).append(d)
+            continue
+        # ths_daily occasionally elides ``trade_date`` when the day-range
+        # is collapsed; back-fill from the loop variable so the PK
+        # (ts_code, trade_date) is always populated.
+        if "trade_date" not in df.columns:
+            df = df.assign(trade_date=d)
+        else:
+            df = df.copy()
+            df["trade_date"] = df["trade_date"].astype(str)
+        n = tushare.materialize(
+            "mr_ths_daily", df, key_cols=["ts_code", "trade_date"],
+        )
+        res.rows_materialized["mr_ths_daily"] = (
+            res.rows_materialized.get("mr_ths_daily", 0) + int(n)
+        )
+
+    # 东财 boards — anchor day only (design §5.2 "仅末日").
+    df = tushare.call(
+        "dc_index",
+        params={"start_date": window.anchor, "end_date": window.anchor},
+        force_sync=force_sync,
+    )
+    if df is not None and not df.empty:
+        if "trade_date" not in df.columns:
+            df = df.assign(trade_date=window.anchor)
+        else:
+            df = df.copy()
+            df["trade_date"] = df["trade_date"].astype(str)
+        n = tushare.materialize(
+            "mr_dc_index", df, key_cols=["ts_code", "trade_date"],
+        )
+        res.rows_materialized["mr_dc_index"] = (
+            res.rows_materialized.get("mr_dc_index", 0) + int(n)
+        )
+
+    res.duration_seconds = (datetime.now() - started).total_seconds()
+    return res
+
+
 # ---------------------------------------------------------------------------
 # Fetch helpers — small functions, all converge on ``tushare.materialize``
 # ---------------------------------------------------------------------------

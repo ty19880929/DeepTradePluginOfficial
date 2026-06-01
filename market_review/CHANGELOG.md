@@ -4,7 +4,74 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## v0.1.0 — Unreleased — 骨架 + 数据层（PR-1, PR-2）
+## v0.1.0 — Unreleased — 骨架 + 数据层 + 指标层（PR-1 ~ PR-3）
+
+### Added (PR-3 指标层 — 设计 §5.3)
+
+新增 `market_review/metrics/` 包，7 个纯只读聚合模块（无 Tushare、无 DB 写）：
+
+- **breadth.py** — 市场宽度（§5.3.1）。`BreadthSnapshot`（n_total / n_up /
+  n_down / n_flat / n_up5pct / n_down5pct / n_limit_up / n_limit_down /
+  n_zhaban / up_ladder / n_lhb / total_amount_yi / index_returns）× 窗口序
+  列；`BreadthReview` 加汇总（median_up_count / strongest&weakest day）。
+- **sentiment.py** — 情绪温度计（§5.3.2）。0-100 thermometer 按 §5.3.2
+  权重（pos_ratio 0.30 + top_ratio 0.20 + limit_up_intensity 0.15 +
+  connection_health 0.10 + crash_ratio_inv 0.10 + lhb_buy_intensity 0.10 +
+  north_inflow 0.05）线性归一化加权；v0.1 用窗内 plausible 参考带替代设计建
+  议的 60 日 robust z-score，self-contained 无需 lookback。
+- **capital.py** — 多口径资金流（§5.3.3）。6 类：NorthFlowRow（每日 + 累
+  计）/ HsgtTopRow（anchor 日 Top10）/ MktFlowRow（大盘主力 vs 散户）/
+  IndustryFlowRow ×2（行业 + 概念，Top/Bottom）/ StockFlowRow（universe
+  内 Top 20 净流入/出）/ LhbFlowRow（每日龙虎榜家数 + 净买）。统一 /1e4
+  万元→亿 转换。
+- **sectors.py** — 板块轮动（§5.3.4）。SectorEntry × today_top / range_top
+  / new_mainline / relay / fading 三栏分类；SectorMatrix（按窗口累计强度
+  排序）。累计强度用 geometric chain（1+r1）(1+r2)... 计算更准。
+- **leaders.py** — 龙头识别（§5.3.5）。4 维交叉打分（每维 0-25）：梯队
+  log₂ 归一 + 涨幅百分位 + 资金百分位 + 题材命中。候选池 = 连板≥2 ∪
+  Top-50 累涨。Primary（Top-K=5）+ Secondary（Top-K=10）+ 板块映射。
+- **style.py** — 风格切换（§5.3.6）。沪深 300 vs 中证 1000 大小盘
+  proxy；dominant_style 分类（large_cap / small_cap / balanced / rotating）
+  按 ±2pp 阈值；flip_signal 用前/后半段 big_to_small_ratio 符号反转判定。
+- **risk.py** — 风险信号（§5.3.7）。8 类：high_position_drop /
+  stagnant_on_high_volume / index_volume_divergence / north_capital_outflow /
+  limit_down_spread / block_trade_discount / margin_balance_swing /
+  yaog_topping。每条 RiskSignal(triggered/severity/detail/affected_samples)。
+
+新增 `data.sync_sector_quotes(rt, window)` — 数据层扩展，per-day 拉
+`ths_daily`（同花顺所有板块）+ anchor 日拉 `dc_index`（东财备份），落
+`mr_ths_daily` / `mr_dc_index`。`ths_daily` 不接受 `trade_date` 参数所以
+用 `start_date=end_date=d` 单日 range 代替。
+
+新增 `universe.build_window_universes(db, trade_dates)` 多日 universe 字典
+辅助，metric 模块按日迭代时使用。
+
+### Added (PR-3 测试 — 36 个新增，全套 92 passed)
+
+- `test_metrics_breadth.py` (5) — 涨跌家数 / 涨停连板 / 指数收益 / 极值
+  日 / amount 千元→亿换算。
+- `test_metrics_sentiment.py` (6) — 0-100 边界 / 权重和=1 校验 / 缺键 /
+  万元→亿 / 极值日 / 空 universe 零快照。
+- `test_metrics_capital.py` (7) — 空入轴 / 万元→亿 / anchor-only Top10 /
+  行业 Top&Bottom / universe 过滤 / LHB 每日 / 大盘主力 vs 散户。
+- `test_metrics_sectors.py` (6) — 空入 / today_top 排序 / range_top
+  geometric chain / persistence 计数 / 三栏分类 / matrix 排序。
+- `test_metrics_leaders.py` (6) — ladder log₂ 归一 / 空 universe / 候选
+  池并集 / score_breakdown 4 键 / min_score 过滤 / sector_map 填充。
+- `test_metrics_style.py` (6) — 空入 / 大盘主导 / 小盘主导 / balanced /
+  flip 信号 / 创业板增长指数序列携带。
+- `test_metrics_risk.py` (5) — 8 个信号都生成 / 妖股见顶触发 / 跌停扩散
+  critical 阈值 / 北向 outflow warning / 指数量价背离。
+
+### Modified
+
+- `data.py` — 新增 `sync_sector_quotes()` 函数（沿用 PR-2 内 helper 风格）。
+- `universe.py` — 新增 `build_window_universes()` 辅助。
+
+### Bug fixes during PR-3
+
+- `risk._index_volume_divergence` 调用方误传 `db` 位置参数（函数只接收
+  `breadth` 关键字），编写时漏过 type-check；通过 risk 测试发现并修复。
 
 ### Added (PR-2 数据层 — 设计 §3 / §5.2)
 
