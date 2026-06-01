@@ -4,7 +4,60 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## v0.1.0 — Unreleased — 骨架 + 数据层 + 指标层（PR-1 ~ PR-3）
+## v0.1.0 — Unreleased — 骨架 + 数据层 + 指标层 + LLM 层（PR-1 ~ PR-4）
+
+### Added (PR-4 LLM section — 设计 §5.4 + §15.5)
+
+完整化 `market_review/schemas.py` —— 7 个 section pydantic 模型 + 共用基类
+（`EvidenceItem` / `Finding` / `SectionBase` / `HeadlineMetric`）。所有模型
+`model_config=ConfigDict(extra="forbid", populate_by_name=True,
+alias_generator=_camel)`，Python 端用 snake_case，LLM JSON 线材用 camelCase
+（`narrativeMd` / `headlineMetrics` 等，设计 §15.1 约定）。
+
+新增 `market_review/prompts.py` —— 7 个 section system prompt + user prompt
+构造器 + 共享 `HARD_DISCIPLINE` 段（设计 §5.4.2 六条硬性纪律）。`build_*`
+函数接受 PR-3 metric dataclass，通过 deterministic compact JSON 序列化
+（`sort_keys=True, separators=(",",":")`，prompt_hash 稳定）。`prev_context`
+机制把 overview 的 marketTone + themeTags 注入 §2..§7（设计 §5.4.4 论调一致）。
+
+新增 `market_review/pipeline.py` —— `MetricsBundle` 把 7 个 PR-3 review +
+window 打包；`run_sections(rt, bundle)` 按 `SECTION_ORDER` 顺序串行调用
+`LLMClient.complete_json`。每节捕 Exception 容错（设计 §11.3 per-section 隔
+离），失败 section 用 placeholder 实例（market_tone="未知" / 假设题占位）+
+error 字符串，不阻断后续 section。Profile 默认 `thinking=False,
+reasoning_effort=medium, temperature=0.3, max_output_tokens=16384`。
+`input_fingerprint` 透传到每个 complete_json 调用以驱动 LLM replay 缓存。
+
+新增 `market_review/render.py` —— 7 个 per-section markdown 渲染器 +
+summary.md 顶层渲染 + 本地审计写入：
+- `render_section_md(section, result)` 按 section 类型选择模板：overview
+  含 headline_metrics 表 + theme_tags；sectors 含三栏分类 + Top 表；
+  sentiment 含每日温度表；capital 含北向 + 行业 + 个股 + LHB 亮点；
+  leaders 含 4 维 score_breakdown 列；style 含 dominant_style + flip +
+  range_summary；risk_outlook 含信号表 + 展望假设 + watch / fail 列。
+- `render_summary_md(run_id, window, results)` 顶层一句话结论 + 章节链接 +
+  PARTIAL 横幅（当任一 section 失败时）。
+- `write_section_files()` / `write_summary_md()` 文件写入。
+- `dump_metrics_json()` PR-3 dataclass → metrics.json 本地审计。
+- `dump_llm_calls_audit()` per-section meta（latency_ms/prompt_hash/error）→
+  llm_calls.jsonl。
+
+### Added (PR-4 测试 — 57 个新增，全套 149 passed)
+
+- `test_schemas.py` (16) — pydantic 校验 + camelCase alias 往返 +
+  extra="forbid" 触发 + 各 section 必填字段 + Literal 约束。
+- `test_prompts.py` (14) — 硬性纪律六规则全列 + system prompt 拼接 +
+  prev_context 注入 / 省略 + JSON 解析合法 + deterministic 输出。
+- `test_pipeline.py` (9) — FakeLLM 记录调用 + 7 节顺序 + schema 配对 +
+  input_fingerprint 透传 + theme_tags 注入下游 + overview 失败下游容错 +
+  单节失败隔离 + meta / SectionResult 完整。
+- `test_render.py` (18) — 每节 md 包含核心字段 + 错误横幅 + summary 章节链
+  + PARTIAL 横幅 + 文件写入 + JSON 序列化 + 审计 JSONL 行数。
+
+### Modified
+
+- `schemas.py` 从 PR-1 占位（SCHEMA_VERSION + Literal 别名）扩展到完整 7
+  section + 共用基类（~280 行）；保留 SCHEMA_VERSION 兼容。
 
 ### Added (PR-3 指标层 — 设计 §5.3)
 
