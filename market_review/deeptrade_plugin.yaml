@@ -109,7 +109,7 @@ tables:
 migrations:
   - version: "20260601_001"
     file: migrations/20260601_001_init.sql
-    checksum: "sha256:8b2bf1b4a8a6ff4f0026a5fa637156ce049561f2bd9ef8b43d4776f6162d6f2d"
+    checksum: "sha256:7e93bbc1dad313953fd28fd50c01455ccda8c88e373e79049d014f97d3f3e132"
   - version: "20260601_002"
     file: migrations/20260601_002_config.sql
     checksum: "sha256:63d05322b05eb26efcd52f1da1f3cda2106b81f152ba2e169741875d938e7328"

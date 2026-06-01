@@ -1,7 +1,6 @@
 -- market-review strategy: full plugin schema (Plan A pure isolation).
--- Tables defined here back the v0.1.0 data layer; field shapes follow
--- design §9.1 ~ §9.10 of MARKET_REVIEW_DESIGN.md. Every table is prefixed
--- ``mr_`` per design §2.4 / §14.3.
+-- Field shapes follow MARKET_REVIEW_DESIGN.md sections 9.1 through 9.10.
+-- Every table is prefixed mr_ per design sections 2.4 / 14.3.
 
 -- ---------------------------------------------------------------
 -- §9.1  Universe / calendar / exclusions
