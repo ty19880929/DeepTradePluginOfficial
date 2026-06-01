@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..schemas import (
@@ -400,6 +401,25 @@ def _risk_signal_to_metric(s) -> MetricsRiskSignal:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def write_summary_json(report_dir: Path, report: ReviewReportSchema) -> Path:
+    """Serialize ``report`` to ``<report_dir>/summary.json``.
+
+    The single IO companion to :func:`build_review_report` — kept here so
+    "build" + "persist" live in the same module while the pure-assembly
+    contract above is preserved. Uses ``by_alias=True`` so the JSON wire
+    keys are camelCase per design §15.1.4; ``_extras`` is included
+    explicitly (``exclude_none=False``) since dropping empty containers
+    would erase the design's forward-compat slot.
+    """
+    report_dir.mkdir(parents=True, exist_ok=True)
+    path = report_dir / "summary.json"
+    path.write_text(
+        report.model_dump_json(by_alias=True, indent=2, exclude_none=False),
+        encoding="utf-8",
+    )
+    return path
 
 
 def _typed_section(

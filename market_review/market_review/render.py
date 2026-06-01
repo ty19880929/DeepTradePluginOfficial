@@ -488,3 +488,41 @@ def _safe_jsonable(obj: Any) -> Any:
     if isinstance(obj, (int, float, str, bool)) or obj is None:
         return obj
     return str(obj)
+
+
+# ---------------------------------------------------------------------------
+# Terminal summary (design §5.5.3)
+# ---------------------------------------------------------------------------
+
+
+def render_terminal_summary(report: Any) -> str:
+    """Short post-run console summary — design §5.5.3.
+
+    Just the headline + section roster + DB / report paths. ``report`` is a
+    :class:`ReviewReportSchema` (PR-5); typed as ``Any`` here to avoid a
+    cyclic ``report → render → report`` import.
+    """
+    meta = report.meta
+    headline = report.headline
+    lines: list[str] = [
+        f"# {meta.title}",
+        f"_run_id: `{meta.run_id}` · status: **{meta.status}** · "
+        f"market_tone: **{headline.market_tone}**_",
+    ]
+    if meta.failed_sections:
+        lines.append(f"⚠ failed sections: {', '.join(meta.failed_sections)}")
+    lines.append(f"\n## 一句话结论\n\n{headline.one_liner}\n")
+    if headline.core_metrics:
+        lines.append("## 核心指标\n")
+        lines.append("| 指标 | 值 |")
+        lines.append("| --- | --- |")
+        for m in headline.core_metrics:
+            val = "—" if m.value is None else m.value
+            unit = "" if m.unit == "none" else m.unit
+            lines.append(f"| {m.label} | {val} {unit} |")
+    lines.append("\n## 章节")
+    for section in SECTION_ORDER:
+        title = SECTION_TITLES[section]
+        marker = " ⚠" if section in meta.failed_sections else ""
+        lines.append(f"- {title}{marker}")
+    return "\n".join(lines) + "\n"

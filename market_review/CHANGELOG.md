@@ -4,7 +4,101 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## v0.1.0 — Unreleased — 骨架 + 数据 + 指标 + LLM + 报告契约（PR-1 ~ PR-5）
+## v0.1.0 — Unreleased — 骨架 + 数据 + 指标 + LLM + 报告 + 全链路 CLI（PR-1 ~ PR-6）
+
+### Added (PR-6 CLI 实装 + runner 全链路 — 设计 §5.1 / §7 / §11)
+
+新增 `runner.py` —— 全链路编排器：
+- `RunParams` 冷冻 dataclass（trade_date / start / end / force_sync / llm_provider
+  / no_llm / no_upload）。
+- `RunOutcome`（run_id / status / report_dir / failed_sections / error）。
+- `PreconditionError` —— 用户面错误（与系统错误区分，CLI 退 2 而非 1）。
+- `MrRunner.execute(params)` 完整流水线（Step 0..5）；
+  `MrRunner.execute_sync_only(params)` 仅 Step 0..1。
+- Step 0 窗口解析：先读 `mr_trade_cal`，空则 Tushare 拉一次 materialize 重读；
+  无 `--trade-date / --start / --end` 时探测 `index_daily(000001.SH)` 锚 T。
+- Step 1 数据：`data.sync_window` + `data.sync_sector_quotes`。
+- Step 2 指标：`build_window_universes` + 7 个 PR-3 compute_*。
+- Step 3 LLM：`_compute_input_fingerprint` 64-char sha256（NaN/Inf 安全 +
+  dataclass→dict + sorted keys）+ `pipeline.run_sections(rt, bundle,
+  input_fingerprint=)`。失败 section 不阻断后续，按设计 §11.3 隔离。
+- Step 4 报告：`build_review_report` → `write_summary_json` +
+  `write_summary_md` + `write_section_files` + `dump_metrics_json` +
+  `dump_llm_calls_audit`。run_status = success / partial_failed。
+- Step 5 上传：`maybe_upload_summary`（best-effort，事件流入 mr_events）。
+- 持久化：`mr_runs` 单行 INSERT@running → finalize 时 UPDATE
+  status/summary_json/error；`mr_events` 每条 emit 都写入（seq 自增）；
+  `mr_stage_results` 7 节 LLM 响应 schema JSON。
+- 致命错误（exception bubble up 到 execute）→ status=failed + mr_events.LOG
+  事件 + return RunOutcome；PreconditionError 直接 raise 给 CLI。
+
+`cli.py` 全面实装（替换 PR-1 全部 stub）：
+- `_open_runtime()` —— Database + ConfigService + LLMManager +
+  PluginContext + build_tushare_client。tushare.token 缺失时保留
+  rt.tushare=None；Step 0 会用 PreconditionError 给出清晰提示。
+- `_reports_root()` 共享辅助 —— runner 与 cmd_report 单一事实源，测试可
+  monkeypatch 重定向到 tmp_path。
+- `run` —— 完整流水线 + rich Markdown 终端摘要。`--trade-date` /
+  `--start` / `--end` / `--force-sync` / `--llm` / `--no-upload`。
+- `sync` —— 仅 Step 0..1。
+- `history` —— mr_runs ORDER BY started_at DESC，rich Table 展示。
+  `--mode day|range` 过滤。
+- `report run_id [--full] [--section X]` —— UUID 前缀解析（至少 6 位 +
+  CAST 解决 DuckDB UUID LIKE 限制）+ rich Markdown 渲染 summary.json /
+  summary.md / 单 section md。
+- `settings show` —— MrConfig defaults + mr_config 覆盖，按字段标 source。
+- `main()` 已捕获 PreconditionError → 退 2；其他 PR-1 既有路径不变。
+
+`render.py` 新增 `render_terminal_summary(report)` —— 短摘要供 cmd_run /
+cmd_report 调用。
+
+`report/builder.py` 新增 `write_summary_json(report_dir, report)` —— 单
+IO 伴侣函数（纯 builder 仍纯，写盘单独走这里）。
+
+### Added (PR-6 测试 — 219 passed，新增 22)
+
+- `test_runner.py` (15)：sync-only 路径 / step 事件入库 / 不调 LLM；full
+  路径 success 状态 / 报告文件齐 / summary.json 可 round-trip 回
+  ReviewReportSchema / 7 LLM 调用 / fingerprint 透传 / mr_stage_results
+  齐 7 行 / --no-upload 跳过 / partial_failed 路径 / WindowSpecError →
+  PreconditionError / tushare=None + 隐式窗口 → PreconditionError /
+  fingerprint 同输入相同输出（plugin_version 不同则不同）/ reports_dir
+  每次 run 不同。
+- `test_cli_e2e.py` (12)：monkeypatch `_open_runtime` + `_close_db` +
+  `_reports_root`；smoke 每个子命令（run / sync / history / report /
+  settings）+ --full / --section + run_id 前缀 + 不存在 run_id 退 2 +
+  mutex flags PreconditionError → 退 2。
+- `test_cli_skeleton.py` 精简到 2 个（PR-1 留下的 stub→real 后无意义部分
+  删除，保留 --help / 无参 dispatch 契约）。
+
+### Modified
+
+- `cli.py` —— 全文重写（PR-1 stub 5 个全部替换成真实命令体）。
+- `conftest.py` —— 新增 `FakeLLMClient` / `FakeLLMManager` /
+  `_default_llm_responder` 测试 fixture（与 PR-4 test_pipeline 的 fake
+  收敛到一处复用）。
+- `render.py` —— 新增 `render_terminal_summary`。
+- `report/builder.py` —— 新增 `write_summary_json`。
+- `test_cli_skeleton.py` —— 删除已不适用的 stub-exit-2 测试，只留 dispatch
+  入口契约。
+
+### Bug fixes during PR-6
+
+- DuckDB UUID 字段不能直接 `LIKE` —— `_resolve_run_id_prefix` CAST 到
+  VARCHAR 才工作。
+- PreconditionError 不能在 cmd 层被吃掉转成 status=failed（exit 1），
+  应直传到 `main()` 让用户面错误正确退 2。
+- `_reports_root()` 提取为模块级函数（不是常量）以便测试 monkeypatch
+  重定向 cmd_report 的写盘路径。
+
+### 延后 / 已知限制
+
+- `settings set` / `settings reset` —— PR-6 仅 `show`；写入路径由 PR-7
+  polish。
+- IndexReturnJson.closeSeries / amountSeriesYi 仍为空（builder 纯，PR-6
+  runner 也没补 mr_index_daily 读）；PR-7 可加。
+- 同样 CapitalDailyRow.margin_balance_yi / margin_delta_yi 为 None。
+- LLM replay policy 未连入 `LLMReplayPolicy`；目前所有调用 disable 缓存。
 
 ### Added (PR-5 报告 schema + 上传链路 — 设计 §15)
 

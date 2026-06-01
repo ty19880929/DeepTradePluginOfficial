@@ -1,14 +1,12 @@
-"""Plugin-managed CLI for market-review (PR-1 skeleton).
+"""Plugin-managed CLI for market-review (PR-6 — full implementation).
 
-PR-1 only ships the top-level typer app so ``deeptrade market-review --help``
-works after install. All subcommands are stubbed: invoking them prints a
-"not yet implemented" notice + exit code 2, matching the v0.1.0 §18 PR-1
-charter ("cli skeleton（仅 --help）"). Real subcommand bodies land in PR-2..6:
+Subcommands (design §7):
 
-- ``run`` / ``sync``  — PR-6 (wraps runner + data layer from PR-2..5)
-- ``history``         — PR-6
-- ``report``          — PR-6
-- ``settings``        — PR-6
+- ``run``      — full pipeline (Steps 0..5)
+- ``sync``     — data-only path (Steps 0..1; no metrics / LLM / upload)
+- ``history``  — list recent runs
+- ``report``   — re-render a finished run's terminal summary from disk
+- ``settings`` — show / set persisted :class:`MrConfig`
 
 Invoked via the framework's pure pass-through dispatch:
     deeptrade market-review <subcommand> [...]
@@ -16,9 +14,21 @@ Invoked via the framework's pure pass-through dispatch:
 
 from __future__ import annotations
 
+import json
+import sys
+from dataclasses import asdict
+from pathlib import Path
+
 import click
 import typer
 from rich.console import Console
+from rich.markdown import Markdown
+from rich.table import Table
+
+from .config import MrConfig
+from .render import render_terminal_summary
+from .runner import MrRunner, PreconditionError, RunOutcome, RunParams
+from .runtime import MrRuntime, build_tushare_client
 
 app = typer.Typer(
     name="market-review",
@@ -40,93 +50,388 @@ settings_app = typer.Typer(
 app.add_typer(settings_app, name="settings")
 
 
-_STUB_EXIT_CODE = 2
+# ---------------------------------------------------------------------------
+# Runtime / context helpers
+# ---------------------------------------------------------------------------
 
 
-def _stub(subcommand: str) -> None:
-    """Common body for PR-1 subcommand stubs."""
-    console = Console()
-    console.print(
-        f"[yellow]market-review {subcommand}[/] 尚未实现（v0.1.0 PR-1 仅交付骨架）。"
-        "\n后续 PR-2..6 将逐步落地数据层 / 指标 / LLM / 报告。"
-    )
-    raise typer.Exit(code=_STUB_EXIT_CODE)
+def _open_runtime() -> tuple[object, MrRuntime, object]:
+    """Build the per-process services bundle.
+
+    Returns ``(db, rt, ctx)`` where ``ctx`` is the framework
+    :class:`PluginContext` (or ``None`` on older frameworks that don't
+    expose it). Tests monkey-patch this function with a fake to bypass
+    the real framework wiring entirely.
+    """
+    from deeptrade.core import paths  # noqa: PLC0415
+    from deeptrade.core.config import ConfigService  # noqa: PLC0415
+    from deeptrade.core.db import Database  # noqa: PLC0415
+    from deeptrade.core.llm_manager import LLMManager  # noqa: PLC0415
+
+    db = Database(paths.db_path())
+    cfg = ConfigService(db)
+    try:
+        from deeptrade.plugins_api import PluginContext  # noqa: PLC0415
+        ctx = PluginContext(db=db, config=cfg, plugin_id="market-review")
+    except Exception:  # noqa: BLE001 — pre-v0.11 framework path
+        ctx = None
+    rt = MrRuntime(db=db, config=cfg, llms=LLMManager(db, cfg))
+    try:
+        rt.tushare = build_tushare_client(rt)
+    except RuntimeError:
+        # tushare.token missing — keep ``rt.tushare = None``. ``run`` / ``sync``
+        # will raise PreconditionError at Step 0 with a clearer message.
+        pass
+    return db, rt, ctx
 
 
-@app.command("run", help="单日或区间复盘（PR-6 实现）。")
-def run_cmd(
+def _close_db(db) -> None:
+    """Best-effort DB close — never raises."""
+    try:
+        db.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _reports_root() -> Path:
+    """Default reports directory — kept as a function (not a constant) so
+    :class:`MrRunner` and :func:`cmd_report` agree on the location AND tests
+    can monkey-patch one symbol to redirect both to a tmp path."""
+    return Path.home() / ".deeptrade" / "reports"
+
+
+# ---------------------------------------------------------------------------
+# run / sync
+# ---------------------------------------------------------------------------
+
+
+@app.command("run", help="单日 / 区间复盘的完整流水线（Step 0..5）。")
+def cmd_run(
     trade_date: str | None = typer.Option(
-        None, "--trade-date", help="YYYYMMDD，单日复盘。与 --start/--end 互斥。"
+        None, "--trade-date", help="YYYYMMDD；与 --start/--end 互斥。"
     ),
-    start: str | None = typer.Option(None, "--start", help="YYYYMMDD，区间起点。"),
-    end: str | None = typer.Option(None, "--end", help="YYYYMMDD，区间末日。"),
+    start: str | None = typer.Option(None, "--start", help="区间起点 YYYYMMDD。"),
+    end: str | None = typer.Option(None, "--end", help="区间末日 YYYYMMDD。"),
+    force_sync: bool = typer.Option(False, "--force-sync"),
+    llm: str | None = typer.Option(
+        None, "--llm",
+        help="本次 run 使用的 LLM provider（覆盖框架默认）。",
+    ),
+    no_upload: bool = typer.Option(
+        False, "--no-upload",
+        help="跳过 summary.json 上传步骤；离线 / 调试时有用。",
+    ),
 ) -> None:
-    _ = (trade_date, start, end)  # accepted for --help discoverability
-    _stub("run")
+    params = RunParams(
+        trade_date=trade_date, start=start, end=end,
+        force_sync=force_sync, llm_provider=llm, no_upload=no_upload,
+    )
+    db, rt, ctx = _open_runtime()
+    try:
+        outcome = _run_with_runner(rt, ctx, params, full=True)
+        _print_terminal_summary(outcome)
+    finally:
+        _close_db(db)
+    raise typer.Exit(_exit_code_for(outcome))
 
 
-@app.command("sync", help="仅落 Tushare 数据，不调 LLM（PR-2/6 实现）。")
-def sync_cmd(
+@app.command("sync", help="仅落 Tushare 数据，不调 LLM（Step 0..1）。")
+def cmd_sync(
     trade_date: str | None = typer.Option(None, "--trade-date"),
     start: str | None = typer.Option(None, "--start"),
     end: str | None = typer.Option(None, "--end"),
+    force_sync: bool = typer.Option(False, "--force-sync"),
 ) -> None:
-    _ = (trade_date, start, end)
-    _stub("sync")
+    params = RunParams(
+        trade_date=trade_date, start=start, end=end,
+        force_sync=force_sync, no_llm=True, no_upload=True,
+    )
+    db, rt, ctx = _open_runtime()
+    try:
+        outcome = _run_with_runner(rt, ctx, params, full=False)
+        console = Console()
+        if outcome.status == "success":
+            console.print(
+                f"[green]✓[/] sync 完成 · run_id=[cyan]{outcome.run_id}[/] · "
+                f"reports={outcome.report_dir}"
+            )
+        else:
+            console.print(
+                f"[red]✘[/] sync 失败 · run_id={outcome.run_id} · "
+                f"error={outcome.error or '未知'}"
+            )
+    finally:
+        _close_db(db)
+    raise typer.Exit(_exit_code_for(outcome))
 
 
-@app.command("history", help="列出最近的复盘 run（PR-6 实现）。")
-def history_cmd(
-    limit: int = typer.Option(20, "--limit"),
+def _run_with_runner(
+    rt: MrRuntime, ctx, params: RunParams, *, full: bool,
+) -> RunOutcome:
+    """Dispatch to the appropriate runner method.
+
+    :class:`PreconditionError` (user-facing input errors like bad window
+    specs) is NOT caught here — it propagates up to :func:`main` which
+    renders it + exits 2. System errors are already captured by the runner
+    into a ``failed`` :class:`RunOutcome`.
+    """
+    runner = MrRunner(rt, ctx=ctx)
+    if full:
+        return runner.execute(params)
+    return runner.execute_sync_only(params)
+
+
+def _exit_code_for(outcome: RunOutcome) -> int:
+    if outcome.status == "success":
+        return 0
+    if outcome.status == "partial_failed":
+        return 0  # partial still counts as success for shell semantics
+    return 1
+
+
+def _print_terminal_summary(outcome: RunOutcome) -> None:
+    """Print the post-run summary to stdout (design §5.5.3)."""
+    console = Console()
+    if outcome.status == "failed" and not outcome.run_id:
+        # PreconditionError path — error already printed to stderr.
+        return
+    if outcome.status == "failed":
+        console.print(
+            f"[red]✘[/] run 失败 · run_id={outcome.run_id} · "
+            f"error={outcome.error or '未知'} · reports={outcome.report_dir}"
+        )
+        return
+    summary_json = outcome.report_dir / "summary.json"
+    if not summary_json.is_file():
+        console.print(
+            f"[yellow]⚠[/] summary.json 缺失，跳过终端摘要 · run_id={outcome.run_id}"
+        )
+        return
+    try:
+        from .report.schema import ReviewReportSchema  # noqa: PLC0415
+        report = ReviewReportSchema.model_validate_json(
+            summary_json.read_text(encoding="utf-8")
+        )
+        console.print(Markdown(render_terminal_summary(report)))
+        console.print(f"\n📁 完整报告：[cyan]{outcome.report_dir}[/]")
+    except Exception as exc:  # noqa: BLE001 — terminal summary failures shouldn't crash CLI
+        console.print(
+            f"[yellow]⚠[/] 终端摘要渲染失败 ({type(exc).__name__}: {exc})，"
+            f"完整报告在 {outcome.report_dir}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# history
+# ---------------------------------------------------------------------------
+
+
+@app.command("history", help="列出最近的复盘 run（按开始时间倒序）。")
+def cmd_history(
+    limit: int = typer.Option(20, "--limit", min=1, max=200),
+    mode: str | None = typer.Option(
+        None, "--mode",
+        help="过滤模式：day | range；省略 = 全部。",
+    ),
 ) -> None:
-    _ = limit
-    _stub("history")
+    db, rt, _ = _open_runtime()
+    try:
+        sql = (
+            "SELECT run_id, mode, start_date, end_date, anchor, status, "
+            "started_at, finished_at FROM mr_runs"
+        )
+        params: list = []
+        if mode:
+            sql += " WHERE mode = ?"
+            params.append(mode)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+        rows = db.fetchall(sql, params)
+    finally:
+        _close_db(db)
+
+    console = Console()
+    if not rows:
+        console.print("[yellow]暂无 run 历史。[/]")
+        raise typer.Exit(0)
+    table = Table(title="市场复盘历史")
+    for col in ("run_id", "mode", "anchor", "status", "started_at", "finished_at"):
+        table.add_column(col)
+    for r in rows:
+        table.add_row(
+            str(r[0])[:8] + "…",  # truncate UUID prefix
+            str(r[1]),
+            str(r[4]),
+            _status_styled(str(r[5])),
+            _fmt_ts(r[6]),
+            _fmt_ts(r[7]),
+        )
+    console.print(table)
+    raise typer.Exit(0)
 
 
-@app.command("report", help="重渲历史 run 的终端摘要 / 完整 markdown（PR-6 实现）。")
-def report_cmd(
-    run_id: str = typer.Argument(..., help="run_id（UUID）"),
-    full: bool = typer.Option(False, "--full"),
-    section: str | None = typer.Option(None, "--section"),
+def _status_styled(status: str) -> str:
+    color = {
+        "success": "green", "partial_failed": "yellow",
+        "failed": "red", "cancelled": "blue", "running": "cyan",
+    }.get(status, "white")
+    return f"[{color}]{status}[/]"
+
+
+def _fmt_ts(value) -> str:
+    if value is None:
+        return "—"
+    return str(value)[:19]
+
+
+# ---------------------------------------------------------------------------
+# report
+# ---------------------------------------------------------------------------
+
+
+@app.command("report", help="重渲历史 run 的终端摘要 / 完整 markdown。")
+def cmd_report(
+    run_id: str = typer.Argument(..., help="run_id（可填 UUID 前缀，至少 6 位）"),
+    full: bool = typer.Option(False, "--full", help="打印完整 summary.md，不只摘要。"),
+    section: str | None = typer.Option(
+        None, "--section",
+        help="仅打印某 section markdown（overview / sectors / sentiment / ...）",
+    ),
 ) -> None:
-    _ = (run_id, full, section)
-    _stub("report")
+    db, rt, _ = _open_runtime()
+    try:
+        full_run_id = _resolve_run_id_prefix(db, run_id)
+        report_dir = _reports_root() / full_run_id
+    finally:
+        _close_db(db)
+
+    console = Console()
+    if section:
+        section_path = report_dir / f"{section}.md"
+        if not section_path.is_file():
+            console.print(f"[red]✘[/] 找不到 {section_path}")
+            raise typer.Exit(1)
+        console.print(Markdown(section_path.read_text(encoding="utf-8")))
+        raise typer.Exit(0)
+
+    if full:
+        summary_md = report_dir / "summary.md"
+        if not summary_md.is_file():
+            console.print(f"[red]✘[/] 找不到 {summary_md}")
+            raise typer.Exit(1)
+        console.print(Markdown(summary_md.read_text(encoding="utf-8")))
+        raise typer.Exit(0)
+
+    # Default: terminal summary from summary.json
+    summary_json = report_dir / "summary.json"
+    if not summary_json.is_file():
+        console.print(f"[red]✘[/] 找不到 {summary_json}")
+        raise typer.Exit(1)
+    from .report.schema import ReviewReportSchema  # noqa: PLC0415
+    report = ReviewReportSchema.model_validate_json(
+        summary_json.read_text(encoding="utf-8")
+    )
+    console.print(Markdown(render_terminal_summary(report)))
+    raise typer.Exit(0)
+
+
+def _resolve_run_id_prefix(db, raw: str) -> str:
+    """Map a (possibly partial) run_id to the full UUID stored in mr_runs."""
+    if len(raw) < 6:
+        raise PreconditionError(
+            f"run_id 前缀至少 6 位，收到 {len(raw)} 位：{raw!r}"
+        )
+    rows = db.fetchall(
+        # ``run_id`` is UUID-typed in mr_runs; DuckDB needs an explicit
+        # cast for LIKE pattern matching (UUID has no ``~~`` overload).
+        "SELECT run_id FROM mr_runs WHERE CAST(run_id AS VARCHAR) LIKE ? || '%' "
+        "ORDER BY started_at DESC",
+        [raw],
+    )
+    if not rows:
+        raise PreconditionError(f"找不到 run_id 前缀匹配 {raw!r}")
+    if len(rows) > 1:
+        raise PreconditionError(
+            f"run_id 前缀 {raw!r} 命中 {len(rows)} 条记录，请提供更长的前缀"
+        )
+    return str(rows[0][0])
+
+
+# ---------------------------------------------------------------------------
+# settings
+# ---------------------------------------------------------------------------
 
 
 @settings_app.callback()
 def settings_callback(ctx: typer.Context) -> None:
-    """PR-6 will add ``show`` / ``set`` / ``reset`` here."""
+    """``settings`` with no subcommand → ``show``."""
     if ctx.invoked_subcommand is None:
-        _stub("settings")
+        _settings_show()
+
+
+@settings_app.command("show")
+def cmd_settings_show() -> None:
+    _settings_show()
+
+
+def _settings_show() -> None:
+    """Print the current :class:`MrConfig` (defaults + DB overrides if present)."""
+    db, _, _ = _open_runtime()
+    try:
+        overrides = {}
+        rows = db.fetchall("SELECT key, value_json FROM mr_config")
+        for k, vj in rows:
+            try:
+                overrides[str(k)] = json.loads(vj) if vj else None
+            except json.JSONDecodeError:
+                overrides[str(k)] = vj
+    finally:
+        _close_db(db)
+
+    cfg = MrConfig()
+    base = asdict(cfg)
+    # Apply overrides on top of defaults.
+    for k, v in overrides.items():
+        # Convention: key looks like "mr.<field>"; strip prefix for display.
+        attr = k[3:] if k.startswith("mr.") else k
+        if attr in base:
+            base[attr] = v
+
+    console = Console()
+    table = Table(title="MrConfig")
+    table.add_column("字段")
+    table.add_column("值")
+    table.add_column("来源")
+    for field, value in base.items():
+        source = "user" if f"mr.{field}" in overrides else "default"
+        table.add_row(field, _format_config_value(value), source)
+    console.print(table)
+    raise typer.Exit(0)
+
+
+def _format_config_value(value) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+# ---------------------------------------------------------------------------
+# Entry
+# ---------------------------------------------------------------------------
 
 
 def main(argv: list[str]) -> int:
-    """Framework dispatch entrypoint.
-
-    The framework hands ``argv`` straight through from
-    ``deeptrade market-review <argv...>``; we forward to typer's app so that
-    ``--help`` / unknown command messages render through typer's normal path.
-
-    Notes on the exit-code dance (click 8.3+):
-
-    - With ``standalone_mode=False`` click no longer raises ``Exit`` —
-      it returns the int ``exit_code`` as the ``app(...)`` return value.
-      We forward that integer back to the framework.
-    - ``typer.Exit`` / ``SystemExit`` are still caught defensively in case
-      a user-installed click variant restores the legacy raise-on-Exit
-      semantics, or a stray ``sys.exit`` slips into a stub.
-    """
+    """Framework dispatch entrypoint (signature stable since PR-1)."""
     try:
         rv = app(list(argv), standalone_mode=False)
-    except typer.Exit as exc:  # noqa: PERF203 — defensive vs. legacy click
+    except typer.Exit as exc:
         return int(exc.exit_code or 0)
     except click.exceptions.ClickException as exc:
-        # click 8+ keeps ``UsageError`` / ``NoArgsIsHelpError`` raising in
-        # non-standalone mode. Reproduce standalone behavior: show the
-        # formatted message (NoArgsIsHelpError already carries the help text)
-        # and forward the documented exit code.
         exc.show()
         return int(exc.exit_code or 1)
+    except PreconditionError as exc:
+        sys.stderr.write(f"✘ {exc}\n")
+        return 2
     except SystemExit as exc:
         code = exc.code
         if isinstance(code, int):

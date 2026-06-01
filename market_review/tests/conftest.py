@@ -139,3 +139,79 @@ class FakeTushare:
 @pytest.fixture
 def fake_tushare() -> FakeTushare:
     return FakeTushare()
+
+
+# ---------------------------------------------------------------------------
+# FakeLLM — pipeline.run_sections() consumes this through MrRuntime.llms
+# ---------------------------------------------------------------------------
+
+
+class FakeLLMClient:
+    """Records ``complete_json`` calls; returns minimal-valid responses
+    from a section→schema responder. Defaults: empty-but-valid schemas per
+    section (overview gets 3 placeholder headline_metrics)."""
+
+    def __init__(self, responder=None) -> None:
+        self.calls: list[dict] = []
+        self._responder = responder or _default_llm_responder
+
+    def complete_json(
+        self, *, system, user, schema, profile, stage=None,
+        schema_version=None, input_fingerprint=None,
+        envelope_defaults=None, replay=None,
+    ):
+        self.calls.append({
+            "stage": stage, "schema": schema.__name__,
+            "input_fingerprint": input_fingerprint,
+            "system_len": len(system), "user_len": len(user),
+        })
+        validated = self._responder(stage, schema, user=user)
+        return validated, {
+            "latency_ms": 1, "prompt_hash": f"hash:{stage}",
+            "input_tokens": 100, "output_tokens": 50,
+        }
+
+
+class FakeLLMManager:
+    def __init__(self, client: FakeLLMClient | None = None) -> None:
+        self.client = client or FakeLLMClient()
+
+    def get_client(self, name=None, *, plugin_id, run_id=None, reports_dir=None):
+        return self.client
+
+
+def _default_llm_responder(stage, schema_cls, *, user=None):  # noqa: ARG001
+    """Build a minimal-valid schema instance per section.
+
+    OverviewSection / RiskOutlookSection have required fields (≥3 headline
+    metrics; ≥1 hypothesis) — the rest accept ``schema_cls()`` with all
+    defaults.
+    """
+    from market_review.schemas import (
+        HeadlineMetric, OutlookHypothesis, OverviewSection, RiskOutlookSection,
+    )
+    if stage == "overview":
+        return OverviewSection(
+            market_tone="震荡分化",
+            headline_metrics=[
+                HeadlineMetric(label=f"m{i}", value=i, unit="个") for i in range(3)
+            ],
+            theme_tags=["t1"],
+            narrative_md="测试用 overview。",
+        )
+    if stage == "risk_outlook":
+        return RiskOutlookSection(
+            hypotheses=[OutlookHypothesis(
+                title="震荡延续",
+                rationale="量能温和",
+                watch_points=["5日"],
+                fail_triggers=["跌破60日"],
+            )],
+            narrative_md="测试用 risk_outlook。",
+        )
+    return schema_cls()
+
+
+@pytest.fixture
+def fake_llm_manager() -> FakeLLMManager:
+    return FakeLLMManager()
