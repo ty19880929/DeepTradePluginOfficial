@@ -4,7 +4,79 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## v0.1.0 — Unreleased — 骨架 + 数据层 + 指标层 + LLM 层（PR-1 ~ PR-4）
+## v0.1.0 — Unreleased — 骨架 + 数据 + 指标 + LLM + 报告契约（PR-1 ~ PR-5）
+
+### Added (PR-5 报告 schema + 上传链路 — 设计 §15)
+
+新增 `market_review/report/` 包，三个模块对齐 lub v0.16.1 契约：
+
+- **`report/schema.py`** —— `ReviewReportSchema` 根模型（`extra="forbid"` +
+  显式 `_extras: dict` 单一前向兼容入口）+ `ReportMeta` /
+  `WindowMeta` / `ReportHeadline` / `HeadlineMetric` + `MetricsBlock` 子树：
+  - `BreadthSnapshotJson` — 每日宽度（ladder 键 str 化以保 JSON 合法）
+  - `IndexReturnJson` — 区间 cum + closeSeries / amountSeriesYi（v0.1
+    builder 留空，PR-6 runner 可补 `mr_index_daily` 数据）
+  - `SectorMatrixJson` — 板块 × 日期强度矩阵
+  - `MetricsLeaderRow` — 不含 `rationale`（设计 §15.6 metrics 块无 LLM prose）
+  - `StyleSeriesJson` —风格序列汇总
+  - `MetricsRiskSignal` — 不含 `detail`（与 PR-4 RiskSignalJson 区分；只携
+    `sample_count` + `samples_top_k`）
+  - `MetricsBlock` —— 全部聚合
+- **`report/builder.py`** —— `build_review_report(*, status, window, breadth,
+  sentiment, capital, sectors, leaders, style, risk, sections,
+  failed_sections, run_id, llm_provider, plugin_version, input_fingerprint,
+  generated_at, error) -> ReviewReportSchema` 纯装配（无 IO / 无 DB / 无 LLM）。
+  - `_build_meta()` —— title 单日 / 区间不同模板；ISO 8601 + +08:00 CN TZ
+  - `_build_headline()` —— one_liner 取 overview 首段前 120 字，失败时回落
+    `"{anchor} 市场复盘"`；core_metrics 从 OverviewSection 复制
+  - `_build_metrics_block()` —— PR-3 dataclass → MetricsBlock pydantic：
+    ladder 键 int→str；index_returns 几何链累计；sector_matrix 直接镜像；
+    capital_daily 合并 north_series + mkt_series 按 trade_date；leader_table
+    合并 primary + secondary；risk_signal 把 "positive" 严重度坍塌到 "info"
+    （MetricsRiskSignal 不接 positive）
+  - `_typed_section()` —— 防御性 isinstance 校验，shape 不对直接报错
+- **`report/upload.py`** —— `maybe_upload_summary(ctx, *, run_id, report_dir,
+  window) -> Iterator[StrategyEvent]` 镜像 lub `_maybe_upload_summary` 语义：
+  - 找不到 ctx / 缺 summary.json → 单条 INFO 事件 + skip
+  - 调框架 `ctx.make_report_uploader(run_id=...).upload(json_path,
+    plugin_name="市场复盘", trade_date=window.anchor)`
+  - status="ok" → INFO；status 开头 "skipped" → INFO；其他 → WARN
+  - 框架理论上 never raise；defense-in-depth try/except 兜底捕获 → WARN
+    event 不抛出
+- `_camel` 函数 PR-4 schemas.py 模块级私有 → 报告子树通过相对 import 复用，
+  保持 snake_case Python ↔ camelCase JSON wire 一致。
+
+### Added (PR-5 测试 — 48 个新增，全套 197 passed)
+
+- `test_report_schema.py` (20) —— 根模型 round-trip / `_extras` 兜底 /
+  extra="forbid" 触发 / inputFingerprint 必须 64-char / 失败 section 保留
+  error / failed-run 状态序列化 / camelCase wire / ladder str 键 / 各
+  MetricsBlock 子模型默认值。
+- `test_report_builder.py` (19) —— title 模板 / one_liner 回落 / theme_tags
+  传递 / ladder int→str / index_returns 几何链 + name 查表 / sector_matrix
+  镜像 / 空 matrix / capital_daily 合并 / leader_table 无 rationale /
+  risk_signal severity "positive"→"info" + 丢 detail / failed section /
+  缺 section 报 KeyError / 错类型报 TypeError。
+- `test_upload_audit_payload.py` (9) —— `_FakeUploader` 记录调用；plugin_name
+  + trade_date=window.anchor 精确匹配；range 模式 trade_date 取 anchor；
+  ctx=None → skipped_no_ctx；无 summary.json → skipped_no_local_file；
+  status=skipped_* 直传；failed_http → WARN；uploader 构造异常 → WARN +
+  skipped_uploader_init_failed；upload() 抛异常 → WARN + raised；
+  generator 单条事件。
+
+### Modified
+
+- 无（schemas.py 在 PR-4 已完成）。
+
+### 延后到 PR-6
+
+- runner.py 集成上述三个模块：driving sync_window → sync_sector_quotes →
+  build_*_universes → compute_* metrics → run_sections → build_review_report →
+  write summary.json + summary.md + section md → maybe_upload_summary。
+- IndexReturnJson 的 closeSeries / amountSeriesYi 由 runner 直读
+  `mr_index_daily` 补齐。
+- `CapitalDailyRow.margin_balance_yi / margin_delta_yi` 同理由 runner 读
+  `mr_margin` 补齐。
 
 ### Added (PR-4 LLM section — 设计 §5.4 + §15.5)
 
