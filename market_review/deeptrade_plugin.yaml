@@ -1,0 +1,115 @@
+plugin_id: market-review
+name: 市场复盘
+version: 0.1.0
+type: strategy
+api_version: "1"
+entrypoint: market_review.plugin:MarketReviewPlugin
+description: A 股市场单日 / 区间复盘：板块轮动 / 情绪 / 资金 / 龙头 / 风格 / 风险 / 展望 七章节 LLM 综合报告
+author: DeepTrade
+
+# 框架 v0.14.0 起：插件自行声明非框架自带的运行时依赖（PEP 508）。
+# 框架在 install / upgrade 阶段会先 ``uv pip install`` 这里列出的包再进入
+# migrations / validate_static。market-review v0.1.0 不引入 LightGBM，故无
+# ``lightgbm`` / ``scikit-learn`` 依赖。
+dependencies:
+  - "tushare>=1.4"
+  - "pandas>=2.2,<3"
+  - "pyarrow>=15"
+  - "numpy>=1.26,<3"
+
+permissions:
+  tushare_apis:
+    # 设计 §4：用户 8000 积分覆盖范围内全部 API 已开通，v0.1 全部 required，
+    # 任一接口失败直接 ``failed`` 退出，不进入降级路径。
+    required:
+      - stock_basic
+      - trade_cal
+      - daily
+      - daily_basic
+      - index_daily
+      - index_dailybasic
+      - index_weight
+      - stock_st
+      - suspend_d
+      - limit_list_d
+      - limit_step
+      - limit_cpt_list
+      - limit_list_ths
+      - moneyflow
+      - moneyflow_dc
+      - moneyflow_hsgt
+      - hsgt_top10
+      - moneyflow_mkt_dc
+      - moneyflow_ind_ths
+      - moneyflow_cnt_ths
+      - top_list
+      - top_inst
+      - ths_daily
+      - dc_index
+      - kpl_concept
+      - kpl_list
+      - ths_hot
+      - dc_hot
+      - cyq_perf
+      - margin
+      - block_trade
+    # v0.13.2+：框架 ``API_CACHE_CLASS`` 表外的 API 必须显式声明 cache 策略，
+    # 否则 TushareClient fallback 到 ``trade_day_immutable`` 并发 INFO 警告。
+    # 下面这些都属于「盘后一次性结算、不回溯修改」语义。
+    cache_overrides:
+      index_daily: trade_day_immutable
+      index_dailybasic: trade_day_immutable
+      moneyflow_dc: trade_day_immutable
+      moneyflow_hsgt: trade_day_immutable
+      moneyflow_mkt_dc: trade_day_immutable
+      moneyflow_ind_ths: trade_day_immutable
+      moneyflow_cnt_ths: trade_day_immutable
+      ths_daily: trade_day_immutable
+      dc_index: trade_day_immutable
+      kpl_concept: trade_day_immutable
+      kpl_list: trade_day_immutable
+  llm: true
+  llm_tools: false
+
+# 框架默认从 plugin_id 推导前缀 ``market_review_``，与实际 ``mr_*`` 表名不符，必须显式声明。
+table_prefix: mr_
+
+tables:
+  - { name: mr_stock_basic,       description: 股票池底表,                purge_on_uninstall: true }
+  - { name: mr_trade_cal,         description: 交易日历,                  purge_on_uninstall: true }
+  - { name: mr_stock_st,          description: ST 名单,                   purge_on_uninstall: true }
+  - { name: mr_suspend_d,         description: 停牌明细,                  purge_on_uninstall: true }
+  - { name: mr_daily,             description: 全市场日线,                purge_on_uninstall: true }
+  - { name: mr_daily_basic,       description: 全市场基础指标,            purge_on_uninstall: true }
+  - { name: mr_index_daily,       description: 宽基指数日线,              purge_on_uninstall: true }
+  - { name: mr_index_dailybasic,  description: 指数当日基础指标,          purge_on_uninstall: true }
+  - { name: mr_limit_list_d,      description: 涨跌停明细,                purge_on_uninstall: true }
+  - { name: mr_limit_step,        description: 连板天梯,                  purge_on_uninstall: true }
+  - { name: mr_limit_cpt_list,    description: 题材连板池,                purge_on_uninstall: true }
+  - { name: mr_limit_ths,         description: 同花顺涨停榜,              purge_on_uninstall: true }
+  - { name: mr_moneyflow_hsgt,    description: 北向资金汇总,              purge_on_uninstall: true }
+  - { name: mr_hsgt_top10,        description: 北向 Top10,                purge_on_uninstall: true }
+  - { name: mr_moneyflow_mkt,     description: 东财大盘资金流,            purge_on_uninstall: true }
+  - { name: mr_moneyflow_ind_ths, description: 同花顺行业资金流,          purge_on_uninstall: true }
+  - { name: mr_moneyflow_cnt_ths, description: 同花顺概念资金流,          purge_on_uninstall: true }
+  - { name: mr_moneyflow,         description: 个股大单资金流,            purge_on_uninstall: true }
+  - { name: mr_top_list,          description: 龙虎榜个股,                purge_on_uninstall: true }
+  - { name: mr_top_inst,          description: 龙虎榜席位,                purge_on_uninstall: true }
+  - { name: mr_ths_daily,         description: 同花顺板块/概念指数日线,   purge_on_uninstall: true }
+  - { name: mr_dc_index,          description: 东财板块指数日线,          purge_on_uninstall: true }
+  - { name: mr_hot,               description: 同花顺/东财热榜,           purge_on_uninstall: true }
+  - { name: mr_margin,            description: 融资融券,                  purge_on_uninstall: true }
+  - { name: mr_block_trade,       description: 大宗交易,                  purge_on_uninstall: true }
+  - { name: mr_cyq_perf,          description: 筹码每日指标,              purge_on_uninstall: true }
+  - { name: mr_runs,              description: 本插件 run 历史,           purge_on_uninstall: true }
+  - { name: mr_events,            description: 本插件 run 事件流,         purge_on_uninstall: true }
+  - { name: mr_stage_results,     description: LLM section 结构化输出,    purge_on_uninstall: true }
+  - { name: mr_config,            description: 本插件用户可调设置,        purge_on_uninstall: true }
+
+migrations:
+  - version: "20260601_001"
+    file: migrations/20260601_001_init.sql
+    checksum: "sha256:8b2bf1b4a8a6ff4f0026a5fa637156ce049561f2bd9ef8b43d4776f6162d6f2d"
+  - version: "20260601_002"
+    file: migrations/20260601_002_config.sql
+    checksum: "sha256:63d05322b05eb26efcd52f1da1f3cda2106b81f152ba2e169741875d938e7328"
