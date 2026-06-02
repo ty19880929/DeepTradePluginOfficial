@@ -17,6 +17,13 @@ def _ths(db, ts_code, trade_date, pct_change):
 
 def _name(db, ts_code, name):
     db.execute(
+        """INSERT INTO mr_ths_index (ts_code, name, type) VALUES (?, ?, ?)""",
+        [ts_code, name, "N"],
+    )
+
+
+def _cnt_name(db, ts_code, name):
+    db.execute(
         """INSERT INTO mr_moneyflow_cnt_ths
         (trade_date, ts_code, name, net_amount) VALUES (?, ?, ?, ?)""",
         ["20260530", ts_code, name, 0.0],
@@ -91,6 +98,31 @@ def test_classification_new_relay_fading(mr_db: Database) -> None:
     assert today_codes == ["S_new"]
     assert any(e.ts_code == "S_new" for e in review.new_mainline)
     assert any(e.ts_code == "S_old" for e in review.fading)
+
+
+def test_industry_ti_name_resolved_from_ths_index_catalog(mr_db: Database) -> None:
+    """v0.1.6 回归：``.TI`` 行业指数必须能从 ``mr_ths_index`` 拿到中文名，
+    不再 fallback 到代码字面（v0.1.5 的渲染 bug：「板块名称显示 883422.TI」）。"""
+    _ths(mr_db, "883422.TI", "20260530", 5.0)
+    _name(mr_db, "883422.TI", "光模块")
+    review = compute_sectors(mr_db, _w(("20260530",)))
+    assert review.today_top[0].name == "光模块"
+    assert review.today_top[0].ts_code == "883422.TI"
+
+
+def test_sector_name_falls_back_to_moneyflow_cnt_ths(mr_db: Database) -> None:
+    """``mr_ths_index`` 是主源；缺失时退到 ``mr_moneyflow_cnt_ths``。"""
+    _ths(mr_db, "885000.TI", "20260530", 4.0)
+    _cnt_name(mr_db, "885000.TI", "AI 概念")
+    review = compute_sectors(mr_db, _w(("20260530",)))
+    assert review.today_top[0].name == "AI 概念"
+
+
+def test_sector_name_falls_back_to_code_when_no_mapping(mr_db: Database) -> None:
+    """主源 + 退路都查不到时回到代码字面（不抛、不丢行）。"""
+    _ths(mr_db, "883999.TI", "20260530", 3.0)
+    review = compute_sectors(mr_db, _w(("20260530",)))
+    assert review.today_top[0].name == "883999.TI"
 
 
 def test_matrix_rows_ordered_by_cum(mr_db: Database) -> None:

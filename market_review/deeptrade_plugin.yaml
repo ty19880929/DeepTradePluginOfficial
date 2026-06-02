@@ -1,6 +1,6 @@
 plugin_id: market-review
 name: 市场复盘
-version: 0.1.5
+version: 0.1.6
 type: strategy
 api_version: "1"
 entrypoint: market_review.plugin:MarketReviewPlugin
@@ -45,6 +45,7 @@ permissions:
       - top_list
       - top_inst
       - ths_daily
+      - ths_index
       - dc_index
       - kpl_concept
       - kpl_list
@@ -65,6 +66,7 @@ permissions:
       moneyflow_ind_ths: trade_day_immutable
       moneyflow_cnt_ths: trade_day_immutable
       ths_daily: trade_day_immutable
+      ths_index: static
       dc_index: trade_day_immutable
       kpl_concept: trade_day_immutable
       kpl_list: trade_day_immutable
@@ -96,6 +98,7 @@ tables:
   - { name: mr_top_list,          description: 龙虎榜个股,                purge_on_uninstall: true }
   - { name: mr_top_inst,          description: 龙虎榜席位,                purge_on_uninstall: true }
   - { name: mr_ths_daily,         description: 同花顺板块/概念指数日线,   purge_on_uninstall: true }
+  - { name: mr_ths_index,         description: 同花顺指数目录 (ts_code→名称), purge_on_uninstall: true }
   - { name: mr_dc_index,          description: 东财板块指数日线,          purge_on_uninstall: true }
   - { name: mr_hot,               description: 同花顺/东财热榜,           purge_on_uninstall: true }
   - { name: mr_margin,            description: 融资融券,                  purge_on_uninstall: true }
@@ -116,3 +119,6 @@ migrations:
   - version: "20260602_001"
     file: migrations/20260602_001_block_trade_drop_pk.sql
     checksum: "sha256:e0077ed3ec70127ff6a682306f4770501be70fb6e786c49921465e6e312aa253"
+  - version: "20260602_002"
+    file: migrations/20260602_002_ths_index_catalog.sql
+    checksum: "sha256:f70ee270b4cb2b1d4019e555fe71408d62804f98584cec97e3241a79b2a7e275"

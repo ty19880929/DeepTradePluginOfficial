@@ -211,18 +211,32 @@ def _build_matrix(
 def _sector_names(db: Database, ts_codes) -> dict[str, str]:
     """Best-effort ts_code → 板块中文名 lookup.
 
-    PR-3 doesn't yet integrate the framework's ``ConceptRepository``;
-    instead we read the few name hints embedded in mr_ths_daily-adjacent
-    tables. When unavailable the code itself is used as the name.
+    Primary source: ``mr_ths_index`` —— Tushare ``ths_index`` catalog 全量覆盖
+    所有 THS 指数（行业 ``.TI`` / 概念 ``.CI`` / 风格 / 主题 / 宽基 ...）。
+    Fallback: ``mr_moneyflow_cnt_ths`` —— 仅覆盖概念板块，但 catalog 落表前的
+    历史库可能没有 ``mr_ths_index`` 行，作为退路保证至少概念板块仍有名字。
+    都查不到时返回代码本身（最终 render 层会显示成 ``883422.TI`` 等字面）。
     """
     codes = list(ts_codes)
     if not codes:
         return {}
     in_clause = "(" + ",".join(["?"] * len(codes)) + ")"
-    rows = db.fetchall(
-        f"""
-        SELECT ts_code, name FROM mr_moneyflow_cnt_ths WHERE ts_code IN {in_clause}
-        """,
+    out: dict[str, str] = {}
+    catalog_rows = db.fetchall(
+        f"SELECT ts_code, name FROM mr_ths_index WHERE ts_code IN {in_clause}",
         codes,
     )
-    return {str(r[0]): str(r[1]) for r in rows if r[1]}
+    for r in catalog_rows:
+        if r[1]:
+            out[str(r[0])] = str(r[1])
+    missing = [c for c in codes if c not in out]
+    if missing:
+        in_clause2 = "(" + ",".join(["?"] * len(missing)) + ")"
+        fb_rows = db.fetchall(
+            f"SELECT ts_code, name FROM mr_moneyflow_cnt_ths WHERE ts_code IN {in_clause2}",
+            missing,
+        )
+        for r in fb_rows:
+            if r[1] and str(r[0]) not in out:
+                out[str(r[0])] = str(r[1])
+    return out

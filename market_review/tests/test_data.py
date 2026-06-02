@@ -15,6 +15,7 @@ from market_review.data import (
     WIDE_BASE_INDICES,
     SyncResult,
     fetch_latest_trade_date,
+    sync_sector_quotes,
     sync_window,
 )
 from market_review.runtime import MrRuntime
@@ -285,6 +286,33 @@ def test_sync_window_moneyflow_ind_ths_drops_null_name_rows(
     mats = fake_tushare.materializes_to("mr_moneyflow_ind_ths")
     assert len(mats) == 1
     assert mats[0].rows == 1, "rows with NULL / empty industry must be filtered"
+
+
+def test_sync_sector_quotes_calls_ths_index_catalog_once(
+    mr_db, fake_tushare: FakeTushare,
+) -> None:
+    """v0.1.6：``sync_sector_quotes`` 拉 ``ths_index`` 目录 (ts_code → name)，
+    覆盖所有 THS 板块类型（含 ``.TI`` 行业指数），写入 ``mr_ths_index``。
+    设计上一次 sync 一次调用即可（static cache，不会按天 loop）。"""
+    rt = _runtime_with_tushare(mr_db, fake_tushare)
+    fake_tushare.set_static(
+        "ths_index",
+        pd.DataFrame({
+            "ts_code": ["883422.TI", "885000.TI"],
+            "name": ["光模块", "AI 概念"],
+            "type": ["I", "N"],
+        }),
+    )
+    sync_sector_quotes(rt, _three_day_window())
+
+    calls = fake_tushare.calls_to("ths_index")
+    assert len(calls) == 1, f"ths_index 应只调用 1 次，实际 {len(calls)}"
+    assert calls[0].trade_date is None
+
+    mats = fake_tushare.materializes_to("mr_ths_index")
+    assert len(mats) == 1
+    assert mats[0].rows == 2
+    assert mats[0].key_cols == ["ts_code"]
 
 
 def test_sync_window_skips_apis_yielding_empty(

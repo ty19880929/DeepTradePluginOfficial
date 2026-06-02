@@ -343,6 +343,18 @@ def sync_sector_quotes(
     res = SyncResult()
     open_days = list(window.trade_dates)
 
+    # ``ths_index`` —— 板块 ts_code → 中文名目录，catalog 接口（static cache）。
+    # v0.1.6 起 ``metrics.sectors._sector_names`` 优先从这里查名字，覆盖所有
+    # 类型的同花顺指数；没有它的话 ``.TI`` 行业指数会在报告里渲染成原始代码。
+    df = tushare.call("ths_index", force_sync=force_sync)
+    if df is not None and not df.empty:
+        n = tushare.materialize(
+            "mr_ths_index", df, key_cols=["ts_code"],
+        )
+        res.rows_materialized["mr_ths_index"] = (
+            res.rows_materialized.get("mr_ths_index", 0) + int(n)
+        )
+
     for d in open_days:
         df = tushare.call(
             "ths_daily",

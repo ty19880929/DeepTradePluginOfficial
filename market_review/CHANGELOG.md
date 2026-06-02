@@ -4,6 +4,53 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.6 — 2026-06-02 — 修复板块章节渲染显示代码而非名称
+
+### Fixed
+
+- 报告 sectors 章节里行业指数（``.TI`` 后缀，如 ``883422.TI``）渲染为代码字面
+  而非中文名（"光模块"）。根因：``metrics.sectors._sector_names`` 只查
+  ``mr_moneyflow_cnt_ths`` 一张表，但该表只覆盖**同花顺概念板块**，对
+  ``.TI`` 行业指数没有任何映射；查不到时 ``SectorEntry.name`` fallback 到
+  ``ts_code`` 字面，渲染层再原样输出。``mr_moneyflow_ind_ths`` 虽然有
+  行业名但落表时 schema 没保留 ``ts_code`` 列（PK ``(trade_date, name)``），
+  也无法用于反查。
+
+### Changed
+
+- 新增 ``mr_ths_index`` catalog 表（``ts_code`` PK + ``name`` / ``type`` /
+  ``exchange`` / ``list_date`` / ``count``），数据来自 Tushare ``ths_index``
+  接口（catalog API，``static`` cache 类别）。``data.sync_sector_quotes``
+  入口处一次性拉取目录并 materialize，覆盖所有 THS 指数类型（``.TI`` 行业
+  / ``.CI`` 概念 / 风格 / 主题 / 宽基）。
+- ``_sector_names`` 改为「``mr_ths_index`` 主源 + ``mr_moneyflow_cnt_ths``
+  退路 + 代码字面兜底」三段查询：catalog 表能覆盖到的板块直接取目录中文
+  名；catalog 还没回流的（旧库或首次升级）继续用概念资金流表的反查；都
+  查不到才退到代码字面。
+- ``deeptrade_plugin.yaml``：``ths_index`` 加入 ``permissions.tushare_apis.required``
+  + ``cache_overrides`` (``static``)；``tables`` 列表新增 ``mr_ths_index``
+  条目（``purge_on_uninstall: true``）。
+
+### Migration
+
+- 新增 ``migrations/20260602_002_ths_index_catalog.sql``。SQL 只有一个
+  ``CREATE TABLE IF NOT EXISTS mr_ths_index``；幂等、零数据迁移。0.1.5 →
+  0.1.6 升级时框架自动执行。
+
+### Tests
+
+- ``tests/test_metrics_sectors.py`` 新增三个回归测试：``.TI`` 行业指数从
+  ``mr_ths_index`` 取名、目录缺时退到 ``mr_moneyflow_cnt_ths``、两边都
+  缺时退到代码字面。原有 ``_name(...)`` helper 改写为插 ``mr_ths_index``，
+  并保留 ``_cnt_name(...)`` 助测函数复用 ``mr_moneyflow_cnt_ths``。
+- ``tests/test_data.py`` 新增 ``test_sync_sector_quotes_calls_ths_index_catalog_once``
+  —— ``sync_sector_quotes`` 一次 sync 只调一次 ``ths_index``，并用
+  ``key_cols=["ts_code"]`` materialize 到 ``mr_ths_index``。
+- ``tests/conftest.py::MIGRATION_FILES`` 把新迁移文件加入测试库 bootstrap
+  序列。
+
+---
+
 ## v0.1.5 — 2026-06-02 — 修复 LeadersSection 顶层 ``section`` 字段幻觉
 
 ### Fixed
