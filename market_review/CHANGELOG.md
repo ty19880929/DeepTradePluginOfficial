@@ -4,6 +4,36 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.1 — 2026-06-02 — 修复 mr_block_trade PK 约束错误
+
+### Fixed
+
+- `run` / `sync` 在含活跃大宗交易的交易日整体崩溃：`mr_block_trade` 原 PK
+  `(trade_date, ts_code, buyer, seller)` 与 Tushare `block_trade` 数据语义
+  不匹配 —— 该接口返回的明细没有 row-id，买/卖席位字段经常是 `机构专用`
+  这类通用占位名，同一对手方同一天同一标的常出现多笔不同价 / 不同量的成交，
+  原始 payload 内部就已经违反 PK 假设，DuckDB 在 INSERT 阶段抛
+  `ConstraintException: PRIMARY KEY or UNIQUE constraint violation`。
+  v0.1.1 通过新迁移 `20260602_001_block_trade_drop_pk.sql` 重建该表去除
+  PK 约束，并加一个非唯一索引 `idx_mr_block_trade_date_code
+  (trade_date, ts_code)` 供 `metrics.risk._block_trade_discount` 命中。
+
+### Changed
+
+- `data.py`：`block_trade` 不再走通用 `_per_day(key_cols=…)` 路径（无 PK
+  后 `materialize` 的逐行 DELETE 已无意义）；改走新增的
+  `_per_day_replace_by_date(db, …)` —— 每个 open day 先
+  `DELETE FROM mr_block_trade WHERE trade_date=?` 再 `materialize(key_cols=None)`
+  纯 INSERT，重 sync 幂等性由本路径承担。
+
+### Migration
+
+- 新增 `20260602_001_block_trade_drop_pk.sql`：CREATE/INSERT/DROP/RENAME
+  四步重建 `mr_block_trade`（DuckDB 不支持 ALTER TABLE DROP PRIMARY KEY），
+  保留任何已有数据。0.1.0 → 0.1.1 升级时由框架按 `migrations` 顺序自动应用。
+
+---
+
 ## v0.1.0 — 2026-06-01 — 首个正式版本（PR-1 ~ PR-7）
 
 `market-review` —— A 股市场单日 / 区间复盘插件的 MVP 释出。覆盖设计文档

@@ -1,6 +1,6 @@
 plugin_id: market-review
 name: 市场复盘
-version: 0.1.0
+version: 0.1.1
 type: strategy
 api_version: "1"
 entrypoint: market_review.plugin:MarketReviewPlugin
@@ -113,3 +113,6 @@ migrations:
   - version: "20260601_002"
     file: migrations/20260601_002_config.sql
     checksum: "sha256:63d05322b05eb26efcd52f1da1f3cda2106b81f152ba2e169741875d938e7328"
+  - version: "20260602_001"
+    file: migrations/20260602_001_block_trade_drop_pk.sql
+    checksum: "sha256:e0077ed3ec70127ff6a682306f4770501be70fb6e786c49921465e6e312aa253"

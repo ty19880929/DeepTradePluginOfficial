@@ -28,6 +28,7 @@ MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 MIGRATION_FILES: tuple[Path, ...] = (
     MIGRATIONS_DIR / "20260601_001_init.sql",
     MIGRATIONS_DIR / "20260601_002_config.sql",
+    MIGRATIONS_DIR / "20260602_001_block_trade_drop_pk.sql",
 )
 
 

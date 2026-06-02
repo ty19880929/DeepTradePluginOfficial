@@ -244,9 +244,14 @@ def sync_window(
         key_cols=["trade_date", "exchange_id"],
         open_days=open_days, res=res, force_sync=force_sync,
     )
-    _per_day(
-        tushare, "block_trade", "mr_block_trade",
-        key_cols=["trade_date", "ts_code", "buyer", "seller"],
+    # block_trade — Tushare 的大宗交易明细没有 row-id；席位字段经常出现
+    # ``机构专用`` 这种通用占位名，所以 (trade_date, ts_code, buyer, seller)
+    # 在原始数据里就不是唯一的（同对手方同天常有多笔不同价 / 不同量的成交）。
+    # v0.1.1 起 ``mr_block_trade`` 不再带 PK 约束，重 sync 的幂等性由
+    # ``DELETE FROM mr_block_trade WHERE trade_date=?`` 承担（替换整日数据），
+    # 而不是依赖框架 ``materialize`` 的逐行 DELETE。
+    _per_day_replace_by_date(
+        rt.db, tushare, "block_trade", "mr_block_trade",
         open_days=open_days, res=res, force_sync=force_sync,
     )
 
@@ -427,6 +432,34 @@ def _per_day(
                 res.empty_days.setdefault(api, []).append(d)
                 continue
         n = tushare.materialize(table, df, key_cols=key_cols)
+        res.rows_materialized[table] = res.rows_materialized.get(table, 0) + int(n)
+
+
+def _per_day_replace_by_date(
+    db,
+    tushare: TushareClient,
+    api: str,
+    table: str,
+    *,
+    open_days: list[str],
+    res: SyncResult,
+    force_sync: bool,
+) -> None:
+    """Per-day variant for tables whose Tushare payload has no usable
+    natural key — currently just ``block_trade``.
+
+    Idempotency contract: each open day's existing rows in ``table`` are
+    deleted before the new frame is inserted, so re-running ``sync_window``
+    over the same window is safe. ``materialize(key_cols=None)`` is a plain
+    INSERT (no framework-side dedup); we own dedup here.
+    """
+    for d in open_days:
+        df = tushare.call(api, trade_date=d, force_sync=force_sync)
+        if df is None or df.empty:
+            res.empty_days.setdefault(api, []).append(d)
+            continue
+        db.execute(f'DELETE FROM "{table}" WHERE trade_date = ?', (d,))
+        n = tushare.materialize(table, df, key_cols=None)
         res.rows_materialized[table] = res.rows_materialized.get(table, 0) + int(n)
 
 
