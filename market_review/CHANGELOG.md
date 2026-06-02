@@ -4,6 +4,55 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.5 — 2026-06-02 — 修复 LeadersSection 顶层 ``section`` 字段幻觉
+
+### Fixed
+
+- `run --llm qwen-plus` 在 v0.1.4 之后又踩到新的 `LLMValidationError`，
+  失败点完全独立于前两次：
+  - `LeadersSection.section  Extra inputs are not permitted`
+  - `input_value='leader_identification'`
+  LLM 在 LeadersSection 的 JSON 顶层凭空多塞了一个
+  `"section": "leader_identification"` 的"章节标识符"字段，`LeadersSection`
+  → `SectionBase` → `_StrictModel`（`ConfigDict(extra="forbid")`）以
+  `extra_forbidden` 拒收。
+
+  根因属于 v0.1.3 / v0.1.4 同一类幻觉的下一个形态——LLM 自行发明 schema
+  未声明的顶层键：
+  1. **`HARD_DISCIPLINE` 缺通用"顶层 extras 禁令"**：现有 7 条规则全是
+     针对**已知幻觉**（top-level evidence / finding 内 narrativeMd）的
+     穷举式条款，没有一条说"schema 未声明的顶层字段一律不许加"。每次
+     LLM 想出新花样就要补一条规则，治标不治本。
+  2. **prompt 文本里 "section" 一词被高频使用**（"section 顶层"在
+     HARD_DISCIPLINE rule 5 / 7 出现三次，`_LEADERS_SYSTEM` 也提到
+     "section"），LLM 把"section"误理解为 JSON 中应有的结构性
+     discriminator（类似 OpenAPI 里的 `type` / `kind`）。
+  3. **`LeadersSection` 顶层零必填字段**（`primary` / `secondary` /
+     `min_score` / `sector_map` 全部带默认值），框架
+     `LLMClient._retry_hint_for` 在零 required 时退化成无 field-name
+     的通用提示，重试只是把同一份错误形状再发一遍。
+  4. `_LEADERS_SYSTEM` 没像 v0.1.3 加固后的 `_SECTORS_SYSTEM` 那样**枚举
+     顶层允许字段**，留下了二义性。
+
+### Changed
+
+- `prompts.py::HARD_DISCIPLINE` 新增第 8 条通用顶层 extras 禁令：明文
+  禁止 `section` / `sectionName` / `sectionType` / `type` / `kind` /
+  `name` / `title` / `id` / `category` 等任何"章节标识符"或元数据字段
+  出现在 section 顶层。从穷举式禁令升级为白名单式契约，避免下一种新形态
+  幻觉再次破壳。
+- `prompts.py::_LEADERS_SYSTEM` 末尾新增一段，显式列出 7 个允许的顶层
+  字段（`primary` / `secondary` / `minScore` / `sectorMap` /
+  `narrativeMd` / `findings` / `error`），并明示与 HARD_DISCIPLINE rule 8
+  的关联。
+- `tests/test_prompts.py::test_hard_discipline_lists_six_rules` 关键词
+  列表扩展 `章节标识符` / `sectionName` / `type` / `kind`，未来若有人把
+  rule 8 误删立刻回归失败。
+
+无迁移变更；纯 prompt 修复。0.1.4 → 0.1.5 升级时框架不会执行任何 SQL。
+
+---
+
 ## v0.1.4 — 2026-06-02 — 修复 SectorsSection.findings[*] LLM 幻觉
 
 ### Fixed

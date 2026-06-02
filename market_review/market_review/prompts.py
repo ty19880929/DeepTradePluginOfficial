@@ -50,6 +50,11 @@ HARD_DISCIPLINE = """
    严禁在 finding 内出现 narrativeMd / narrative / prose / commentary / text
    等任何叙事文本字段——叙事文字只能写在 section 顶层 narrativeMd 里
    （schema 会以 extra_forbidden 报错）。
+8. section 顶层只允许该 section schema 显式定义的字段；严禁额外添加
+   section / sectionName / sectionType / type / kind / name / title / id /
+   category 等任何形式的"章节标识符"或元数据字段——本次响应对应的
+   schema 已由调用方约定，无需在 JSON 中再次声明（schema 会以
+   extra_forbidden 报错）。如不确定某字段是否被允许，宁可省略。
 """
 
 _NARRATIVE_TARGET_RANGE = "200~1200 字 / 3~6 段"
@@ -127,6 +132,12 @@ capital / theme，每维 0-25)，筛选 ``primary`` (Top K=5) 与 ``secondary``
 ``sector_map`` 给「板块名 → 入榜 ts_code 列表」，便于交叉确认板块归属。
 narrativeMd 用 {target} 解释整体龙头格局（梯队是否完整 / 是否有断板 / 是否
 存在被低估的二线接力候选）。
+
+输出 JSON 顶层**只能且必须只含以下 7 个字段**（缺数据时给空数组 / 空对象 /
+默认值即可，**不要新增其它键**）：``primary`` / ``secondary`` / ``minScore`` /
+``sectorMap`` / ``narrativeMd`` / ``findings`` / ``error``。严禁额外加
+``section`` / ``sectionName`` / ``type`` 之类的章节标识符——本节身份已由
+调用方约定，参见硬性纪律 8。
 """.strip().format(target=_NARRATIVE_TARGET_RANGE)
 
 
