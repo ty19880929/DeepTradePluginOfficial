@@ -35,6 +35,8 @@ HARD_DISCIPLINE = """
 2. 严禁编造数据；不在输入中的字段一律不引用。
 3. evidence 必须以 {field, value, unit, interpretation} 四元组形式给出，
    field 必须是本次 user prompt 中出现过的字段名（不能凭空起名）。
+   evidence **只能**作为 ``findings[*].evidence`` 数组项出现；严禁在 section
+   顶层另起一个 ``evidence`` 字段（schema 会以 extra_forbidden 报错）。
 4. 仅输出 JSON，不要 Markdown 代码块包裹，不要解释性前后缀。
 5. 单 section 的 narrativeMd 总长度不超过 1200 中文字，分 3~6 段；
    每段第一句必须是结论性句子，后续句给数据支撑。
@@ -63,11 +65,16 @@ _SECTORS_SYSTEM = """
 你是板块轮动分析师。基于 user prompt 提供的当日 / 区间板块涨幅 + 板块持续性
 + 板块强度矩阵，判断主线归属 / 主线轮动 / 退潮信号：
 
-- ``today_top`` / ``range_top`` 给出今日 Top 10 与区间累计 Top 10。
+- ``today_top`` / ``range_top`` 给出今日 Top 10 与区间累计 Top 10。每一项必须
+  是完整对象 ``{name, pctChg, netInflowYi?, limitUpCount?, leaderTsCode?,
+  leaderName?, persistenceDays?}``，**严禁只填 ts_code 字符串**。``name`` /
+  ``pctChg`` 为必填，其余字段在 user prompt 缺数据时省略即可。
 - ``classification.new_mainline`` 列「今日 Top 10 中区间前半段未进 Top 10」
-  的板块（新主线候选）。
-- ``classification.relay`` 列「今日和前半段都进 Top 10」的板块（接力）。
-- ``classification.fading`` 列「前半段进 Top 10，今日跌出」的板块（退潮）。
+  的板块（新主线候选），每一项**与 today_top 同形状的完整对象**，不是 ts_code。
+- ``classification.relay`` 列「今日和前半段都进 Top 10」的板块（接力），形状
+  同上。
+- ``classification.fading`` 列「前半段进 Top 10，今日跌出」的板块（退潮），形状
+  同上。
 - ``rotation_commentary`` 用 200~600 字概括轮动逻辑。
 
 请保持 system / user 中已注入的 theme_tags + market_tone 的论调一致。

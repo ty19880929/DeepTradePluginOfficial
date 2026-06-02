@@ -64,7 +64,8 @@ class IndustryFlowRow:
 @dataclass(frozen=True)
 class StockFlowRow:
     ts_code: str
-    net_mf_yi: float
+    name: str
+    net_inflow_yi: float
 
 
 @dataclass(frozen=True)
@@ -265,17 +266,26 @@ def _stock_flows(
         return [], []
     in_clause_dates = "(" + ",".join(["?"] * len(trade_dates)) + ")"
     in_clause_codes, code_params = _bind_in(union)
+    # LEFT JOIN mr_stock_basic so each row carries a stock name. Fall back to
+    # ts_code when stock_basic is missing the row (keeps schemas.CapitalLeader's
+    # name min_length=1 satisfied without inventing data).
     rows = db.fetchall(
         f"""
-        SELECT ts_code, SUM(COALESCE(net_mf_amount, 0)) AS net_total
-        FROM mr_moneyflow
-        WHERE trade_date IN {in_clause_dates} AND ts_code IN {in_clause_codes}
-        GROUP BY ts_code
+        SELECT m.ts_code,
+               COALESCE(NULLIF(b.name, ''), m.ts_code) AS name,
+               SUM(COALESCE(m.net_mf_amount, 0)) AS net_total
+        FROM mr_moneyflow m
+        LEFT JOIN mr_stock_basic b ON b.ts_code = m.ts_code
+        WHERE m.trade_date IN {in_clause_dates} AND m.ts_code IN {in_clause_codes}
+        GROUP BY m.ts_code, b.name
         """,
         [*trade_dates, *code_params],
     )
-    parsed = [StockFlowRow(ts_code=str(r[0]), net_mf_yi=_yi(r[1])) for r in rows]
-    by_inflow = sorted(parsed, key=lambda x: x.net_mf_yi, reverse=True)
+    parsed = [
+        StockFlowRow(ts_code=str(r[0]), name=str(r[1]), net_inflow_yi=_yi(r[2]))
+        for r in rows
+    ]
+    by_inflow = sorted(parsed, key=lambda x: x.net_inflow_yi, reverse=True)
     return by_inflow[:top_k], by_inflow[-top_k:][::-1]
 
 

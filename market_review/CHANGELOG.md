@@ -4,6 +4,44 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.3 — 2026-06-02 — 修复 sectors / capital section LLM 校验失败
+
+### Fixed
+
+- `run` 在 sectors / sentiment / capital 三个 section 上稳定踩到
+  `LLMValidationError`，整条 pipeline 走 placeholder 路径。诊断后定位到三个
+  正交根因（一处数据层 bug + 两处 prompt 契约 bug）：
+  1. **CapitalSection.stock_top 输入数据形状 ≠ 输出 schema 形状**。
+     `metrics.capital.StockFlowRow` 用 `ts_code` + `net_mf_yi` 两个字段，没有
+     `name`；而输出 schema `CapitalLeader` 要求 `{ts_code, name, netInflowYi}`
+     且 `name` `min_length=1`。LLM 忠实复制输入即被 schema 以 `missing` +
+     `extra_forbidden` 同时拒收（HARD_DISCIPLINE 第 2 条又禁止编造 `name`）。
+  2. **SectorsSection.classification.* 嵌套对象结构在 system prompt 里没声明**。
+     框架 `complete_json` 不会自动把 pydantic JSON Schema 注入 prompt（只有
+     retry 时列一遍**顶层**必填字段名），原 prompt 只用散文说"列…的板块"，
+     LLM 自然把 `new_mainline` 当成 `list[str]`（ts_code 列表）输出。
+  3. **HARD_DISCIPLINE 第 3 条引导出"顶层 evidence"幻觉**。原文只说 evidence
+     必须是 `{field, value, unit, interpretation}` 四元组，没说位置；schema 里
+     `evidence` 只是 `Finding.evidence` 子字段，LLM 在 section 顶层另起
+     `evidence: [...]` 即触发 `extra_forbidden`。
+
+### Changed
+
+- `metrics/capital.py`：`StockFlowRow` 字段重命名 `net_mf_yi → net_inflow_yi`
+  并新增 `name`（与 `schemas.CapitalLeader` 对齐）。`_stock_flows()` SQL 改成
+  `LEFT JOIN mr_stock_basic` 取名，`name` 缺失时回退到 `ts_code`
+  （满足 `min_length=1` 而不编造数据）。
+- `prompts.py::_SECTORS_SYSTEM`：显式声明 `today_top` / `range_top` /
+  `classification.{new_mainline,relay,fading}` 每一项均为同形状的完整对象
+  `{name, pctChg, ...}`，**严禁只填 ts_code 字符串**。
+- `prompts.py::HARD_DISCIPLINE` 第 3 条补一句限定：evidence **只能**作为
+  `findings[*].evidence` 数组项出现；section 顶层另起 `evidence` 会触发
+  `extra_forbidden`。
+
+无迁移变更；纯代码 / prompt 修复。0.1.2 → 0.1.3 升级时框架不会执行任何 SQL。
+
+---
+
 ## v0.1.2 — 2026-06-02 — 修复 mr_moneyflow_ind_ths.name NOT NULL 约束错误
 
 ### Fixed
