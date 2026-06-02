@@ -4,7 +4,65 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
-## v0.1.0 — Unreleased — 骨架 + 数据 + 指标 + LLM + 报告 + 全链路 CLI（PR-1 ~ PR-6）
+## v0.1.0 — 2026-06-01 — 首个正式版本（PR-1 ~ PR-7）
+
+`market-review` —— A 股市场单日 / 区间复盘插件的 MVP 释出。覆盖设计文档
+[MARKET_REVIEW_DESIGN.md](../MARKET_REVIEW_DESIGN.md) 的全部 v0.1 MVP 范围
+（§1.3 "v0.1 必做" 七项全部交付）。
+
+### Highlights
+
+- **单日 / 区间复盘**：3 种入口（隐式探最近交易日 / `--trade-date` / `--start
+  ... --end`），区间长度上限 `MrConfig.max_window_days`（默认 60、硬上限 252）。
+- **7 个 LLM section**：overview / sectors / sentiment / capital / leaders /
+  style / risk_outlook —— 顺序编排 + `theme_tags` 传递，per-section 失败隔
+  离自动回落到 `partial_failed` 而不中断后续。
+- **27 个 Tushare API 全量落库**：所有 §5.2 落表矩阵的 API 一次性 sync 到
+  `mr_*` 表（单日 / 区间两个粒度），`force_sync` 透传到框架 cache class 层。
+- **7 个确定性 metrics 模块**：市场宽度 / 情绪温度计 (0-100) / 多口径资金流 /
+  板块轮动 (geometric chain 累计 + 三栏分类) / 龙头 4 维交叉打分 / 风格大小盘
+  flip 检测 / 8 个风险信号。
+- **报告契约 v1.0**：strict pydantic `ReviewReportSchema` 序列化为
+  `summary.json`，driveOfficial 官网首屏 + 章节展示；附 `summary.md` 本地阅
+  读 + 7 个 `*.md` per-section 文件 + `metrics.json` 本地审计 +
+  `llm_calls.jsonl` LLM 调用审计。
+- **`summary.json` 自动上传**：通过框架 `ReportUploader.upload(plugin_name=
+  "市场复盘", trade_date=window.anchor)` 投递官网；失败 / 缺文件 / 用户关
+  闭等场景全部 best-effort emit event 不阻断 run。
+
+### Test coverage
+
+`pytest tests` —— **227 passed**：dispatch 入口契约 / 数据层 sync / 7 个
+metrics 模块 / 7 个 LLM section schema / pipeline 顺序 + 容错 / 报告 schema
+往返 + extras 兜底 + 失败上传 / runner 全链路 / CLI 全 5 个子命令 e2e。
+
+---
+
+### Added (PR-7 release polish — 设计 §18.7)
+
+- `cli.py`：`settings set <key> <value>` 持久化覆盖（写入 `mr_config`，DuckDB
+  upsert via `ON CONFLICT (key) DO UPDATE SET ... updated_at = NOW()`；用
+  `NOW()` 而非裸 `CURRENT_TIMESTAMP` 绕开 DuckDB 把后者解析成列引用的 bug）；
+  `settings reset [<key>] [--yes]` 删除单字段或全部覆盖（不带 `--yes` 全删
+  时打印确认提示退 2，避免误清空）。`MrConfig` 字段名 + 类型校验在 set 时
+  完成（已知字段集 + 默认值同类型）。
+- `pipeline.run_sections` 新增 `replay: LLMReplayPolicy | None` 参数；
+  `runner._build_replay_policy()` 通过框架 `policy_from_env(
+  policy_from_app_config(...))` 接线，让 `DEEPTRADE_FRESH_LLM` /
+  `DEEPTRADE_NO_LLM_REPLAY` / `DEEPTRADE_REPLAY_ONLY` 环境变量 + 框架
+  `llm.replay.enabled/.write/.ttl_days` 配置生效。`rt.config=None` 测试路径
+  自动跳过（返回 `None` = 旧版无缓存语义）。
+- `tests/test_cli_e2e.py`：6 个 settings set/reset 测试。
+- `tests/test_runner.py`：2 个 replay policy 测试（None 容错 + 透传到 LLM
+  call 的 `replay` kwarg）。
+
+### Added (PR-6 CLI 实装 + runner 全链路 — 设计 §5.1 / §7 / §11)
+
+新增 `runner.py` —— 全链路编排器：
+- `RunParams` 冷冻 dataclass（trade_date / start / end / force_sync / llm_provider
+  / no_llm / no_upload）。
+- `RunOutcome`（run_id / status / report_dir / failed_sections / error）。
+- `PreconditionError` —— 用户面错误（与系统错误区分，CLI 退 2 而非 1）。
 
 ### Added (PR-6 CLI 实装 + runner 全链路 — 设计 §5.1 / §7 / §11)
 

@@ -259,6 +259,7 @@ class MrRunner:
                 self._rt, bundle,
                 llm_provider=params.llm_provider,
                 input_fingerprint=input_fp,
+                replay=self._build_replay_policy(),
             )
             self._persist_stage_results(run_id, section_results, params.llm_provider)
             failed_sections: list[SectionName] = [
@@ -401,6 +402,29 @@ class MrRunner:
         if not rows:
             return pd.DataFrame(columns=["exchange", "cal_date", "is_open", "pretrade_date"])
         return pd.DataFrame(rows, columns=["exchange", "cal_date", "is_open", "pretrade_date"])
+
+    def _build_replay_policy(self):
+        """Build a :class:`LLMReplayPolicy` from framework config + env.
+
+        Tests with ``rt.config=None`` get ``None`` back (cache disabled,
+        matches pre-v0.1 behavior). Real-world runs go through
+        :func:`policy_from_env(policy_from_app_config(...))` so framework
+        keys ``llm.replay.enabled / .write / .ttl_days`` AND env overrides
+        ``DEEPTRADE_FRESH_LLM`` / ``DEEPTRADE_NO_LLM_REPLAY`` /
+        ``DEEPTRADE_REPLAY_ONLY`` both take effect.
+        """
+        if self._rt.config is None:
+            return None
+        try:
+            from deeptrade.plugins_api.llm import (  # noqa: PLC0415
+                policy_from_app_config, policy_from_env,
+            )
+            app_cfg = self._rt.config.get_app_config()
+            return policy_from_env(policy_from_app_config(app_cfg))
+        except Exception:  # noqa: BLE001 — never block a run on cache plumbing
+            logger.warning("replay policy build failed; running cache-disabled",
+                           exc_info=True)
+            return None
 
     # ------------------------------------------------------------------
     # mr_runs / mr_events / mr_stage_results persistence

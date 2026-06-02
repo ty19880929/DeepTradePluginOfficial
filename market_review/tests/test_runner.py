@@ -352,6 +352,42 @@ def test_input_fingerprint_is_deterministic_for_same_bundle() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_replay_policy_builder_tolerates_none_config(runner_rt, tmp_path) -> None:
+    """rt.config=None (the test fixture default) → _build_replay_policy=None.
+
+    Prevents a regression where the policy build accidentally requires a
+    real ConfigService and breaks the test-runner setup we use everywhere.
+    """
+    from market_review.runner import MrRunner  # noqa: PLC0415
+    runner = MrRunner(runner_rt, reports_root=tmp_path / "reports")
+    # rt.config is None per the runner_rt fixture, so policy must be None.
+    assert runner._build_replay_policy() is None
+
+
+def test_replay_policy_passed_to_complete_json(
+    runner_rt, fake_llm_manager, tmp_path,
+) -> None:
+    """The replay kw lands in every complete_json call; tests pass disabled-by-
+    default (None) since rt.config=None."""
+    import inspect  # noqa: PLC0415
+    # Re-instrument complete_json to capture replay kw.
+    seen_replays = []
+    original = fake_llm_manager.client.complete_json
+
+    def spy(*args, **kw):
+        seen_replays.append(kw.get("replay"))
+        return original(*args, **kw)
+
+    fake_llm_manager.client.complete_json = spy  # type: ignore[assignment]
+
+    from market_review.runner import MrRunner  # noqa: PLC0415
+    runner = MrRunner(runner_rt, reports_root=tmp_path / "reports")
+    runner.execute(RunParams(trade_date="20260530", no_upload=True))
+    # 7 sections × replay kw — all None in this fixture (config=None).
+    assert len(seen_replays) == 7
+    assert all(r is None for r in seen_replays)
+
+
 def test_reports_dir_is_per_run(runner_rt, tmp_path) -> None:
     runner = MrRunner(runner_rt, reports_root=tmp_path / "reports")
     out1 = runner.execute_sync_only(RunParams(trade_date="20260530"))

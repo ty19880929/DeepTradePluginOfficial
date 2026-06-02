@@ -415,6 +415,135 @@ def _format_config_value(value) -> str:
     return str(value)
 
 
+@settings_app.command("set", help="持久化覆盖一个 MrConfig 字段（写入 mr_config）。")
+def cmd_settings_set(
+    key: str = typer.Argument(
+        ..., help='字段名，如 "max_window_days" 或 "mr.max_window_days"。'
+    ),
+    value: str = typer.Argument(
+        ..., help='值（JSON 形式；字符串 / 数字 / 布尔 / 列表 / 对象皆可）。'
+    ),
+) -> None:
+    """Set a persisted override. Validation tier: cheap.
+
+    - Key must name an existing :class:`MrConfig` field (with or without
+      the ``mr.`` prefix).
+    - Value is parsed via ``json.loads`` so the CLI accepts JSON syntax —
+      bare strings need surrounding double quotes. We fall back to
+      treating the raw arg as a string if JSON parse fails so the common
+      ``settings set sector_provider ths`` case still works.
+    - Type-check is light: ``bool`` field doesn't accept str, ``int`` field
+      requires int, ``dict`` field requires JSON object. Business rules
+      (sentiment_weights sum = 1, etc.) are enforced at use-sites, not here.
+    """
+    from dataclasses import fields  # noqa: PLC0415
+
+    attr = key[3:] if key.startswith("mr.") else key
+    known = {f.name: f for f in fields(MrConfig)}
+    if attr not in known:
+        raise PreconditionError(
+            f"未知配置项：{key!r}；有效字段：{sorted(known)}"
+        )
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        # Bare string fallback — saves the user from quoting "ths" / "dc".
+        parsed = value
+
+    _type_check_for_field(known[attr], parsed)
+
+    db, _, _ = _open_runtime()
+    try:
+        db.execute(
+            # DuckDB upsert. ``NOW()`` rather than bare ``CURRENT_TIMESTAMP``
+            # in the UPDATE clause — DuckDB's parser binds the latter as a
+            # column reference inside ``DO UPDATE SET`` and errors out.
+            "INSERT INTO mr_config (key, value_json) VALUES (?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET "
+            "value_json = excluded.value_json, updated_at = NOW()",
+            [f"mr.{attr}", json.dumps(parsed, ensure_ascii=False)],
+        )
+    finally:
+        _close_db(db)
+
+    console = Console()
+    console.print(
+        f"[green]✓[/] 已保存 [cyan]mr.{attr}[/] = "
+        f"{_format_config_value(parsed)}"
+    )
+    raise typer.Exit(0)
+
+
+def _type_check_for_field(field_info, value) -> None:
+    """Lightweight check — refuse the obvious mistakes.
+
+    pydantic-style coercion would be heavier than warranted for v0.1; we
+    just check the broad category matches.
+    """
+    expected = field_info.type
+    name = field_info.name
+    # ``field_info.type`` may be a string (``__future__ annotations``); use
+    # the dataclass default as the truth source instead.
+    sample = field_info.default if field_info.default is not MISSING else None
+    if sample is not None:
+        ok = isinstance(value, type(sample))
+        # Bool is a subclass of int — refuse cross-typing both directions.
+        if isinstance(sample, bool) and not isinstance(value, bool):
+            ok = False
+        if isinstance(value, bool) and not isinstance(sample, bool):
+            ok = False
+        if not ok:
+            raise PreconditionError(
+                f"{name!r} 期望类型 {type(sample).__name__}，"
+                f"收到 {type(value).__name__}（值 {value!r}）"
+            )
+
+
+# ``dataclasses.MISSING`` sentinel — imported lazily to keep cli import tight.
+from dataclasses import MISSING  # noqa: E402
+
+
+@settings_app.command("reset", help="重置 MrConfig 覆盖（指定 key = 单字段；省略 = 全部）。")
+def cmd_settings_reset(
+    key: str | None = typer.Argument(
+        None, help="字段名；省略 = 删除所有 mr_config 行。",
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="不指定 key 时强制确认，跳过 prompt。",
+    ),
+) -> None:
+    from dataclasses import fields  # noqa: PLC0415
+
+    db, _, _ = _open_runtime()
+    try:
+        console = Console()
+        if key:
+            attr = key[3:] if key.startswith("mr.") else key
+            known = {f.name for f in fields(MrConfig)}
+            if attr not in known:
+                raise PreconditionError(
+                    f"未知配置项：{key!r}；有效字段：{sorted(known)}"
+                )
+            db.execute("DELETE FROM mr_config WHERE key = ?", [f"mr.{attr}"])
+            console.print(f"[green]✓[/] 已重置 [cyan]mr.{attr}[/] 为默认值")
+        else:
+            if not yes:
+                # Non-destructive default — show a count + how to confirm.
+                row = db.fetchone("SELECT COUNT(*) FROM mr_config")
+                count = int(row[0] or 0) if row else 0
+                console.print(
+                    f"[yellow]⚠[/] 即将清空 mr_config（当前 {count} 条覆盖）。"
+                    "重跑命令并加 --yes 确认，或指定具体字段名只重置单项。"
+                )
+                raise typer.Exit(2)
+            db.execute("DELETE FROM mr_config")
+            console.print("[green]✓[/] 已重置 mr_config 全部覆盖")
+    finally:
+        _close_db(db)
+    raise typer.Exit(0)
+
+
 # ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------

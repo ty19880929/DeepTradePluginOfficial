@@ -184,6 +184,89 @@ def test_cli_settings_with_no_subcommand_shows(
     assert "MrConfig" in captured.out
 
 
+def test_cli_settings_set_persists_override(
+    patched_runtime, capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = MarketReviewPlugin().dispatch(["settings", "set", "max_window_days", "30"])
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert "已保存" in cap.out
+    # Verify via show that source switched to "user".
+    rc = MarketReviewPlugin().dispatch(["settings", "show"])
+    cap = capsys.readouterr()
+    assert rc == 0
+    # The row for max_window_days now reads 30 + source=user. Match loosely
+    # against rich-formatted output to dodge color codes.
+    assert "30" in cap.out
+    assert "user" in cap.out
+
+
+def test_cli_settings_set_rejects_unknown_key(
+    patched_runtime, capsys: pytest.CaptureFixture[str],
+) -> None:
+    rc = MarketReviewPlugin().dispatch(["settings", "set", "not_a_field", "1"])
+    cap = capsys.readouterr()
+    assert rc == 2
+    combined = cap.out + cap.err
+    assert "未知配置项" in combined
+
+
+def test_cli_settings_set_rejects_wrong_type(
+    patched_runtime, capsys: pytest.CaptureFixture[str],
+) -> None:
+    # max_window_days is int; passing a string fails the type check.
+    rc = MarketReviewPlugin().dispatch([
+        "settings", "set", "max_window_days", '"hello"',
+    ])
+    cap = capsys.readouterr()
+    assert rc == 2
+    combined = cap.out + cap.err
+    assert "期望类型" in combined
+
+
+def test_cli_settings_reset_single_field(
+    patched_runtime, capsys: pytest.CaptureFixture[str],
+) -> None:
+    MarketReviewPlugin().dispatch(["settings", "set", "max_window_days", "30"])
+    capsys.readouterr()
+    rc = MarketReviewPlugin().dispatch(["settings", "reset", "max_window_days"])
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert "重置" in cap.out
+    # Verify it's gone — show no longer reports user override on that field.
+    MarketReviewPlugin().dispatch(["settings", "show"])
+    cap = capsys.readouterr()
+    # max_window_days should appear with source=default again.
+    assert "max_window_days" in cap.out
+
+
+def test_cli_settings_reset_all_requires_yes(
+    patched_runtime, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``settings reset`` without ``--yes`` shows confirmation instead of nuking."""
+    MarketReviewPlugin().dispatch(["settings", "set", "max_window_days", "30"])
+    capsys.readouterr()
+    rc = MarketReviewPlugin().dispatch(["settings", "reset"])
+    cap = capsys.readouterr()
+    assert rc == 2  # documented confirmation-required exit code
+    assert "--yes" in cap.out
+    # The override is still there.
+    rc = MarketReviewPlugin().dispatch(["settings", "show"])
+    cap = capsys.readouterr()
+    assert "30" in cap.out
+
+
+def test_cli_settings_reset_all_with_yes(
+    patched_runtime, capsys: pytest.CaptureFixture[str],
+) -> None:
+    MarketReviewPlugin().dispatch(["settings", "set", "max_window_days", "30"])
+    capsys.readouterr()
+    rc = MarketReviewPlugin().dispatch(["settings", "reset", "--yes"])
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert "全部覆盖" in cap.out
+
+
 # ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------

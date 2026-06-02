@@ -133,6 +133,7 @@ def run_sections(
     llm_provider: str | None = None,
     profile: _StageProfile | None = None,
     input_fingerprint: str | None = None,
+    replay=None,
 ) -> dict[SectionName, SectionResult]:
     """Execute :data:`SECTION_ORDER` against the LLM, return results by name.
 
@@ -147,6 +148,12 @@ def run_sections(
     ``input_fingerprint`` is the 64-char sha256 the PR-5 runner computes
     over the input bundle; surfaced into every LLM cache key so retries +
     replay key the same way.
+
+    ``replay`` (v0.1.0 PR-7) — optional :class:`LLMReplayPolicy` controlling
+    framework-level LLM response caching. When ``None``, the framework
+    treats the call as cache-disabled (pre-cache behavior). Runner builds
+    this via :func:`policy_from_env(policy_from_app_config(...))` so user
+    env vars (``DEEPTRADE_FRESH_LLM`` etc.) take effect.
     """
     client = rt.llms.get_client(llm_provider, plugin_id=rt.plugin_id, run_id=rt.run_id)
     effective_profile = profile or _default_profile()
@@ -168,6 +175,7 @@ def run_sections(
                 stage=section,
                 schema_version=SCHEMA_VERSION,
                 input_fingerprint=input_fingerprint,
+                replay=replay,
             )
             results[section] = SectionResult(
                 section=section,
