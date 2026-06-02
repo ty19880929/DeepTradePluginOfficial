@@ -62,12 +62,20 @@ def test_hard_discipline_lists_six_rules() -> None:
     - rule 9 added in v0.1.7 to ban prev_context echo (``marketTone`` /
       ``themeTags``) leaking into §2-§7 section top level — qwen-plus had
       mirrored the §1 OverviewSection values back into SentimentSection.
+    - rule 3 / 6 strengthened in v0.1.8 after qwen-plus emitted
+      ``evidence[*].unit = null`` (categorical evidence with no natural
+      unit) and ``evidence[*].value = [..., ...]`` (list of signal names
+      crammed into one scalar) in OverviewSection.findings — both rooted
+      in an EvidenceItem schema-prompt gap, not free-form hallucination.
     """
     for keyword in ("严禁使用外部搜索", "严禁编造数据", "evidence", "四元组",
                     "仅输出 JSON", "1200 中文字", "标量",
                     "headline", "detail", "severity", "extra_forbidden",
                     "章节标识符", "sectionName", "type", "kind",
-                    "prevContext", "marketTone", "themeTags", "语气校准"):
+                    "prevContext", "marketTone", "themeTags", "语气校准",
+                    # v0.1.8 — rule 3 unit branches + rule 6 split-evidence escape hatch
+                    "数值型 evidence", "分类型 evidence", "伪单位",
+                    "拆成多条 evidence 项"):
         assert keyword in HARD_DISCIPLINE
 
 

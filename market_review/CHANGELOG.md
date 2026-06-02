@@ -4,6 +4,60 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.8 — 2026-06-02 — 修复 OverviewSection.findings[*].evidence schema-prompt 契约缺口
+
+### Fixed
+
+- `run --llm qwen-plus` 在 §1 overview section 上踩 `LLMValidationError`，同一
+  响应里同时违反两条 `EvidenceItem` 约束：
+  - `findings.{1,2}.evidence.{*}.unit  Input should be a valid string`
+    (`input_value=None`)
+  - `findings.3.evidence.0.value.{str,int,float}  Input should be a valid …`
+    (`input_value=['stagnant_on_high_volume', 'limit_down_spread']`)
+  根因不是 LLM 凭空乱跑，而是 `EvidenceItem` 的 schema 与 `HARD_DISCIPLINE`
+  之间存在两处契约缺口（v0.1.4 ~ v0.1.7 都只补了顶层字段幻觉，没人下探到
+  `findings[*].evidence[*]` 内部）：
+
+  1. **`unit` 没有逃生通道** — `EvidenceItem.unit` 在 schema 里是强制非空字符串
+     (`Field(min_length=1)`)，但 prompt 第 3 条只声明了 4 元组形状，**没**告诉
+     LLM 分类型 evidence（risk_signal 名 / themeTag / marketTone 标签 /
+     ts_code 等）该填什么。LLM 看到 ``marketTone="结构性上涨"`` 这种纯标签
+     evidence 时只能选 `null`，撞 schema。讽刺的是 `HeadlineMetric.unit` 同样
+     约束下 docstring 写了 `"none" allowed for categorical labels`，但 docstring
+     进不了 prompt，且 `EvidenceItem` 连这行 docstring 都没有。
+  2. **`value` 没有"拆条"逃生通道** — schema 限定 value 为标量
+     (`str|int|float|None`)、prompt 第 6 条也说"严禁数组或对象"，但当 LLM
+     想在**一条 finding** 里引用**多个并列的 signal 名 / ts_code**作为
+     evidence 时，规则只说"不能用数组"，没说"应该拆成多条 evidence 项"——
+     在"信息完整"和"schema 合规"二选一时，LLM 挑了前者，硬塞列表进去。
+  3. §1 Overview 是唯一**横跨全部 7 个指标域**的 section，evidence 天然引用
+     最多分类型聚合 (`triggered_risk_signals` / `theme_tags` …)，所以这两个
+     缺口同时炸在它身上，§2..§7 都是单域、evidence 以数值为主，撞不上。
+
+### Changed
+
+- `schemas.py::EvidenceItem.unit` 从 `str` 改为 `str | None`（默认 `None`，
+  保留 `max_length=16`、删除 `min_length=1`）。schema 与现实对齐：分类型
+  evidence 本就没单位，不该被迫硬编。Numeric evidence 仍**应当**填具体单位，
+  prompt 强制了这条；schema 上允许 `None` 是给 LLM 的"诚实退路"，不是默认行为。
+- `prompts.py::HARD_DISCIPLINE` 第 3 条拆分**数值型** vs **分类型** evidence：
+  数值型必须填具体单位符号（`"%"` / `"亿"` / `"家"` / `"分"` … ≤ 16 字），
+  分类型 unit 必须填 `null` 或省略键、严禁空字符串、严禁伪单位（``"标签"`` /
+  ``"个"`` 凑数会扭曲 interpretation 语义）。把"如何合规"翻译给 LLM。
+- `prompts.py::HARD_DISCIPLINE` 第 6 条新增"拆条"逃生通道：明文说明若一条
+  finding 需要引用多个并列对象，**必须拆成多条 evidence 项**——每项各引用
+  一个具体值；并引用 `Finding.evidence` 上限 5 项的约束让 LLM 主动取舍。
+- `render.py::_render_evidence` 同步把单位 falsy 判定从 `== "none"` 改为
+  `in (None, "none")`，避免 `unit=None` 时 f-string 打印字面 `"None"`。
+- `tests/test_schemas.py` 新增 `test_evidence_item_unit_nullable_for_categorical`
+  / `test_evidence_item_unit_still_length_capped` / `test_evidence_item_disallows_dict_value`
+  覆盖新约束；`tests/test_prompts.py::test_hard_discipline_lists_six_rules`
+  关键字断言扩展 v0.1.8 rule 3/6 新增措辞 + docstring 同步加注 v0.1.8 来历。
+
+无迁移变更；纯 schema + prompt 修复。0.1.7 → 0.1.8 升级时框架不会执行任何 SQL。
+
+---
+
 ## v0.1.7 — 2026-06-02 — 修复 SentimentSection prevContext 回声幻觉 + 全章节顶层 allow-list
 
 ### Fixed

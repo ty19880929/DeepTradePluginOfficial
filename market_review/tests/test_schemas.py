@@ -41,6 +41,38 @@ def test_evidence_item_disallows_array_value() -> None:
         EvidenceItem(field="f", value=[1, 2, 3], unit="个", interpretation="x")  # type: ignore[arg-type]
 
 
+def test_evidence_item_disallows_dict_value() -> None:
+    with pytest.raises(ValidationError):
+        EvidenceItem(field="f", value={"a": 1}, unit="个", interpretation="x")  # type: ignore[arg-type]
+
+
+def test_evidence_item_unit_nullable_for_categorical(  # noqa: ARG001
+    request: pytest.FixtureRequest,
+) -> None:
+    """v0.1.8 — categorical evidence (signal names / theme tags / ts_code
+    references) has no natural unit, so ``unit`` is allowed to be ``None``
+    or omitted entirely. See HARD_DISCIPLINE rule 3."""
+    # Explicit None
+    item = EvidenceItem(
+        field="riskSignal", value="stagnant_on_high_volume",
+        unit=None, interpretation="高位滞涨信号触发",
+    )
+    assert item.unit is None
+    # Omitted entirely (default)
+    item2 = EvidenceItem(
+        field="themeTag", value="AI算力", interpretation="本日核心主题",
+    )
+    assert item2.unit is None
+
+
+def test_evidence_item_unit_still_length_capped() -> None:
+    """v0.1.8 dropped min_length=1 but kept max_length=16 for unit."""
+    with pytest.raises(ValidationError):
+        EvidenceItem(
+            field="f", value=1.0, unit="x" * 17, interpretation="too long unit",
+        )
+
+
 def test_evidence_item_camelcase_alias_round_trip() -> None:
     """populate_by_name=True + alias_generator allow both forms."""
     item = EvidenceItem(field="f", value=1.0, unit="亿", interpretation="x")

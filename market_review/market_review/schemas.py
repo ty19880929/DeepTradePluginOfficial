@@ -93,11 +93,18 @@ class EvidenceItem(_StrictModel):
     ``value`` is restricted to scalars (str / int / float / None); arrays /
     objects are explicitly disallowed via :class:`ConfigDict.extra="forbid"`
     on this model and the type annotation here.
+
+    ``unit`` is nullable (v0.1.8): purely categorical evidence — risk-signal
+    names, theme tags, market_tone labels, ts_code references — has no
+    natural unit, so the LLM is allowed to emit ``null``/省略 instead of
+    inventing one. Numeric evidence still SHOULD carry a unit string
+    (``"%"`` / ``"亿"`` / ``"家"`` …); see :mod:`market_review.prompts`
+    HARD_DISCIPLINE rule 3.
     """
 
     field: str = Field(min_length=1, max_length=64)
     value: str | int | float | None = None
-    unit: str = Field(min_length=1, max_length=16)
+    unit: str | None = Field(default=None, max_length=16)
     interpretation: str = Field(min_length=1, max_length=120)
 
 

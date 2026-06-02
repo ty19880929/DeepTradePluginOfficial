@@ -129,7 +129,7 @@ def _render_findings(findings: list[Finding]) -> str:
 
 def _render_evidence(ev: EvidenceItem) -> str:
     val_display = "null" if ev.value is None else f"{ev.value}"
-    unit_display = "" if ev.unit == "none" else ev.unit
+    unit_display = "" if ev.unit in (None, "none") else ev.unit
     return f"`{ev.field}` = {val_display} {unit_display} — {ev.interpretation}"
 
 

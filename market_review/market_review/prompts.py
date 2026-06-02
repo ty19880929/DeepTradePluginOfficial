@@ -37,11 +37,22 @@ HARD_DISCIPLINE = """
    field 必须是本次 user prompt 中出现过的字段名（不能凭空起名）。
    evidence **只能**作为 ``findings[*].evidence`` 数组项出现；严禁在 section
    顶层另起一个 ``evidence`` 字段（schema 会以 extra_forbidden 报错）。
+   - 数值型 evidence（pct_chg / 净流入 / 涨跌停数等）``unit`` 必须填具体单位
+     符号（``"%"`` / ``"亿"`` / ``"家"`` / ``"分"`` …），且 ≤ 16 字符。
+   - 分类型 evidence（marketTone / themeTags / signal 名 / ts_code / 板块名
+     等无自然单位的标签）``unit`` 必须填 ``null`` 或直接省略该键；**严禁**
+     写空字符串 ``""``、也**严禁**为了凑数硬塞 ``"标签"`` / ``"个"`` 之类
+     的伪单位（会扭曲 interpretation 的语义）。
 4. 仅输出 JSON，不要 Markdown 代码块包裹，不要解释性前后缀。
 5. 单 section 的 narrativeMd 总长度不超过 1200 中文字，分 3~6 段；
    每段第一句必须是结论性句子，后续句给数据支撑。narrativeMd 只能作为
    section 顶层字段出现，**严禁作为 findings[*] 内部字段**。
-6. value 必须是标量（字符串/数字/null），严禁数组或对象。
+6. ``evidence[*].value`` 必须是标量（字符串 / 数字 / null），严禁数组或对象。
+   若一条 finding 需要引用**多个并列对象**（多个 signal 名 / 多个 ts_code /
+   多个板块名 / 多个 theme_tag 等），**必须拆成多条 evidence 项**——每项各
+   引用一个具体值；严禁把列表 ``["a","b"]`` 或对象 ``{"a":1}`` 塞进单条
+   evidence 的 ``value`` 字段。Finding.evidence 上限是 5 项，如确实超出请
+   优先选最有代表性的 ≤ 5 个。
 7. findings[*] 必须是 {headline, detail, evidence, severity?} 的完整对象：
    - ``headline`` ≤ 80 字结论性短句（必填）；
    - ``detail``   ≤ 240 字一句话说明（必填）；
