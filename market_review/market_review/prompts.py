@@ -39,8 +39,17 @@ HARD_DISCIPLINE = """
    顶层另起一个 ``evidence`` 字段（schema 会以 extra_forbidden 报错）。
 4. 仅输出 JSON，不要 Markdown 代码块包裹，不要解释性前后缀。
 5. 单 section 的 narrativeMd 总长度不超过 1200 中文字，分 3~6 段；
-   每段第一句必须是结论性句子，后续句给数据支撑。
+   每段第一句必须是结论性句子，后续句给数据支撑。narrativeMd 只能作为
+   section 顶层字段出现，**严禁作为 findings[*] 内部字段**。
 6. value 必须是标量（字符串/数字/null），严禁数组或对象。
+7. findings[*] 必须是 {headline, detail, evidence, severity?} 的完整对象：
+   - ``headline`` ≤ 80 字结论性短句（必填）；
+   - ``detail``   ≤ 240 字一句话说明（必填）；
+   - ``evidence`` 即第 3 条定义的四元组数组，1~5 项（必填）；
+   - ``severity`` ∈ {info, positive, warning, critical}，默认 info。
+   严禁在 finding 内出现 narrativeMd / narrative / prose / commentary / text
+   等任何叙事文本字段——叙事文字只能写在 section 顶层 narrativeMd 里
+   （schema 会以 extra_forbidden 报错）。
 """
 
 _NARRATIVE_TARGET_RANGE = "200~1200 字 / 3~6 段"
@@ -76,6 +85,8 @@ _SECTORS_SYSTEM = """
 - ``classification.fading`` 列「前半段进 Top 10，今日跌出」的板块（退潮），形状
   同上。
 - ``rotation_commentary`` 用 200~600 字概括轮动逻辑。
+- ``narrativeMd`` 用 200~1200 字 / 3~6 段在 section 顶层串联主线 / 接力 /
+  退潮的轮动结论，禁止把叙事文本塞进 findings[*]（详见硬性纪律 5 / 7）。
 
 请保持 system / user 中已注入的 theme_tags + market_tone 的论调一致。
 """.strip()

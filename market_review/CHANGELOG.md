@@ -4,6 +4,48 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.4 — 2026-06-02 — 修复 SectorsSection.findings[*] LLM 幻觉
+
+### Fixed
+
+- `run` 在 v0.1.3 之后仍然踩到 `LLMValidationError`，但这次的失败点与 v0.1.3
+  修过的两处完全不同——sectors section 报：
+  - `findings.0.headline   Field required`
+  - `findings.0.detail     Field required`
+  - `findings.0.narrativeMd Extra inputs are not permitted`
+  LLM 把 section 顶层的 `narrativeMd` 错放进了每一条 `finding`，同时漏掉
+  `Finding` 的两个必填字段 `headline` / `detail`。
+
+  根因是 **prompt 从没描述过 `Finding` 的形状**：
+  1. `HARD_DISCIPLINE` 第 3 条只说"evidence 放在 findings[*].evidence"，反而
+     在暗示 LLM 去填 findings 数组，却没说明 finding 的其他必填字段。
+  2. 第 5 条提到 `narrativeMd` 字段名，但 sectors 的 system body 没像
+     leaders / style / risk_outlook 一样明写 narrativeMd 该写在 section 顶层；
+     LLM 自行把它"配对"进了每条 finding，形成 `{evidence, narrativeMd}` 的
+     幻觉形状。
+  3. 框架 `LLMClient._retry_hint_for` 在 `ValidationError` 时调用
+     `_required_field_names(schema)` —— 该函数只读 schema **顶层**
+     `model_fields`，`SectorsSection` 顶层全部字段都有默认值，重试 hint
+     退化成无 field-name 的通用提示，LLM 第二次重写同样的错误形状。
+
+### Changed
+
+- `prompts.py::HARD_DISCIPLINE` 新增第 7 条，显式钉死 `Finding` 形状：
+  `{headline, detail, evidence, severity?}`，并明确禁止在 finding 内出现
+  `narrativeMd` / `narrative` / `prose` / `commentary` / `text` 等叙事字段
+  （schema 以 `extra_forbidden` 报错）。第 5 条同步加一句"narrativeMd 只能
+  作为 section 顶层字段"。
+- `prompts.py::_SECTORS_SYSTEM` 末尾补一条 `narrativeMd` 200~1200 字 /
+  3~6 段在 section 顶层串联结论的说明，与 leaders / style / risk_outlook
+  prompt 对齐。
+- `tests/test_prompts.py::test_hard_discipline_lists_six_rules` 关键词列表
+  扩展 `headline` / `detail` / `severity` / `extra_forbidden`，未来回归
+  会立刻失败。
+
+无迁移变更；纯 prompt 修复。0.1.3 → 0.1.4 升级时框架不会执行任何 SQL。
+
+---
+
 ## v0.1.3 — 2026-06-02 — 修复 sectors / capital section LLM 校验失败
 
 ### Fixed

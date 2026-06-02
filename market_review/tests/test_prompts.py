@@ -51,9 +51,13 @@ def _empty_bundle():
 
 
 def test_hard_discipline_lists_six_rules() -> None:
-    """All six discipline rules from design §5.4.2 are present."""
+    """All seven discipline rules from design §5.4.2 are present (rule 7
+    added in v0.1.4 to pin the Finding shape against LLM hallucinations
+    that placed narrativeMd inside findings[*]).
+    """
     for keyword in ("严禁使用外部搜索", "严禁编造数据", "evidence", "四元组",
-                    "仅输出 JSON", "1200 中文字", "标量"):
+                    "仅输出 JSON", "1200 中文字", "标量",
+                    "headline", "detail", "severity", "extra_forbidden"):
         assert keyword in HARD_DISCIPLINE
 
 
