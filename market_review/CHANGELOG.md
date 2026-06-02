@@ -4,6 +4,38 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.2 — 2026-06-02 — 修复 mr_moneyflow_ind_ths.name NOT NULL 约束错误
+
+### Fixed
+
+- `run` / `sync` 在拉取行业资金流当天整体崩溃：Tushare `moneyflow_ind_ths`
+  返回的行业名字段实际叫 `industry`，而落表 `mr_moneyflow_ind_ths` 的列
+  叫 `name`、PK 又是 `(trade_date, name)`（DuckDB PK 隐含 NOT NULL）。
+  框架 `tushare_client.materialize` 只 INSERT「DataFrame ∩ 目标表」的列，
+  `industry` 进不去、`name` 被 DuckDB 默认成 NULL → `ConstraintException:
+  NOT NULL constraint failed: mr_moneyflow_ind_ths.name`。整条 run 立刻失败。
+
+### Changed
+
+- `data.py`：`_range` 与 `_per_day` 对齐补上 `transform=` 参数，签名为
+  `transform(df, *, start, end) -> df`；新增 `_transform_ind_ths()` 工厂在
+  `materialize` 之前把 `industry` 重命名为 `name`，同时剔除 `name` 为
+  NULL / 空串的行（Tushare 偶发回吐）以避免再次触发 NOT NULL。
+- `tests/conftest.py`：`_Materialize` 记录新增 `columns: tuple[str, ...]`
+  字段，`FakeTushare.materialize` 落表前抓取 `df.columns` —— 历史的「fake 只
+  记录 rows」让本 bug 在单测里完全隐形（API 没配 responder 返回空 DF → early
+  return → 永远走不到 `materialize`）。新增 `_Materialize.columns` 让回归
+  测试可以断言 transform 后的 schema。
+- `tests/test_data.py`：新增两条 `moneyflow_ind_ths` 回归 ——
+  `test_sync_window_moneyflow_ind_ths_renames_industry_to_name`
+  （正向：`industry` → `name`），
+  `test_sync_window_moneyflow_ind_ths_drops_null_name_rows`
+  （边缘：NULL / 空 `industry` 行被过滤）。
+
+无迁移变更；纯代码 / 测试修复。0.1.1 → 0.1.2 升级时框架不会执行任何 SQL。
+
+---
+
 ## v0.1.1 — 2026-06-02 — 修复 mr_block_trade PK 约束错误
 
 ### Fixed

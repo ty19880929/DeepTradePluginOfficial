@@ -72,6 +72,7 @@ class _Materialize:
     table: str
     rows: int
     key_cols: list[str] | None
+    columns: tuple[str, ...] = ()
 
 
 class FakeTushare:
@@ -126,7 +127,10 @@ class FakeTushare:
         key_cols: list[str] | None = None,
     ) -> int:
         n = 0 if df is None else int(len(df))
-        self.materializes.append(_Materialize(table=table_name, rows=n, key_cols=key_cols))
+        cols = tuple(df.columns) if df is not None else ()
+        self.materializes.append(_Materialize(
+            table=table_name, rows=n, key_cols=key_cols, columns=cols,
+        ))
         return n
 
     # --- assertion helpers ------------------------------------------------

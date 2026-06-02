@@ -285,6 +285,7 @@ def sync_window(
         tushare, "moneyflow_ind_ths", "mr_moneyflow_ind_ths",
         key_cols=["trade_date", "name"],
         start=start, end=end, res=res, force_sync=force_sync,
+        transform=_transform_ind_ths(),
     )
     _range(
         tushare, "moneyflow_cnt_ths", "mr_moneyflow_cnt_ths",
@@ -473,6 +474,7 @@ def _range(
     end: str,
     res: SyncResult,
     force_sync: bool,
+    transform: Callable[..., pd.DataFrame] | None = None,
 ) -> None:
     df = tushare.call(
         api,
@@ -481,6 +483,10 @@ def _range(
     )
     if df is None or df.empty:
         return
+    if transform is not None:
+        df = transform(df, start=start, end=end)
+        if df is None or df.empty:
+            return
     n = tushare.materialize(table, df, key_cols=key_cols)
     res.rows_materialized[table] = res.rows_materialized.get(table, 0) + int(n)
 
@@ -511,6 +517,28 @@ def _per_index_range(
 # ---------------------------------------------------------------------------
 # Per-API transforms (column renames, source injection)
 # ---------------------------------------------------------------------------
+
+
+def _transform_ind_ths() -> Callable[..., pd.DataFrame]:
+    """Map ``moneyflow_ind_ths`` frames into the ``mr_moneyflow_ind_ths`` schema.
+
+    Tushare 的 ``moneyflow_ind_ths`` 返回的行业名列叫 ``industry``，而落表
+    ``mr_moneyflow_ind_ths`` 与下游 (``metrics.capital._industry_or_concept``)
+    一致用 ``name`` —— 同表 PK ``(trade_date, name)`` 隐含 NOT NULL，框架
+    ``materialize`` 又只 INSERT 两边都存在的列，``industry`` 进不去、``name``
+    被默认成 NULL → ConstraintException。这里把 ``industry`` 重命名为 ``name``
+    与表对齐；其它列直通即可。空 ``industry`` 单元被剔除以避免再次触发 NOT NULL。
+    """
+
+    def _t(df: pd.DataFrame, *, start: str, end: str) -> pd.DataFrame:  # noqa: ARG001
+        out = df.copy()
+        if "industry" in out.columns and "name" not in out.columns:
+            out = out.rename(columns={"industry": "name"})
+        if "name" in out.columns:
+            out = out[out["name"].notna() & (out["name"].astype(str) != "")]
+        return out
+
+    return _t
 
 
 def _transform_hot(source: str) -> Callable[..., pd.DataFrame]:

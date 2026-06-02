@@ -232,6 +232,61 @@ def test_sync_window_hot_transform_renames_and_injects_source(
     assert sum(m.rows for m in hot_materializes) == 3
 
 
+def test_sync_window_moneyflow_ind_ths_renames_industry_to_name(
+    mr_db, fake_tushare: FakeTushare,
+) -> None:
+    """Tushare 的 ``moneyflow_ind_ths`` 返回行业名为 ``industry``，落表
+    ``mr_moneyflow_ind_ths`` 的 PK 字段叫 ``name`` —— 不重命名会触发
+    PK 隐含的 NOT NULL 约束（v0.1.1 实测崩溃过）。``_transform_ind_ths``
+    必须在 ``materialize`` 之前把这一列对齐。"""
+    rt = _runtime_with_tushare(mr_db, fake_tushare)
+
+    fake_tushare.set_static(
+        "moneyflow_ind_ths",
+        pd.DataFrame({
+            "trade_date": ["20260528", "20260528"],
+            "ts_code": ["881270.TI", "881271.TI"],
+            "industry": ["元件", "光模块"],   # ← Tushare 真实列名
+            "lead_stock": ["胜业电气", "新易盛"],
+            "net_amount": [47.0, 88.0],
+        }),
+    )
+    sync_window(rt, _three_day_window())
+
+    mats = fake_tushare.materializes_to("mr_moneyflow_ind_ths")
+    assert len(mats) == 1, "range API expected single materialize"
+    assert mats[0].rows == 2
+    assert "name" in mats[0].columns, (
+        "transform must rename 'industry' → 'name' before materialize "
+        f"(saw {mats[0].columns!r})"
+    )
+    assert "industry" not in mats[0].columns, (
+        f"transform must drop 'industry' after rename (saw {mats[0].columns!r})"
+    )
+
+
+def test_sync_window_moneyflow_ind_ths_drops_null_name_rows(
+    mr_db, fake_tushare: FakeTushare,
+) -> None:
+    """Tushare 偶尔回吐 ``industry=None`` 的行，仍会触发同样的 NOT NULL；
+    transform 必须在落表前剔除这些行而不是整批失败。"""
+    rt = _runtime_with_tushare(mr_db, fake_tushare)
+
+    fake_tushare.set_static(
+        "moneyflow_ind_ths",
+        pd.DataFrame({
+            "trade_date": ["20260528", "20260528", "20260528"],
+            "industry": ["元件", None, ""],
+            "net_amount": [47.0, 1.0, 2.0],
+        }),
+    )
+    sync_window(rt, _three_day_window())
+
+    mats = fake_tushare.materializes_to("mr_moneyflow_ind_ths")
+    assert len(mats) == 1
+    assert mats[0].rows == 1, "rows with NULL / empty industry must be filtered"
+
+
 def test_sync_window_skips_apis_yielding_empty(
     mr_db, fake_tushare: FakeTushare,
 ) -> None:
