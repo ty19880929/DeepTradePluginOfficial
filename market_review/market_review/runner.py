@@ -48,6 +48,7 @@ from deeptrade.plugins_api.events import EventLevel, EventType, StrategyEvent
 
 from . import data
 from .calendar import TradeCalendar
+from .config import load_mr_config
 from .metrics.breadth import compute_breadth
 from .metrics.capital import compute_capital
 from .metrics.leaders import compute_leaders
@@ -261,6 +262,12 @@ class MrRunner:
                 input_fingerprint=input_fp,
                 replay=self._build_replay_policy(),
             )
+            # ``SectorsSection.provider`` is data-source metadata (THS / DC),
+            # not LLM output — it lives in MrConfig. We removed it from the
+            # _SECTORS_SYSTEM prompt allow-list (v0.1.9 fix for qwen-plus
+            # 把 provider 填成 "板块轮动分析师" 的幻觉)，so overwrite it from
+            # config now to keep the persisted JSON + report metadata honest.
+            self._inject_sector_provider(section_results)
             self._persist_stage_results(run_id, section_results, params.llm_provider)
             failed_sections: list[SectionName] = [
                 name for name in SECTION_ORDER
@@ -455,6 +462,27 @@ class MrRunner:
                WHERE run_id = ?""",
             [status, finished, summary_json, input_fingerprint, error, run_id],
         )
+
+    def _inject_sector_provider(self, results: dict) -> None:
+        """Overwrite ``SectorsSection.provider`` from :class:`MrConfig`.
+
+        Why: ``provider`` is data-source metadata (THS vs DC), not an LLM
+        decision, so the prompt forbids the LLM from emitting it (v0.1.9).
+        Without this hook, the persisted ``response_json`` and the rendered
+        report would always show the schema default ``"ths"`` regardless of
+        ``mr_config.mr.sector_provider``. Errors loading config degrade
+        silently to the schema default — a stale config row should never
+        block report rendering.
+        """
+        sectors = results.get("sectors")
+        if sectors is None or sectors.schema is None:
+            return
+        try:
+            cfg = load_mr_config(self._rt.db)
+        except Exception as exc:  # noqa: BLE001 — config-read robustness
+            logger.warning("load_mr_config failed; leaving sectors.provider default: %s", exc)
+            return
+        sectors.schema.provider = cfg.sector_provider
 
     def _persist_stage_results(
         self, run_id: str, results: dict, llm_provider: str | None,

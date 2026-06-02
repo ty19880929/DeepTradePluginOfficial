@@ -125,6 +125,32 @@ def test_prev_context_none_yields_empty_dict() -> None:
     assert build_prev_context(None) == {}
 
 
+def test_sectors_system_prompt_excludes_provider_from_allowlist() -> None:
+    """v0.1.9 fix — ``provider`` is data-source metadata (MrConfig), not LLM
+    output. qwen-plus had filled it with the analyst persona string
+    ``"板块轮动分析师"`` because the prompt listed it as required without
+    explaining the meaning or supplying a value source. The fix:
+
+    1. Drops ``provider`` from the SECTORS allow-list (8 → 7 fields).
+    2. Adds ``provider`` to the 严禁额外加 blacklist alongside
+       ``marketTone`` / ``themeTags`` / ``section`` / etc.
+    3. Surfaces the reason ("数据源元信息（THS / DC）, 由调用方根据 MrConfig
+       填入") so future weak-discipline models know why to skip it.
+    """
+    sectors_prompt = SECTION_SYSTEM_PROMPTS["sectors"]
+    assert "7 个字段" in sectors_prompt
+    assert "8 个字段" not in sectors_prompt
+    assert "``provider``" in sectors_prompt
+    # The blacklist sentence must explicitly forbid provider — search for the
+    # 严禁 marker followed by provider somewhere in the same prompt body.
+    blacklist_segment = sectors_prompt.split("严禁额外加", maxsplit=1)[-1]
+    assert "``provider``" in blacklist_segment
+    # The "why" is the part that prevents this exact regression: a future
+    # model reading the prompt should learn that provider is config-side
+    # metadata, not LLM output.
+    assert "MrConfig" in sectors_prompt or "数据源元信息" in sectors_prompt
+
+
 def test_sectors_user_prompt_injects_prev_context() -> None:
     prev = {"marketTone": "震荡分化", "themeTags": ["t1"]}
     out = build_sectors_user_prompt(

@@ -9,8 +9,12 @@ check. The DB-backed load / save / set-from-string helpers (the analogue of
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal
+import json
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:  # pragma: no cover
+    from deeptrade.core.db import Database
 
 
 @dataclass
@@ -78,3 +82,31 @@ class MrConfig:
     llm_replay_enabled: bool = True
     llm_replay_write: bool = True
     llm_replay_ttl_days: int | None = None
+
+
+def load_mr_config(db: Database) -> MrConfig:
+    """Build :class:`MrConfig` from defaults + ``mr_config`` table overrides.
+
+    Mirrors the override layering ``_settings_show`` performs in :mod:`cli`:
+    rows in ``mr_config`` are keyed ``mr.<field>`` and their ``value_json``
+    column wins over the dataclass default. Unknown keys are silently
+    ignored (a stale row from an older plugin version should not crash a
+    run). Malformed JSON falls back to the default for that field.
+    """
+    cfg = MrConfig()
+    rows = db.fetchall("SELECT key, value_json FROM mr_config")
+    if not rows:
+        return cfg
+    known = {f.name for f in fields(MrConfig)}
+    for key, value_json in rows:
+        attr = key[3:] if isinstance(key, str) and key.startswith("mr.") else key
+        if attr not in known:
+            continue
+        try:
+            decoded = json.loads(value_json) if value_json else None
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if decoded is None:
+            continue
+        setattr(cfg, attr, decoded)
+    return cfg

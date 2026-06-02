@@ -4,6 +4,55 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.9 — 2026-06-02 — 修复 SectorsSection.provider 数据源元字段被 LLM 幻觉填充
+
+### Fixed
+
+- `run --llm qwen-plus` 在 §2 sectors section 上踩 `LLMValidationError`：
+  ```
+  SectorsSection.provider
+    Input should be 'ths' or 'dc' [type=literal_error,
+    input_value='板块轮动分析师', input_type=str]
+  ```
+  根因不是 LLM 不听话，而是 schema / prompt **角色错位**：
+  - `SectorsSection.provider: Literal["ths", "dc"]` 语义上是「板块行情数据
+    来自同花顺 (THS) 还是东方财富 (DC)」的**数据源元信息**，唯一权威来源是
+    `MrConfig.sector_provider`，**从未经过 LLM**；
+  - 但它被放进了 LLM 响应 schema 的允许字段，并且 `_SECTORS_SYSTEM` 的「8
+    字段白名单」把它**列为必填**；
+  - prompt 既没解释 `provider` 含义、也没给合法取值，user prompt 里也没有
+    任何 `provider` 字段可供回声；
+  - prompt 开头第一句正好是 "你是板块轮动分析师"。LLM 在「必填 + 无说明 +
+    无回声源」真空里，把 `provider` 投射成"服务提供者/角色名"，于是直接写
+    `"provider": "板块轮动分析师"`。这与 v0.1.4 – v0.1.8 修过的"顶层字段
+    幻觉"是同一类**契约真空导致的虚构填充**，只是这次被填的字段是元信息
+    而非业务字段。
+- 副作用清理：之前即便 LLM 偶然填对 `"ths"`，渲染到报告里的 `_板块体系：…_`
+  也只反映 schema 默认值，对 `mr_config.mr.sector_provider` 的用户覆盖
+  视而不见 —— `settings set sector_provider dc` 后的 run 仍写 "ths"。本次
+  一并修掉。
+
+### Changed
+
+- `prompts.py::_SECTORS_SYSTEM` 字段白名单从 8 字段（含 `provider`）改为 7
+  字段（不含 `provider`），并把 `provider` 加入「严禁额外加」黑名单，同时
+  说明它是「数据源元信息（THS / DC），由调用方根据 MrConfig 填入，**绝对
+  不属于 LLM 输出**」。让 LLM 知道这字段为何不该出现，而不是默念字段名。
+- `config.py` 新增 `load_mr_config(db)` 助手：以 `MrConfig()` 默认为底，套上
+  `mr_config` 表的 `mr.<field>` 覆盖；`runner.py` 之前的 7 个 `compute_*`
+  及 LLM 阶段从未实际读过 `mr_config`，这个助手填上了空缺，也复用了 cli
+  `_settings_show` 的 override 加载逻辑。Malformed JSON / 未知 key 静默忽略。
+- `runner.py::MrRunner._inject_sector_provider` 在 `run_sections` 返回之后、
+  `_persist_stage_results` 写库之前，从 `load_mr_config(self._rt.db)` 读出
+  实际 `sector_provider` 并覆盖 `section_results["sectors"].schema.provider`。
+  `load_mr_config` 异常静默降级（保留 schema 默认 `"ths"`），不会因配置表
+  问题阻塞报告渲染。
+
+无迁移变更；纯 schema-prompt 契约 + runner 数据流修复。0.1.8 → 0.1.9 升级时
+框架不会执行任何 SQL。
+
+---
+
 ## v0.1.8 — 2026-06-02 — 修复 OverviewSection.findings[*].evidence schema-prompt 契约缺口
 
 ### Fixed

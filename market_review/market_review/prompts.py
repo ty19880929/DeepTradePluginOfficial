@@ -115,12 +115,14 @@ _SECTORS_SYSTEM = """
 保持一致；prevContext **仅用于语气校准**，**严禁**把这些字段写入响应顶层
 （参见硬性纪律 9）。
 
-输出 JSON 顶层**只能且必须只含以下 8 个字段**（缺数据时给空数组 / 空对象 /
-默认值即可，**不要新增其它键**）：``provider`` / ``todayTop`` / ``rangeTop`` /
+输出 JSON 顶层**只能且必须只含以下 7 个字段**（缺数据时给空数组 / 空对象 /
+默认值即可，**不要新增其它键**）：``todayTop`` / ``rangeTop`` /
 ``classification`` / ``rotationCommentary`` / ``narrativeMd`` / ``findings`` /
-``error``。严禁额外加 ``marketTone`` / ``themeTags`` / ``prevContext`` /
-``window`` / ``section`` / ``sectionName`` / ``type`` 之类的字段——本节身份
-已由调用方约定，参见硬性纪律 8 / 9。
+``error``。严禁额外加 ``provider`` / ``marketTone`` / ``themeTags`` /
+``prevContext`` / ``window`` / ``section`` / ``sectionName`` / ``type`` 之类
+的字段——``provider`` 是数据源元信息（THS / DC），由调用方根据 MrConfig 填入，
+**绝对不属于 LLM 输出**；其余「输入侧 / 元数据」字段同理，本节身份已由调用方
+约定，参见硬性纪律 8 / 9。
 """.strip()
 
 
