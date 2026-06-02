@@ -55,6 +55,13 @@ HARD_DISCIPLINE = """
    category 等任何形式的"章节标识符"或元数据字段——本次响应对应的
    schema 已由调用方约定，无需在 JSON 中再次声明（schema 会以
    extra_forbidden 报错）。如不确定某字段是否被允许，宁可省略。
+9. user prompt 中出现的 ``prevContext`` 字段（典型如 ``marketTone`` /
+   ``themeTags``）**仅用于语气校准**，**绝对禁止**作为响应顶层字段回写——
+   除非本节 schema 显式定义了同名字段（仅 §1 OverviewSection 如此）。
+   类似地，user prompt 中的 ``window`` / ``*Summary`` / ``*Anchor`` /
+   ``sectorsContext`` 等"输入侧"字段也不得回吐到响应顶层。看到它们出现
+   在 user prompt 里，意味着你**已经读到了**，不需要再写回去（schema 会
+   以 extra_forbidden 报错）。
 """
 
 _NARRATIVE_TARGET_RANGE = "200~1200 字 / 3~6 段"
@@ -93,7 +100,16 @@ _SECTORS_SYSTEM = """
 - ``narrativeMd`` 用 200~1200 字 / 3~6 段在 section 顶层串联主线 / 接力 /
   退潮的轮动结论，禁止把叙事文本塞进 findings[*]（详见硬性纪律 5 / 7）。
 
-请保持 system / user 中已注入的 theme_tags + market_tone 的论调一致。
+论调要与 user prompt 中的 ``prevContext.marketTone`` / ``prevContext.themeTags``
+保持一致；prevContext **仅用于语气校准**，**严禁**把这些字段写入响应顶层
+（参见硬性纪律 9）。
+
+输出 JSON 顶层**只能且必须只含以下 8 个字段**（缺数据时给空数组 / 空对象 /
+默认值即可，**不要新增其它键**）：``provider`` / ``todayTop`` / ``rangeTop`` /
+``classification`` / ``rotationCommentary`` / ``narrativeMd`` / ``findings`` /
+``error``。严禁额外加 ``marketTone`` / ``themeTags`` / ``prevContext`` /
+``window`` / ``section`` / ``sectionName`` / ``type`` 之类的字段——本节身份
+已由调用方约定，参见硬性纪律 8 / 9。
 """.strip()
 
 
@@ -106,7 +122,16 @@ _SENTIMENT_SYSTEM = """
 3. narrativeMd 用 {target} 描述情绪温度曲线、强弱日的特征、是否出现明显的
    情绪反转或承接行为。
 
-保持 theme_tags + market_tone 论调一致。
+论调要与 user prompt 中的 ``prevContext.marketTone`` / ``prevContext.themeTags``
+保持一致；prevContext **仅用于语气校准**，**严禁**把这些字段写入响应顶层
+（参见硬性纪律 9）。
+
+输出 JSON 顶层**只能且必须只含以下 9 个字段**（缺数据时给空数组 / 默认值即可，
+**不要新增其它键**）：``series`` / ``avgScore`` / ``strongestDay`` /
+``weakestDay`` / ``moneyEffect`` / ``losingEffect`` / ``narrativeMd`` /
+``findings`` / ``error``。严禁额外加 ``marketTone`` / ``themeTags`` /
+``prevContext`` / ``window`` / ``section`` / ``sectionName`` / ``type`` 之类
+的字段——本节身份已由调用方约定，参见硬性纪律 8 / 9。
 """.strip().format(target=_NARRATIVE_TARGET_RANGE)
 
 
@@ -120,6 +145,17 @@ _CAPITAL_SYSTEM = """
 - ``lhb_highlights`` 用 ≤ 5 条 Finding 提炼游资席位 / 重点个股的亮点 / 异常。
 - narrativeMd 用 {target} 串联资金口径之间的逻辑（如：北向走 ↔ 行业流向匹配；
   主力净额 ↔ 散户净额方向相反 ↔ 趋势可信度）。
+
+论调要与 user prompt 中的 ``prevContext.marketTone`` / ``prevContext.themeTags``
+保持一致；prevContext **仅用于语气校准**，**严禁**把这些字段写入响应顶层
+（参见硬性纪律 9）。
+
+输出 JSON 顶层**只能且必须只含以下 10 个字段**（缺数据时给空数组 / 默认值即可，
+**不要新增其它键**）：``northSummary`` / ``northTop10Today`` / ``industryTop`` /
+``conceptTop`` / ``stockTop`` / ``stockBottom`` / ``lhbHighlights`` /
+``narrativeMd`` / ``findings`` / ``error``。严禁额外加 ``marketTone`` /
+``themeTags`` / ``prevContext`` / ``window`` / ``section`` / ``sectionName`` /
+``type`` 之类的字段——本节身份已由调用方约定，参见硬性纪律 8 / 9。
 """.strip().format(target=_NARRATIVE_TARGET_RANGE)
 
 
@@ -133,11 +169,16 @@ capital / theme，每维 0-25)，筛选 ``primary`` (Top K=5) 与 ``secondary``
 narrativeMd 用 {target} 解释整体龙头格局（梯队是否完整 / 是否有断板 / 是否
 存在被低估的二线接力候选）。
 
+论调要与 user prompt 中的 ``prevContext.marketTone`` / ``prevContext.themeTags``
+保持一致；prevContext **仅用于语气校准**，**严禁**把这些字段写入响应顶层
+（参见硬性纪律 9）。
+
 输出 JSON 顶层**只能且必须只含以下 7 个字段**（缺数据时给空数组 / 空对象 /
 默认值即可，**不要新增其它键**）：``primary`` / ``secondary`` / ``minScore`` /
 ``sectorMap`` / ``narrativeMd`` / ``findings`` / ``error``。严禁额外加
-``section`` / ``sectionName`` / ``type`` 之类的章节标识符——本节身份已由
-调用方约定，参见硬性纪律 8。
+``marketTone`` / ``themeTags`` / ``prevContext`` / ``window`` /
+``sectorsContext`` / ``section`` / ``sectionName`` / ``type`` 之类的字段——
+本节身份已由调用方约定，参见硬性纪律 8 / 9。
 """.strip().format(target=_NARRATIVE_TARGET_RANGE)
 
 
@@ -149,6 +190,17 @@ _STYLE_SYSTEM = """
 - ``flip_signal`` 标识窗口前后半段是否发生大小盘相对强度反转。
 - narrativeMd 用 {target} 描述风格切换的节奏、可能的驱动（北向偏好 / 行业资金
   / 题材热度 / 估值差），引用 evidence 字段。
+
+论调要与 user prompt 中的 ``prevContext.marketTone`` / ``prevContext.themeTags``
+保持一致；prevContext **仅用于语气校准**，**严禁**把这些字段写入响应顶层
+（参见硬性纪律 9）。
+
+输出 JSON 顶层**只能且必须只含以下 7 个字段**（缺数据时给空数组 / 空对象 /
+默认值即可，**不要新增其它键**）：``dominantStyle`` / ``flipSignal`` /
+``series`` / ``rangeSummary`` / ``narrativeMd`` / ``findings`` / ``error``。
+严禁额外加 ``marketTone`` / ``themeTags`` / ``prevContext`` / ``window`` /
+``section`` / ``sectionName`` / ``type`` 之类的字段——本节身份已由调用方
+约定，参见硬性纪律 8 / 9。
 """.strip().format(target=_NARRATIVE_TARGET_RANGE)
 
 
@@ -166,6 +218,17 @@ _RISK_OUTLOOK_SYSTEM = """
 
 narrativeMd 用 {target} 总结风险 + 下个交易日 / 下周关注点。绝对禁止
 "无法预测"等推诿语；用可观测的具体条件代替。
+
+论调要与 user prompt 中的 ``prevContext.marketTone`` / ``prevContext.themeTags``
+保持一致；prevContext **仅用于语气校准**，**严禁**把这些字段写入响应顶层
+（参见硬性纪律 9）。
+
+输出 JSON 顶层**只能且必须只含以下 6 个字段**（缺数据时给空数组 / 默认值即可，
+**不要新增其它键**）：``signals`` / ``overallRisk`` / ``hypotheses`` /
+``narrativeMd`` / ``findings`` / ``error``。严禁额外加 ``marketTone`` /
+``themeTags`` / ``prevContext`` / ``window`` / ``breadthSummary`` /
+``capitalSummary`` / ``section`` / ``sectionName`` / ``type`` 之类的字段——
+本节身份已由调用方约定，参见硬性纪律 8 / 9。
 """.strip().format(target=_NARRATIVE_TARGET_RANGE)
 
 

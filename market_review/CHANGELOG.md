@@ -4,6 +4,57 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.7 — 2026-06-02 — 修复 SentimentSection prevContext 回声幻觉 + 全章节顶层 allow-list
+
+### Fixed
+
+- `run --llm qwen-plus` 在 sentiment section 上踩 `LLMValidationError`：
+  - `SentimentSection.market_tone  Extra inputs are not permitted` (`input_value='结构性上涨'`)
+  - `SentimentSection.theme_tags   Extra inputs are not permitted` (`input_value=['指数失眞','AI算力','小盘承压','结构分化']`)
+  报错中的 `'结构性上涨'` / `['指数失眞', …]` 就是同一 run 中 §1 OverviewSection
+  刚输出、又通过 `_inject_prev_context` 注入回 §3 sentiment user prompt 的
+  `prevContext.marketTone` / `prevContext.themeTags` —— 这是 **prompt 上下文
+  回声 (context echo)**，不是 LLM 凭空编造。
+
+  根因是 v0.1.3 / v0.1.4 / v0.1.5 同一类 "LLM 在顶层添字段" 幻觉的第四个形态，
+  这次靶子是 prev_context 注入的字段被原样回吐到响应顶层：
+  1. `SentimentSection` schema 顶层只有 `series / avgScore / strongestDay /
+     weakestDay / moneyEffect / losingEffect / narrativeMd / findings / error`
+     —— `marketTone` / `themeTags` 仅在 §1 `OverviewSection` 中存在。
+  2. §3 sentiment system prompt 末句"保持 theme_tags + market_tone 论调
+     一致"在表述上语义二义：LLM 在 user prompt 里看到 `prevContext.marketTone` /
+     `prevContext.themeTags` 具体取值 + system 中点名"保持一致"，把"一致"
+     误解为"包含/复述"。
+  3. `HARD_DISCIPLINE` 第 8 条（v0.1.5 加固）禁的是 `section` / `sectionName` /
+     `type` 这类**章节标识符**，没明确禁"prevContext 字段不得回写"——
+     模糊指令斗不过 user prompt 里贴脸的具体取值。
+  4. §3 / §4 / §6 / §7 缺像 §5 leaders 那样的**显式顶层 allow-list**，
+     语义模糊处仍然存在。
+
+### Changed
+
+- `prompts.py::HARD_DISCIPLINE` 新增第 9 条 prev_context 回声禁令：明文禁止
+  `prevContext` / `marketTone` / `themeTags` / `window` / `*Summary` /
+  `*Anchor` / `sectorsContext` 等**输入侧字段**回吐到响应顶层（除非本节
+  schema 显式定义同名字段，仅 §1 OverviewSection 如此）。从穷举式禁令升级
+  为"输入侧 vs 输出侧"二元契约，治本。
+- `prompts.py::_SECTORS_SYSTEM` / `_SENTIMENT_SYSTEM` 把含糊的"保持
+  theme_tags + market_tone 论调一致"改写成"论调要与 user prompt 中的
+  `prevContext.marketTone` / `prevContext.themeTags` 保持一致；prevContext
+  仅用于语气校准，严禁把这些字段写入响应顶层（参见硬性纪律 9）"。
+- §2 / §3 / §4 / §6 / §7 全部新增显式顶层 allow-list 段落（与 §5 leaders
+  v0.1.5 同款），逐 section 列出本节 schema 顶层允许的 camelCase 字段名 +
+  显式禁止 `marketTone` / `themeTags` / `prevContext` / `window` /
+  `*Summary` / `*Context` 等。§5 leaders 原 allow-list 同步补齐 `marketTone` /
+  `themeTags` / `prevContext` / `sectorsContext` 禁止例 + 引用纪律 8 / 9。
+- `tests/test_prompts.py::test_hard_discipline_lists_six_rules` 关键字断言
+  扩展 `prevContext` / `marketTone` / `themeTags` / `语气校准`；docstring
+  新增 v0.1.7 rule 9 的来历。
+
+无迁移变更；纯 prompt 修复。0.1.6 → 0.1.7 升级时框架不会执行任何 SQL。
+
+---
+
 ## v0.1.6 — 2026-06-02 — 修复板块章节渲染显示代码而非名称
 
 ### Fixed

@@ -51,7 +51,7 @@ def _empty_bundle():
 
 
 def test_hard_discipline_lists_six_rules() -> None:
-    """All eight discipline rules from design §5.4.2 are present.
+    """All nine discipline rules from design §5.4.2 are present.
 
     - rule 7 added in v0.1.4 to pin the Finding shape against LLM
       hallucinations that placed narrativeMd inside findings[*].
@@ -59,11 +59,15 @@ def test_hard_discipline_lists_six_rules() -> None:
       fields (``section`` / ``sectionName`` / ``type`` / ``kind`` …) after
       qwen-plus emitted ``{"section": "leader_identification", ...}`` in
       LeadersSection.
+    - rule 9 added in v0.1.7 to ban prev_context echo (``marketTone`` /
+      ``themeTags``) leaking into §2-§7 section top level — qwen-plus had
+      mirrored the §1 OverviewSection values back into SentimentSection.
     """
     for keyword in ("严禁使用外部搜索", "严禁编造数据", "evidence", "四元组",
                     "仅输出 JSON", "1200 中文字", "标量",
                     "headline", "detail", "severity", "extra_forbidden",
-                    "章节标识符", "sectionName", "type", "kind"):
+                    "章节标识符", "sectionName", "type", "kind",
+                    "prevContext", "marketTone", "themeTags", "语气校准"):
         assert keyword in HARD_DISCIPLINE
 
 
