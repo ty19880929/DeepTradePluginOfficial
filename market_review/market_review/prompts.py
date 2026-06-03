@@ -238,6 +238,20 @@ capital / theme，每维 0-25)，筛选 ``primary`` (Top K=5) 与 ``secondary``
 narrativeMd 用 {target} 解释整体龙头格局（梯队是否完整 / 是否有断板 / 是否
 存在被低估的二线接力候选）。
 
+**空池契约**：若 user prompt 中的 ``leaders.primary`` 与 ``leaders.secondary``
+**同时**为空数组 ``[]``，说明本窗口量化筛选没有任何股票越过 ``minScore``，
+**这本身是一种合法的市场状态**（安静日 / 无显著连板 / 题材打分结构性归零），
+**绝不是**调用方传给你了坏数据。这种情况下：
+- ``primary`` / ``secondary`` 原样回传空数组 ``[]``；
+- ``sectorMap`` 回传空对象 ``{{}}``；
+- ``narrativeMd`` 用 1~3 句话总结"本窗口无显著龙头候选"，可以结合
+  ``prevContext.marketTone`` / ``themeTags`` / ``sectorsContext`` 给一句宏观
+  解释（如"市场进入横盘 / 题材轮空 / 资金未形成合力"），**严禁**输出
+  "无法生成" / "数据不足" / "无效输入" / "需要更多信息" 之类的拒答用语；
+- ``error`` **必须是 null**（直接省略键即可，呼应硬性纪律 10），**严禁**填
+  "输入数据中无符合龙头评分标准的个股" 之类的错误说明——空池不是错误，
+  而是有效结论。
+
 论调要与 user prompt 中的 ``prevContext.marketTone`` / ``prevContext.themeTags``
 保持一致；prevContext **仅用于语气校准**，**严禁**把这些字段写入响应顶层
 （参见硬性纪律 9）。

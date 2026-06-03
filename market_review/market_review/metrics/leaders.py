@@ -41,7 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover
 _LADDER_NORM_MAX = 7        # n=7 connecting board normalizes to ~25
 _DEFAULT_PRIMARY_K = 5
 _DEFAULT_SECONDARY_K = 10
-_DEFAULT_MIN_SCORE = 50.0
+_DEFAULT_MIN_SCORE = 30.0
 _RANGE_TOP_POOL = 50        # pool size from the "by-return" pre-filter
 _WAN_PER_YI = 10_000.0
 

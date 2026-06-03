@@ -275,7 +275,7 @@ class LeaderCandidateJson(_StrictModel):
 class LeadersSection(SectionBase):
     primary: list[LeaderCandidateJson] = Field(default_factory=list)
     secondary: list[LeaderCandidateJson] = Field(default_factory=list)
-    min_score: float = Field(default=50.0, ge=0, le=100)
+    min_score: float = Field(default=30.0, ge=0, le=100)
     sector_map: dict[str, list[str]] = Field(default_factory=dict)
 
 

@@ -4,6 +4,96 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.14 — 2026-06-03 — 修复 §5 leaders 空池触发 LLM 拒答 ("输入数据中无符合龙头评分标准的个股")
+
+### Fixed
+
+- 用户报告 `Error generating section: 输入数据中无符合龙头评分标准的个股，
+  无法生成有效龙头列表。` —— 这条文案**不存在于代码**，是 qwen-plus 类 LLM
+  把它写进了 `LeadersSection.error` 字段，前端 / `summary.json` viewer 把
+  `error` 包成 `"Error generating section: …"` 渲染。**与 tushare 数据完全
+  无关**，根因在插件的打分阈值 + 空池处理 + 系统提示词的三角叠加：
+
+  1. **`_DEFAULT_MIN_SCORE = 50` 与 v0.1 题材轴结构性归零互锁**。
+     `metrics/leaders.py::_score_theme` 用 `mr_stock_basic.industry`
+     （Tushare 申万分类，如 "电气设备"）去匹配 `SectorReview.today_top[*].name`
+     （同花顺板块名，如 "光伏设备" / "AI 算力"）—— **两套分类法本来就不互译**，
+     题材分长期为 0（文件顶部 docstring 已承认 "PR-4 will refine this via
+     `ConceptRepository`"）。ladder 维在无连板日也是 0。剩下 return /
+     capital 两个百分位维，每维上限 25，加和上限 50；要清 50 阈值，需要
+     "区间累涨 top-1 AND 主力净流入 top-1" 在**同一只股票**——常态下不成立。
+     `above_cut = []` → `primary = secondary = []`。
+  2. **pipeline 把空池原样喂给 LLM**。`run_sections` 不分章节、对所有 7 节
+     无条件 `client.complete_json`。qwen-plus 看到 `primary: []` +
+     `secondary: []` 选择最保险的退路：填 `error` 字段而不是按 system
+     prompt 要求输出空数组 + 简短 `narrativeMd`。
+  3. **`_LEADERS_SYSTEM` 没有显式锁定空池契约**。原文只一句 "缺数据时给
+     空数组 / 空对象 / 默认值即可"，但没说 "空池**不是错误**" + "`error`
+     必须 `null`"——这正是 v0.1.11 HARD_DISCIPLINE 10 想杜绝的同一族行为
+     的 leaders 版变体，只不过 LLM 这次把它写成 "看似合规" 的字符串而非
+     `[]` / `{}`，HARD_DISCIPLINE 10 接不住。
+
+### Changed
+
+- `metrics/leaders.py::_DEFAULT_MIN_SCORE` 从 `50.0` 降到 `30.0`。同步
+  `config.py::leaders_min_score` 默认 `50.0 → 30.0` 与 `schemas.py::
+  LeadersSection.min_score` 默认 `50.0 → 30.0`。在题材轴 PR-4
+  `ConceptRepository` 落地之前，30 是个能让 "ret + capital 双维偏强 +
+  ladder 任一不为零" 的候选越过阈值的合理截断；不是放弃 "龙头筛选"，
+  而是把 v0.1 限制下的真实强势股喂进 LLM 做最终评注。
+- `pipeline.py::run_sections` 新增 leaders 章节的**确定性短路**：
+  循环每次进入 `leaders` 时先调 `_leaders_pool_empty(bundle.leaders)`，
+  若 `primary` 与 `secondary` 同时为空数组，**直接产出占位
+  `LeadersSection`**（`error=None`、`narrative_md` 写 "本窗口无符合评分
+  标准的龙头候选" + 一句宏观成因引导）并跳过 LLM 调用。这是 1+ 2 的
+  代码侧兜底：即便 LLM 想拒答也没机会被调用，`failed_sections` 不会因
+  "空池"无端膨胀，`run_status` 保持 `success`。占位 `meta` 带
+  `{"skipped": "empty_candidate_pool"}` 便于 audit JSON 区分真实 LLM 行。
+  新增模块级 helpers `_leaders_pool_empty` + `_empty_leaders_placeholder`，
+  与已有 `_placeholder`（LLM 失败兜底）语义正交。
+- `prompts.py::_LEADERS_SYSTEM` 新增 **"空池契约"** 一整段：明文规定
+  `primary` + `secondary` 双空时 narrativeMd 写 1~3 句宏观解释（结合
+  `prevContext.marketTone` / `themeTags` / `sectorsContext`），**严禁**
+  输出 "无法生成" / "数据不足" / "无效输入" / "需要更多信息" 等拒答用语，
+  **特别**把生产环境观察到的原文 `"输入数据中无符合龙头评分标准的个股"`
+  列为禁词字面量，并明文 `error` 必须 `null`（呼应 HARD_DISCIPLINE 10）。
+  belt-and-suspenders 与 (3) 的 pipeline 短路双保险：即便短路逻辑被未来
+  改动绕过，prompt 侧仍能挡住 80% 的 LLM 拒答倾向。
+
+### Tests
+
+- `tests/test_pipeline.py` 新增 4 条用例 + `_stub_leader()` 帮手：
+  - `test_empty_leaders_pool_skips_llm_call` —— 双空时 `leaders` 不在
+    `_FakeLLM.calls` 的 stage 列表里，其余 6 节正常调用；
+  - `test_empty_leaders_pool_emits_success_placeholder` —— 占位
+    `LeadersSection` 的 `error is None`、`narrative_md` 含 "无符合评分
+    标准"、`min_score` 回显输入值、`meta["skipped"] == "empty_candidate_pool"`；
+  - `test_nonempty_leaders_pool_still_hits_llm` —— `primary` 非空时
+    LLM 正常被调用；
+  - `test_empty_secondary_only_with_nonempty_primary_still_hits_llm` —
+    只 `secondary` 空、`primary` 非空时短路不触发。
+- `_empty_bundle()` 签名扩展为 `leaders: LeaderReview | None = None`；
+  默认填一个 `_stub_leader()`，让旧测试（"all 7 LLM calls" 类断言）
+  不受短路逻辑影响。
+- `tests/test_prompts.py::test_leaders_system_prompt_pins_empty_pool_contract` —
+  断言 `_LEADERS_SYSTEM` 含 "空池契约" 标题 + 4 个禁词
+  （`无法生成` / `数据不足` / `无效输入` + 原文字面量）+ `error` & `null`
+  字面共现。
+- `tests/test_metrics_leaders.py::test_default_min_score_is_30` ——
+  断言 `compute_leaders` 默认 `min_score == 30.0` 并附带为何降阈值的
+  长 docstring 解释 v0.1 题材轴限制（避免后人盲目还原 50）。
+- `tests/test_schemas.py::test_leaders_section_default_min_score`
+  默认值断言 `50.0 → 30.0`。
+
+无迁移变更；纯打分阈值 + pipeline 短路 + prompt 文本修复。0.1.13 →
+0.1.14 升级时框架不会执行任何 SQL。
+
+> 真正的"题材轴匹配"修复需要 PR-4 `ConceptRepository` 落地后做
+> Tushare industry ↔ THS 板块 / 概念的语义映射，本次只解决"空池被 LLM
+> 当错误回报"的应急问题。
+
+---
+
 ## v0.1.13 — 2026-06-03 — 修复 CapitalSection.northSummary[*] schema-prompt 契约缺口
 
 ### Fixed

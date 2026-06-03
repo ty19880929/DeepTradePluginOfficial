@@ -160,7 +160,7 @@ def test_capital_section_optional_lists() -> None:
 
 def test_leaders_section_default_min_score() -> None:
     s = LeadersSection()
-    assert s.min_score == 50.0
+    assert s.min_score == 30.0
 
 
 def test_style_section_default_balanced() -> None:

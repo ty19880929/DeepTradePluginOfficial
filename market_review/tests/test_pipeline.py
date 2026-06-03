@@ -15,7 +15,7 @@ import pytest
 
 from market_review.metrics.breadth import BreadthReview
 from market_review.metrics.capital import CapitalReview
-from market_review.metrics.leaders import LeaderReview
+from market_review.metrics.leaders import LeaderCandidate, LeaderReview
 from market_review.metrics.risk import RiskReview
 from market_review.metrics.sectors import SectorReview
 from market_review.metrics.sentiment import SentimentReview
@@ -109,13 +109,31 @@ def _default_responder(stage, schema_cls, *, user=None):  # noqa: ARG001
 # ---------------------------------------------------------------------------
 
 
-def _empty_bundle() -> MetricsBundle:
+def _stub_leader() -> LeaderCandidate:
+    """One minimal candidate so the leaders short-circuit doesn't fire.
+
+    The v0.1.14 pipeline skips the LLM call when ``primary`` and
+    ``secondary`` are both empty (the qwen-plus refusal guard); tests that
+    don't care about the empty-pool path get a single sentinel candidate
+    so the legacy "all 7 sections LLM-called" behavior stays intact.
+    """
+    return LeaderCandidate(
+        ts_code="600000.SH", name="测试龙头", score=42.0,
+        score_breakdown={"ladder": 10, "return": 12, "capital": 10, "theme": 10},
+        industries=[], concepts=[], sector_top_hit=[],
+        ladder_height=None, range_pct_chg=None, cum_main_inflow_yi=None,
+    )
+
+
+def _empty_bundle(*, leaders: LeaderReview | None = None) -> MetricsBundle:
+    if leaders is None:
+        leaders = LeaderReview(primary=[_stub_leader()])
     return MetricsBundle(
         window=Window(mode="day", start="20260530", end="20260530",
                       trade_dates=("20260530",), anchor="20260530"),
         breadth=BreadthReview(), sentiment=SentimentReview(),
         capital=CapitalReview(), sectors=SectorReview(),
-        leaders=LeaderReview(), style=StyleReview(), risk=RiskReview(),
+        leaders=leaders, style=StyleReview(), risk=RiskReview(),
     )
 
 
@@ -251,3 +269,58 @@ def test_section_result_carries_section_name() -> None:
     for section, result in results.items():
         assert isinstance(result, SectionResult)
         assert result.section == section
+
+
+# ---------------------------------------------------------------------------
+# v0.1.14 — empty-leaders short-circuit (skip LLM, deterministic placeholder)
+# ---------------------------------------------------------------------------
+
+
+def test_empty_leaders_pool_skips_llm_call() -> None:
+    """Both primary + secondary empty → no LLM call for the leaders stage."""
+    client = _FakeLLM()
+    rt = _runtime_with_llm(client)
+    bundle = _empty_bundle(leaders=LeaderReview(min_score=30.0))  # empty pool
+    run_sections(rt, bundle)
+    stages_called = [c.stage for c in client.calls]
+    assert "leaders" not in stages_called
+    # All other 6 sections still went through the LLM.
+    assert set(stages_called) == set(SECTION_ORDER) - {"leaders"}
+
+
+def test_empty_leaders_pool_emits_success_placeholder() -> None:
+    """Short-circuit placeholder carries narrative + error=None + min_score echo."""
+    client = _FakeLLM()
+    rt = _runtime_with_llm(client)
+    bundle = _empty_bundle(leaders=LeaderReview(min_score=30.0))
+    results = run_sections(rt, bundle)
+    leaders = results["leaders"]
+    assert isinstance(leaders.schema, LeadersSection)
+    assert leaders.error is None  # empty pool is a valid market state, not an error
+    assert leaders.schema.primary == []
+    assert leaders.schema.secondary == []
+    assert leaders.schema.sector_map == {}
+    assert leaders.schema.min_score == 30.0
+    # narrativeMd is non-empty so the front-end has something to show.
+    assert leaders.schema.narrative_md
+    assert "无符合评分标准" in leaders.schema.narrative_md
+    # Meta carries the skip marker so audit dumps can distinguish from real LLM rows.
+    assert leaders.meta.get("skipped") == "empty_candidate_pool"
+
+
+def test_nonempty_leaders_pool_still_hits_llm() -> None:
+    """Sanity: when primary has at least one candidate, the leaders LLM call fires."""
+    client = _FakeLLM()
+    rt = _runtime_with_llm(client)
+    # _empty_bundle's default leaders includes _stub_leader().
+    run_sections(rt, _empty_bundle())
+    assert any(c.stage == "leaders" for c in client.calls)
+
+
+def test_empty_secondary_only_with_nonempty_primary_still_hits_llm() -> None:
+    """Edge: primary non-empty but secondary empty → LLM still runs (only both-empty short-circuits)."""
+    client = _FakeLLM()
+    rt = _runtime_with_llm(client)
+    bundle = _empty_bundle(leaders=LeaderReview(primary=[_stub_leader()], secondary=[]))
+    run_sections(rt, bundle)
+    assert any(c.stage == "leaders" for c in client.calls)

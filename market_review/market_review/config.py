@@ -54,7 +54,7 @@ class MrConfig:
     # ---- 龙头识别 ----
     leaders_top_k: int = 5
     leaders_secondary_k: int = 10
-    leaders_min_score: float = 50.0
+    leaders_min_score: float = 30.0
 
     # ---- 板块 ----
     sectors_top_k: int = 10

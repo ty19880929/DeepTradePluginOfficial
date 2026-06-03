@@ -162,6 +162,21 @@ def run_sections(
     overview_schema: OverviewSection | None = None
 
     for section in SECTION_ORDER:
+        # Deterministic short-circuit: when ``leaders`` has zero candidates
+        # in both primary + secondary, skip the LLM call. Otherwise qwen-plus
+        # 类模型 looks at the empty arrays and refuses with a Chinese error
+        # string in the ``error`` field rather than complying with the system
+        # prompt's "缺数据时给空数组" rule (the same family of failure the
+        # HARD_DISCIPLINE 10 ``error=[]`` rule was added for in v0.1.11).
+        # The deterministic placeholder keeps ``failed_sections`` clean and
+        # the report status at ``success`` for an objectively empty input.
+        if section == "leaders" and _leaders_pool_empty(bundle.leaders):
+            results[section] = SectionResult(
+                section=section,
+                schema=_empty_leaders_placeholder(bundle.leaders),
+                meta={"skipped": "empty_candidate_pool"},
+            )
+            continue
         try:
             sys_prompt = system_prompt(section)
             user_prompt = _build_user_prompt(
@@ -297,3 +312,34 @@ def _placeholder(schema_cls: type[SectionBase], error: str) -> SectionBase:
     # Generic sections (sectors / sentiment / capital / leaders / style)
     # all have only optional fields beyond SectionBase; default ctor works.
     return schema_cls(error=error)  # type: ignore[call-arg]
+
+
+def _leaders_pool_empty(leaders: LeaderReview) -> bool:
+    """``True`` when the leaders metric returned zero candidates in both lists.
+
+    Used by :func:`run_sections` to short-circuit the leaders LLM call —
+    qwen-plus 类 LLM 看到空 ``primary`` + ``secondary`` 倾向于把 ``error``
+    字段填成一段拒答文案 (e.g. ``"输入数据中无符合龙头评分标准的个股"``)
+    而不是按 system prompt 要求输出空数组 + 简短 ``narrative_md``。
+    """
+    return not leaders.primary and not leaders.secondary
+
+
+def _empty_leaders_placeholder(leaders: LeaderReview) -> SectionBase:
+    """Build a deterministic ``LeadersSection`` for the empty-pool case.
+
+    ``error=None`` on purpose: the LLM didn't fail — the upstream metric
+    objectively had no candidates clearing ``min_score``, which is a
+    valid market state (quiet day / no 连板 / 题材打分结构性归零). Keeping
+    ``error=None`` lets the runner emit ``status=success`` and avoids
+    inflating ``failed_sections``.
+    """
+    from .schemas import LeadersSection  # noqa: PLC0415
+
+    return LeadersSection(
+        narrative_md="本窗口无符合评分标准的龙头候选——量化筛选未发现持续性梯队、资金合力或题材接力，建议结合后续板块 / 情绪 / 资金章节判断。",
+        primary=[],
+        secondary=[],
+        min_score=leaders.min_score,
+        sector_map={},
+    )

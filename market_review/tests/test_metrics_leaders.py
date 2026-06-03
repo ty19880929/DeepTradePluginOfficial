@@ -137,6 +137,21 @@ def test_min_score_filter(mr_db: Database) -> None:
     assert review.primary == []
 
 
+def test_default_min_score_is_30(mr_db: Database) -> None:
+    """v0.1.14 — _DEFAULT_MIN_SCORE lowered from 50 → 30.
+
+    Reason: the 50 cutoff combined with the v0.1 theme axis being
+    structurally near-zero (Tushare ``stock_basic.industry`` 申万体系 ↔
+    ``mr_ths_daily`` THS 板块 name taxonomy mismatch, see leaders.py top
+    docstring) meant that on quiet days with no 连板, no candidate could
+    clear 50, so primary+secondary came back empty and the LLM emitted
+    a refusal in ``LeadersSection.error``. 30 lets median-percentile
+    candidates pass on a single-axis edge so the LLM has data to score.
+    """
+    review = compute_leaders(mr_db, _w(("20260530",)), {})
+    assert review.min_score == 30.0
+
+
 def test_sector_map_filled_for_picked_candidates(mr_db: Database) -> None:
     _stock(mr_db, "A", "A名", industry="光模块")
     _stock(mr_db, "B", "B名", industry="光模块")

@@ -102,9 +102,37 @@ def _seed_mr_trade_cal(db) -> None:
         )
 
 
+def _seed_leaders_signal(db) -> None:
+    """Seed a single ``mr_limit_step`` row + ``mr_stock_basic`` + ``mr_daily``
+    so :func:`compute_leaders` returns at least one candidate ≥ 30 score and
+    the v0.1.14 empty-pool short-circuit in ``pipeline.run_sections`` does
+    NOT fire. Without this, full-run tests would only see 6 LLM calls
+    (leaders short-circuited) — fine semantically, but it would break the
+    "all 7 stages" contract these tests were originally written for.
+
+    A 4-step 连板 on 600001.SH on the anchor day yields
+    ladder_score ≈ 25 * log2(5)/log2(8) ≈ 19.34 — well over 30 even with
+    return/capital/theme all at zero, so the candidate clears the cutoff.
+    """
+    db.execute(
+        "INSERT INTO mr_stock_basic (ts_code, symbol, name, industry, market, list_status) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ["600001.SH", "600001", "A股代表", "光模块", "主板", "L"],
+    )
+    db.execute(
+        "INSERT INTO mr_daily (ts_code, trade_date, pct_chg, close) VALUES (?, ?, ?, ?)",
+        ["600001.SH", "20260530", 5.0, 10.0],
+    )
+    db.execute(
+        "INSERT INTO mr_limit_step (trade_date, ts_code, nums) VALUES (?, ?, ?)",
+        ["20260530", "600001.SH", 4],
+    )
+
+
 @pytest.fixture
 def runner_rt(mr_db, primed_tushare, fake_llm_manager: FakeLLMManager) -> MrRuntime:
     _seed_mr_trade_cal(mr_db)
+    _seed_leaders_signal(mr_db)
     return MrRuntime(
         db=mr_db,
         config=None,  # type: ignore[arg-type] — runner doesn't read config in tests

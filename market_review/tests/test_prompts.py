@@ -675,6 +675,29 @@ def test_leaders_user_prompt_includes_sectors_context() -> None:
     assert decoded["sectorsContext"]["todayTop"][0]["name"] == "光模块"
 
 
+def test_leaders_system_prompt_pins_empty_pool_contract() -> None:
+    """v0.1.14 — when primary+secondary are both empty arrays, the LLM
+    must NOT fill ``error``: empty pool is a valid market state, not a
+    refusal trigger. Echoes HARD_DISCIPLINE 10 (``error`` type lock) for
+    the leaders-specific failure mode where qwen-plus 类 LLM wrote
+    ``"输入数据中无符合龙头评分标准的个股，无法生成有效龙头列表"`` into
+    ``error`` rather than complying with the "缺数据时给空数组" rule.
+    """
+    leaders_prompt = SECTION_SYSTEM_PROMPTS["leaders"]
+    # The new section is anchored on the literal "空池契约" header.
+    assert "空池契约" in leaders_prompt
+    # The forbidden refusal phrases must be explicitly blacklisted.
+    for forbidden in ("无法生成", "数据不足", "无效输入"):
+        assert forbidden in leaders_prompt, f"missing forbidden phrase {forbidden!r}"
+    # The error=null requirement must be re-stated for this section
+    # (it's also in HARD_DISCIPLINE 10, but inline reinforcement matters
+    # for qwen-plus' attention budget).
+    assert "error" in leaders_prompt and "null" in leaders_prompt
+    # And the false-friend refusal sentence we observed in the wild must
+    # be called out by name as a banned literal.
+    assert "输入数据中无符合龙头评分标准" in leaders_prompt
+
+
 def test_style_and_risk_user_prompts_run_without_crash() -> None:
     out_style = build_style_user_prompt(
         window=_make_window(), style=StyleReview(), prev_context={},
