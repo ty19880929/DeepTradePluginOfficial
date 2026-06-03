@@ -4,6 +4,114 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.11 — 2026-06-03 — 修复 SentimentSection.series[*] schema-prompt 契约缺口 + error 字段类型保护
+
+### Fixed
+
+- `run --llm qwen-plus` 在 §3 sentiment section 上踩 `LLMValidationError`，
+  16 条 pydantic 错误堆成一份"看起来在乱跑"的响应，实际只有两个根因：
+
+  1. **`series[*]` 输入侧 / 输出侧 schema 错位**——`SentimentSnapshotJson`
+     输出 schema 要求 `tradeDate` / `scoreOf100` / `nUp` / `nDown` /
+     `medianPctChg` / `nLimitUp` / `nLimitDown` / `nZhaban` 共 8 个字段，
+     其中 5 个计数字段 (`nUp` / `nDown` / `nLimitUp` / `nLimitDown` /
+     `nZhaban`) **只存在于 `BreadthSnapshot`**，但 `build_sentiment_user_prompt`
+     只 `_serialize(sentiment)`，把 `SentimentReview.series[*]` 原样塞进
+     user prompt——其字段是 `pos_ratio` / `top_ratio` / `crash_ratio` /
+     `limit_up_intensity` / `connection_health` / `n_lhb` / `north_money_yi` /
+     `mean_pct_chg` / `score_0_100` / `median_pct_chg` / `trade_date`。
+     qwen-plus 撞上**契约真空**（HARD_DISCIPLINE 2「不在输入中的字段一律不引用」
+     vs schema 必填这 5 个），选择最保险的退路：把 user prompt 里看到的
+     `sentiment.series[*]` 原样回写。结果：8× `extra_forbidden`（输入侧字段
+     被回写）+ 6× `Field required`（输出字段缺失）。注意 `score_0_100` ≠
+     `score_of_100`——输入侧用数字分隔、schema 用 of 分隔，`populate_by_name`
+     也救不了。
+  2. **顶层 `error: []` 幻觉**——`SectionBase.error` schema 是 `str | None`，
+     LLM 把"没有错误"幻觉成空数组而不是 `null`。这是 v0.1.4 ~ v0.1.10 修过
+     6 次的顶层字段幻觉同一族——`HARD_DISCIPLINE` 之前未明令禁过 `error`
+     的类型。
+
+  设计层面这是第四例 schema-prompt 契约缺口（前三例：v0.1.8 evidence.unit /
+  evidence.value、v0.1.9 sectors.provider、v0.1.10 SectorEntry.tsCode）。
+  qwen-plus 之所以反复触发，是因为它**更忠实于 prompt**——更强的 LLM 偶尔
+  能蒙混过去，反而掩盖了契约缺口。
+
+### Changed
+
+- `prompts.py::_serialize_sentiment_for_prompt(sentiment, breadth)` 新增帮手：
+  按 `trade_date` zip `BreadthSnapshot` + `SentimentSnapshot`，emit 出与
+  `SentimentSnapshotJson` 完全对齐的 8 字段 `series[*]`——LLM 的工作退化为
+  verbatim 复制。`avg_score` / `strongest_day` / `weakest_day` 仍透传到顶层。
+  breadth 缺该日时 counters fallback 到 0（实际罕见，breadth 是 sentiment 的
+  上游）。与 v0.1.10 `_serialize_sectors_for_prompt` 同款"输入侧预整形"模式。
+- `prompts.py::build_sentiment_user_prompt` 签名新增 `breadth` 入参；
+  `pipeline.py::_build_user_prompt` sentiment 路由同步把 `bundle.breadth`
+  传进去。
+- `prompts.py::_SENTIMENT_SYSTEM` 新增 `series[*]` 字段清单段落：明文列出
+  8 个必填字段名 + 7 个禁止回写的输入侧字段（`posRatio` / `topRatio` /
+  `crashRatio` / `limitUpIntensity` / `connectionHealth` / `nLhb` /
+  `northMoneyYi` / `meanPctChg` / `score_0_100`）。特别加注 `scoreOf100`
+  的"字母 O 不是数字 0"歧义——qwen-plus 之前把 `score_of_100` 错抄成
+  `score_0_100` 就是栽在这。Belt-and-suspenders 与 v0.1.10 同款。
+- `prompts.py::HARD_DISCIPLINE` 新增第 10 条 `error` 字段类型保护：明文
+  规定 `error` 只能是字符串或 `null`，严禁 `[]` / `{}` / `""` 等任何空容器。
+  覆盖全 7 个 section（`SectionBase` 共享 `error` 字段）。无错误时直接省略
+  键即可，不要为凑字段硬塞空容器。
+
+### Tests
+
+- `tests/test_prompts.py` 新增 5 条回归测试，覆盖：
+  - `test_sentiment_user_prompt_series_matches_output_schema_shape` —
+    断言 `series[0]` 恰含 8 个 key，counters 来自 breadth；
+  - `test_sentiment_user_prompt_strips_input_side_ratios` —
+    断言 `pos_ratio` / `connection_health` / `score_0_100` 等 9 个输入侧字段
+    不出现在 `series[0]`；
+  - `test_sentiment_user_prompt_preserves_top_level_aggregates` —
+    `avgScore` / `strongestDay` / `weakestDay` 仍透传到 `sentiment` payload 顶层；
+  - `test_sentiment_user_prompt_tolerates_missing_breadth_day` —
+    breadth 缺日时 counters fallback 到 0、不 KeyError；
+  - `test_sentiment_system_prompt_pins_series_field_list` —
+    `_SENTIMENT_SYSTEM` 含 8 必填字段名 + 3 个核心禁词 + 数字/字母歧义提示；
+  - `test_hard_discipline_rule_10_pins_error_field_type` —
+    HARD_DISCIPLINE 含 `error` / `null` / `空数组` / `空对象` / `空字符串`。
+- 原 `test_sentiment_user_prompt_serializes_series` 改名为
+  `_make_sentiment_breadth_pair` 帮手 + 三条更具体的断言。
+
+无迁移变更；纯 schema-prompt 契约修复。0.1.10 → 0.1.11 升级时框架不会执行
+任何 SQL。
+
+---
+
+## v0.1.10 — 2026-06-03 — 修复 SectorsSection.SectorEntry.tsCode schema-prompt 契约缺口
+
+### Fixed
+
+- `run --llm qwen-plus` 在 §2 sectors section 上踩 `LLMValidationError`，
+  30 条 `extra_forbidden` 全部落在 `today_top` / `range_top` /
+  `classification.new_mainline` / `classification.relay` / `classification.fading`
+  的每一个 `SectorEntry` 上，``tsCode`` 字段被原样写入。根因不是 LLM 凭空
+  乱跑——内部 `metrics.sectors.SectorEntry` 数据类带 `ts_code`（板块自身的
+  THS 指数代码，如 `883424.TI`）用于 DB / matrix 索引，但 LLM 输出的
+  `schemas.SectorEntry` **故意不带**——板块由 `name` 标识，``leader_ts_code``
+  是板块内**龙头股票**代码（不同概念）。`build_sectors_user_prompt` 直接
+  `_serialize(sectors)` → `asdict()` 把 `ts_code` 原样喂给 LLM，qwen-plus
+  忠实回写为 `tsCode`，schema 以 30× `extra_forbidden` 拒收。
+
+### Changed
+
+- `prompts.py::_serialize_sectors_for_prompt(sectors)` 新增帮手：在交给 LLM
+  之前从 `today_top` / `range_top` / `new_mainline` / `relay` / `fading` 五栏
+  每一项里剥除 `ts_code`。`matrix` 故意保留——其 `sectors` 轴是 2-D 索引轴，
+  与 `sector_names` + `values` 并列，LLM 不会误当成 SectorEntry 数组。
+- `prompts.py::_SECTORS_SYSTEM` 明文说明 SectorEntry 无 `tsCode` 字段，
+  区分 `leaderTsCode`（龙头股票）vs 板块自身 ts_code（不同概念），并警告
+  即便在矩阵 / prevContext 偶然看到 ts_code 也**绝不**许可回写。
+
+无迁移变更；纯 schema-prompt 契约 + prompt builder 数据流修复。0.1.9 →
+0.1.10 升级时框架不会执行任何 SQL。
+
+---
+
 ## v0.1.9 — 2026-06-02 — 修复 SectorsSection.provider 数据源元字段被 LLM 幻觉填充
 
 ### Fixed

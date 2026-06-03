@@ -73,6 +73,11 @@ HARD_DISCIPLINE = """
    ``sectorsContext`` 等"输入侧"字段也不得回吐到响应顶层。看到它们出现
    在 user prompt 里，意味着你**已经读到了**，不需要再写回去（schema 会
    以 extra_forbidden 报错）。
+10. section 顶层的 ``error`` 字段**只能**是 ``null``（无错误）或一行字符串
+    （错误说明）。**严禁**填空数组 ``[]``、空对象 ``{}``、空字符串 ``""``
+    或任何其它类型——schema 会以 ``string_type`` 拒收 ``[]`` / ``{}``。
+    无错误时**直接省略** ``error`` 键，调用方默认按 ``null`` 处理；不要为了
+    "凑字段"硬塞一个空容器。
 """
 
 _NARRATIVE_TARGET_RANGE = "200~1200 字 / 3~6 段"
@@ -135,12 +140,34 @@ _SECTORS_SYSTEM = """
 
 _SENTIMENT_SYSTEM = """
 你是市场情绪分析师。``series`` 给出窗口每个交易日的 0-100 情绪温度计；
-``avg_score`` 是均值；``strongest_day`` / ``weakest_day`` 是极值日。请：
+``avgScore`` 是均值；``strongestDay`` / ``weakestDay`` 是极值日。请：
 
-1. ``money_effect`` 选 strong / neutral / weak —— 反映赚钱效应强度。
-2. ``losing_effect`` 选 light / moderate / heavy —— 反映亏钱效应。
+1. ``moneyEffect`` 选 strong / neutral / weak —— 反映赚钱效应强度。
+2. ``losingEffect`` 选 light / moderate / heavy —— 反映亏钱效应。
 3. narrativeMd 用 {target} 描述情绪温度曲线、强弱日的特征、是否出现明显的
    情绪反转或承接行为。
+
+``series[*]`` 每一项**只能且必须只含以下 8 个字段**（与 user prompt 中
+``sentiment.series[*]`` 一一对应，**逐字段原样复制即可**，无需也不得做任何
+重算或重命名）：
+
+- ``tradeDate``     — 8 位日期字符串 ``"YYYYMMDD"``
+- ``scoreOf100``    — 0~100 的情绪温度计分数（**注意**：键名是 ``scoreOf100``，
+  字母 ``O`` 不是数字 ``0``；user prompt 里同字段命名为 ``score_of_100``，
+  populate_by_name 已开启，两种写法均可，但**严禁**写成 ``score_0_100``
+  （这是旧版输入侧拼写，schema 不识别））
+- ``nUp``           — 当日上涨家数
+- ``nDown``         — 当日下跌家数
+- ``medianPctChg``  — 当日全市场 pct_chg 中位数
+- ``nLimitUp``      — 当日涨停家数
+- ``nLimitDown``    — 当日跌停家数
+- ``nZhaban``       — 当日炸板家数
+
+严禁在 ``series[*]`` 里出现 ``posRatio`` / ``topRatio`` / ``crashRatio`` /
+``limitUpIntensity`` / ``connectionHealth`` / ``nLhb`` / ``northMoneyYi`` /
+``meanPctChg`` / ``score_0_100`` 等**输入侧中间量**——它们用于支撑 narrativeMd
+的论据描述（可以在 findings[*].evidence 里引用），**不属于** series schema。
+schema 会以 extra_forbidden 拒收。
 
 论调要与 user prompt 中的 ``prevContext.marketTone`` / ``prevContext.themeTags``
 保持一致；prevContext **仅用于语气校准**，**严禁**把这些字段写入响应顶层
@@ -373,13 +400,74 @@ def _serialize_sectors_for_prompt(sectors: Any) -> Any:
 
 
 def build_sentiment_user_prompt(
-    *, window: Any, sentiment: Any, prev_context: dict[str, Any]
+    *,
+    window: Any,
+    sentiment: Any,
+    breadth: Any,
+    prev_context: dict[str, Any],
 ) -> str:
     payload = _inject_prev_context({
         "window": _serialize(window),
-        "sentiment": _serialize(sentiment),
+        "sentiment": _serialize_sentiment_for_prompt(sentiment, breadth),
     }, prev_context)
     return _dump(payload)
+
+
+def _serialize_sentiment_for_prompt(sentiment: Any, breadth: Any) -> dict[str, Any]:
+    """Emit a sentiment payload whose ``series[*]`` exactly matches
+    :class:`market_review.schemas.SentimentSnapshotJson`.
+
+    The internal :class:`metrics.sentiment.SentimentSnapshot` carries only
+    derived ratios + the 0-100 score; the per-day **count** fields the
+    output schema demands (``nUp`` / ``nDown`` / ``nLimitUp`` /
+    ``nLimitDown`` / ``nZhaban``) live on :class:`metrics.breadth.BreadthSnapshot`.
+    Prior to v0.1.11 this helper didn't exist — `build_sentiment_user_prompt`
+    just did `_serialize(sentiment)`, so the LLM saw `pos_ratio` /
+    `connection_health` / `score_0_100` etc. but never the counters the
+    schema required, and qwen-plus rationally replayed the input shape as
+    `series[*]` (8× extra_forbidden + 6× field-required).
+
+    Fix is symmetric with v0.1.10's ``_serialize_sectors_for_prompt``:
+    pre-shape the input to the **exact** output schema so the LLM's job
+    degenerates to verbatim copy. We zip ``breadth.series`` and
+    ``sentiment.series`` by ``trade_date`` and emit one entry per trade
+    date present in either side; days without a breadth row fall back to
+    zero counts (rare — breadth is the upstream of sentiment, so sentiment
+    rarely has dates breadth doesn't).
+
+    Other ``sentiment`` aggregates (avgScore / strongestDay / weakestDay)
+    pass through verbatim so the LLM can copy them top-level.
+    """
+    if sentiment is None:
+        return {}
+    breadth_by_date: dict[str, Any] = {}
+    if breadth is not None:
+        for snap in getattr(breadth, "series", []) or []:
+            td = getattr(snap, "trade_date", None)
+            if td:
+                breadth_by_date[td] = snap
+
+    series_out: list[dict[str, Any]] = []
+    for snap in getattr(sentiment, "series", []) or []:
+        td = getattr(snap, "trade_date", None)
+        b = breadth_by_date.get(td) if td else None
+        series_out.append({
+            "trade_date": td,
+            "score_of_100": getattr(snap, "score_0_100", None),
+            "n_up": getattr(b, "n_up", 0),
+            "n_down": getattr(b, "n_down", 0),
+            "median_pct_chg": getattr(snap, "median_pct_chg", 0.0),
+            "n_limit_up": getattr(b, "n_limit_up", 0),
+            "n_limit_down": getattr(b, "n_limit_down", 0),
+            "n_zhaban": getattr(b, "n_zhaban", 0),
+        })
+
+    return {
+        "series": series_out,
+        "avg_score": getattr(sentiment, "avg_score", 0.0),
+        "strongest_day": getattr(sentiment, "strongest_day", None),
+        "weakest_day": getattr(sentiment, "weakest_day", None),
+    }
 
 
 def build_capital_user_prompt(

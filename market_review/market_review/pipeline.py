@@ -233,7 +233,10 @@ def _build_user_prompt(
         )
     if section == "sentiment":
         return build_sentiment_user_prompt(
-            window=bundle.window, sentiment=bundle.sentiment, prev_context=prev_context,
+            window=bundle.window,
+            sentiment=bundle.sentiment,
+            breadth=bundle.breadth,
+            prev_context=prev_context,
         )
     if section == "capital":
         return build_capital_user_prompt(

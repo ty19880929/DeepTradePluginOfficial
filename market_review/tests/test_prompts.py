@@ -233,20 +233,166 @@ def test_sectors_system_prompt_forbids_ts_code_in_entries() -> None:
     assert "extra_forbidden" in sectors_prompt
 
 
-def test_sentiment_user_prompt_serializes_series() -> None:
-    snap = SentimentSnapshot(
-        trade_date="20260530", median_pct_chg=0.5, mean_pct_chg=0.2,
-        pos_ratio=0.6, top_ratio=0.1, crash_ratio=0.05,
-        limit_up_intensity=0.02, connection_health=0.8,
-        n_lhb=20, north_money_yi=15.0, score_0_100=65.0,
+def _make_sentiment_breadth_pair() -> tuple[SentimentReview, BreadthReview]:
+    """Matched-date sentiment + breadth fixture for v0.1.11 series tests."""
+    sentiment = SentimentReview(
+        series=[SentimentSnapshot(
+            trade_date="20260530", median_pct_chg=0.5, mean_pct_chg=0.2,
+            pos_ratio=0.6, top_ratio=0.1, crash_ratio=0.05,
+            limit_up_intensity=0.02, connection_health=0.8,
+            n_lhb=20, north_money_yi=15.0, score_0_100=65.0,
+        )],
+        avg_score=65.0, strongest_day="20260530", weakest_day="20260530",
     )
-    sentiment = SentimentReview(series=[snap], avg_score=65.0,
-                                strongest_day="20260530", weakest_day="20260530")
+    breadth = BreadthReview(series=[BreadthSnapshot(
+        trade_date="20260530", n_total=5000,
+        n_up=3000, n_down=1800, n_flat=200,
+        n_up5pct=500, n_down5pct=250,
+        n_limit_up=80, n_limit_down=10, n_zhaban=12,
+        up_ladder={2: 30, 3: 15, 4: 5}, n_lhb=20,
+        total_amount_yi=8000.0, index_returns={},
+    )])
+    return sentiment, breadth
+
+
+def test_sentiment_user_prompt_series_matches_output_schema_shape() -> None:
+    """v0.1.11 fix — `SentimentSnapshotJson` schema requires per-day fields
+    (``nUp`` / ``nDown`` / ``nLimitUp`` / ``nLimitDown`` / ``nZhaban``)
+    that live on :class:`BreadthSnapshot`, not :class:`SentimentSnapshot`.
+    Prior to this fix, ``build_sentiment_user_prompt`` only fed sentiment
+    in, so the LLM saw input fields (``pos_ratio`` / ``connection_health``
+    / ``score_0_100`` …) that didn't appear anywhere in the output schema
+    and didn't see the counter fields the schema required — qwen-plus
+    rationally replayed the input shape as ``series[*]`` (8×
+    ``extra_forbidden`` + 6× ``field-required``).
+
+    The fix zips breadth + sentiment by ``trade_date`` and emits exactly
+    the 8 keys ``SentimentSnapshotJson`` consumes (snake_case form, since
+    ``populate_by_name=True`` lets the LLM either pass through or
+    camelCase-flip).
+    """
+    sentiment, breadth = _make_sentiment_breadth_pair()
     out = build_sentiment_user_prompt(
-        window=_make_window(), sentiment=sentiment, prev_context={},
+        window=_make_window(), sentiment=sentiment, breadth=breadth, prev_context={},
     )
     decoded = json.loads(out)
-    assert decoded["sentiment"]["series"][0]["trade_date"] == "20260530"
+    series = decoded["sentiment"]["series"]
+    assert len(series) == 1, series
+    entry = series[0]
+    # Exactly the 8 keys the output schema consumes, no more, no less.
+    assert set(entry) == {
+        "trade_date", "score_of_100",
+        "n_up", "n_down", "median_pct_chg",
+        "n_limit_up", "n_limit_down", "n_zhaban",
+    }, sorted(entry)
+    assert entry["trade_date"] == "20260530"
+    assert entry["score_of_100"] == 65.0
+    # Counters must come from breadth — the LLM would have no way to
+    # invent these from sentiment alone.
+    assert entry["n_up"] == 3000
+    assert entry["n_down"] == 1800
+    assert entry["n_limit_up"] == 80
+    assert entry["n_limit_down"] == 10
+    assert entry["n_zhaban"] == 12
+    assert entry["median_pct_chg"] == 0.5
+
+
+def test_sentiment_user_prompt_strips_input_side_ratios() -> None:
+    """The internal sentiment ratios (``pos_ratio`` / ``connection_health`` /
+    ``score_0_100`` etc.) used to derive the 0-100 score are intermediate
+    inputs to the metric — they must NOT appear in the user prompt's
+    ``series[*]``, otherwise the LLM mirrors them back into the output
+    (the v0.1.11 failure mode). They can still be quoted by the LLM as
+    ``findings[*].evidence`` if it wants narrative support, but only via
+    ``avgScore`` / day labels at the top level."""
+    sentiment, breadth = _make_sentiment_breadth_pair()
+    out = build_sentiment_user_prompt(
+        window=_make_window(), sentiment=sentiment, breadth=breadth, prev_context={},
+    )
+    decoded = json.loads(out)
+    entry = decoded["sentiment"]["series"][0]
+    for forbidden in (
+        "pos_ratio", "top_ratio", "crash_ratio",
+        "limit_up_intensity", "connection_health",
+        "n_lhb", "north_money_yi", "mean_pct_chg",
+        "score_0_100",  # the input-side digit-separated form — schema uses score_of_100
+    ):
+        assert forbidden not in entry, f"sentiment.series[0] leaked {forbidden!r}: {entry!r}"
+
+
+def test_sentiment_user_prompt_preserves_top_level_aggregates() -> None:
+    """avgScore / strongestDay / weakestDay are top-level aggregates the
+    LLM copies through verbatim."""
+    sentiment, breadth = _make_sentiment_breadth_pair()
+    out = build_sentiment_user_prompt(
+        window=_make_window(), sentiment=sentiment, breadth=breadth, prev_context={},
+    )
+    decoded = json.loads(out)
+    payload = decoded["sentiment"]
+    assert payload["avg_score"] == 65.0
+    assert payload["strongest_day"] == "20260530"
+    assert payload["weakest_day"] == "20260530"
+
+
+def test_sentiment_user_prompt_tolerates_missing_breadth_day() -> None:
+    """When sentiment has a date breadth doesn't, fall back to zero counts
+    rather than crashing. This is rare in practice (breadth is sentiment's
+    upstream) but the helper shouldn't KeyError on unaligned series."""
+    sentiment = SentimentReview(series=[SentimentSnapshot(
+        trade_date="20260530", median_pct_chg=0.1, mean_pct_chg=0.1,
+        pos_ratio=0.5, top_ratio=0.05, crash_ratio=0.05,
+        limit_up_intensity=0.01, connection_health=0.5,
+        n_lhb=10, north_money_yi=None, score_0_100=50.0,
+    )])
+    out = build_sentiment_user_prompt(
+        window=_make_window(), sentiment=sentiment, breadth=BreadthReview(),
+        prev_context={},
+    )
+    decoded = json.loads(out)
+    entry = decoded["sentiment"]["series"][0]
+    assert entry["n_up"] == 0
+    assert entry["n_limit_up"] == 0
+    assert entry["n_zhaban"] == 0
+
+
+def test_sentiment_system_prompt_pins_series_field_list() -> None:
+    """v0.1.11 fix — the system prompt must explicitly list the 8 keys
+    SentimentSnapshotJson consumes AND blacklist the input-side ratios
+    the LLM is tempted to mirror back. Without these the schema-prompt
+    gap re-opens the moment someone touches `_serialize_sentiment_for_prompt`.
+
+    Belt-and-suspenders pattern: prompt-builder pre-shapes the input,
+    system prompt forbids the wrong shape. Either alone is enough for
+    well-behaved models; both together catch qwen-plus.
+    """
+    sentiment_prompt = SECTION_SYSTEM_PROMPTS["sentiment"]
+    # Required series field names — each must be called out explicitly.
+    for required in (
+        "``tradeDate``", "``scoreOf100``", "``nUp``", "``nDown``",
+        "``medianPctChg``", "``nLimitUp``", "``nLimitDown``", "``nZhaban``",
+    ):
+        assert required in sentiment_prompt, f"missing required key in prompt: {required}"
+    # Input-side ratios that previously leaked — must be on the blacklist.
+    for forbidden in (
+        "``posRatio``", "``connectionHealth``", "``score_0_100``",
+    ):
+        assert forbidden in sentiment_prompt, f"missing blacklist entry: {forbidden}"
+    # The "字母 O 不是数字 0" disambiguator — qwen-plus mirrored back
+    # ``score_0_100`` because the input dataclass used the digit-separated
+    # form and the output schema uses the of-separated form.
+    assert "scoreOf100" in sentiment_prompt
+    assert "score_0_100" in sentiment_prompt
+
+
+def test_hard_discipline_rule_10_pins_error_field_type() -> None:
+    """v0.1.11 — alongside the SentimentSnapshotJson 6× field-required +
+    8× extra_forbidden, the same qwen-plus response also bombed on
+    ``error: []`` (schema is ``str | None``). All 7 sections inherit
+    this `error` field via `SectionBase`, so the rule lives in
+    HARD_DISCIPLINE not the section-specific prompt.
+    """
+    for keyword in ("``error``", "``null``", "空数组", "空对象", "空字符串"):
+        assert keyword in HARD_DISCIPLINE, f"rule 10 missing keyword: {keyword}"
 
 
 def test_capital_user_prompt_keys_present() -> None:
