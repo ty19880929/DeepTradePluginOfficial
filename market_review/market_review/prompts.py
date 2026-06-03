@@ -101,6 +101,13 @@ _SECTORS_SYSTEM = """
   是完整对象 ``{name, pctChg, netInflowYi?, limitUpCount?, leaderTsCode?,
   leaderName?, persistenceDays?}``，**严禁只填 ts_code 字符串**。``name`` /
   ``pctChg`` 为必填，其余字段在 user prompt 缺数据时省略即可。
+- 板块条目 schema 中**没有 ``tsCode``（板块自身的 THS 指数代码）字段**——
+  ``leaderTsCode`` 是板块**龙头股票**代码（不同概念，不要混淆）。调用方已在
+  user prompt 的 ``sectors.today_top`` / ``range_top`` / ``new_mainline`` /
+  ``relay`` / ``fading`` 五栏剥除板块的 ``ts_code``；即便在矩阵等其它输入
+  上下文偶然看到 ``883424.TI`` 之类，也**严禁**把 ``tsCode`` / ``ts_code``
+  写入任何 SectorEntry（含 today_top / range_top / classification.* 三栏），
+  schema 会以 extra_forbidden 报错。
 - ``classification.new_mainline`` 列「今日 Top 10 中区间前半段未进 Top 10」
   的板块（新主线候选），每一项**与 today_top 同形状的完整对象**，不是 ts_code。
 - ``classification.relay`` 列「今日和前半段都进 Top 10」的板块（接力），形状
@@ -323,9 +330,46 @@ def build_sectors_user_prompt(
 ) -> str:
     payload = _inject_prev_context({
         "window": _serialize(window),
-        "sectors": _serialize(sectors),
+        "sectors": _serialize_sectors_for_prompt(sectors),
     }, prev_context)
     return _dump(payload)
+
+
+def _serialize_sectors_for_prompt(sectors: Any) -> Any:
+    """Serialize ``SectorReview`` with ``ts_code`` stripped from each entry.
+
+    The internal :class:`market_review.metrics.sectors.SectorEntry` dataclass
+    carries a ``ts_code`` (板块自身的 THS 指数代码, e.g. ``883424.TI``) for
+    DB / matrix indexing, but the LLM-output
+    :class:`market_review.schemas.SectorEntry` **deliberately omits it** —
+    sectors are referenced by ``name``, and ``leader_ts_code`` is reserved
+    for the leading **stock** inside a sector (different concept).
+
+    v0.1.10 fix: prior to this, ``_serialize(sectors)`` faithfully echoed
+    ``ts_code`` into the user prompt, and qwen-plus replayed it back as
+    ``tsCode`` on every today_top / range_top / classification.new_mainline
+    entry (30× ``extra_forbidden`` → SectorsSection fail). The system prompt
+    now forbids ``tsCode`` explicitly *and* this helper removes the
+    temptation from the input data — belt-and-suspenders, matching the
+    v0.1.9 ``provider`` fix pattern.
+
+    ``matrix`` is left alone: its ``sectors`` list is a 2-D indexing axis
+    paired with ``sector_names`` + ``values``, not a list of objects the
+    LLM would mistake for ``SectorEntry``.
+    """
+    raw = _serialize(sectors)
+    if not isinstance(raw, dict):
+        return raw
+    for key in ("today_top", "range_top", "new_mainline", "relay", "fading"):
+        entries = raw.get(key)
+        if not isinstance(entries, list):
+            continue
+        raw[key] = [
+            {k: v for k, v in entry.items() if k != "ts_code"}
+            if isinstance(entry, dict) else entry
+            for entry in entries
+        ]
+    return raw
 
 
 def build_sentiment_user_prompt(

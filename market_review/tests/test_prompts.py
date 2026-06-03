@@ -168,6 +168,71 @@ def test_sectors_user_prompt_omits_prev_context_when_empty() -> None:
     assert "prevContext" not in decoded
 
 
+def test_sectors_user_prompt_strips_ts_code_from_entries() -> None:
+    """v0.1.10 fix — the internal :class:`metrics.sectors.SectorEntry`
+    dataclass carries ``ts_code`` for DB / matrix indexing, but the
+    LLM-output :class:`schemas.SectorEntry` deliberately omits it. Prior
+    to this fix the prompt builder echoed ``ts_code`` straight into the
+    user payload, and qwen-plus replayed it back as ``tsCode`` on every
+    today_top / range_top / classification.new_mainline entry (30×
+    ``extra_forbidden``). The fix strips ``ts_code`` from each entry in
+    all five board lists so the LLM has nothing to mirror.
+
+    ``matrix`` is intentionally left alone — its ``sectors`` axis is a
+    parallel list paired with ``sector_names`` + ``values`` and the LLM
+    does not confuse it for a SectorEntry array.
+    """
+    sectors = SectorReview(
+        today_top=[
+            SectorEntry(ts_code="883424.TI", name="光模块", pct_chg=5.0, persistence_days=2),
+        ],
+        range_top=[
+            SectorEntry(ts_code="883422.TI", name="存储芯片", pct_chg=8.5, persistence_days=3),
+        ],
+        new_mainline=[
+            SectorEntry(ts_code="884282.TI", name="人形机器人", pct_chg=4.2, persistence_days=1),
+        ],
+        relay=[
+            SectorEntry(ts_code="884071.TI", name="AI 算力", pct_chg=3.1, persistence_days=2),
+        ],
+        fading=[
+            SectorEntry(ts_code="700409.TI", name="白酒", pct_chg=-2.0, persistence_days=0),
+        ],
+    )
+    out = build_sectors_user_prompt(
+        window=_make_window(), sectors=sectors, prev_context={},
+    )
+    decoded = json.loads(out)
+    sectors_payload = decoded["sectors"]
+    for key in ("today_top", "range_top", "new_mainline", "relay", "fading"):
+        entries = sectors_payload[key]
+        assert entries, f"{key} should be non-empty in this fixture"
+        for entry in entries:
+            assert "ts_code" not in entry, f"{key} entry leaked ts_code: {entry!r}"
+            assert "tsCode" not in entry, f"{key} entry leaked tsCode: {entry!r}"
+            # The semantically meaningful fields must still be present.
+            assert "name" in entry
+            assert "pct_chg" in entry
+
+
+def test_sectors_system_prompt_forbids_ts_code_in_entries() -> None:
+    """v0.1.10 fix — the system prompt must explicitly tell the LLM that
+    SectorEntry has no ``tsCode`` field, paired with the prompt-builder
+    strip above. Without this prompt-side disclaimer a sufficiently
+    confident model could re-introduce ``tsCode`` from earlier turn
+    context, the matrix.sectors axis, or upstream prevContext.
+    """
+    sectors_prompt = SECTION_SYSTEM_PROMPTS["sectors"]
+    # The disclaimer must call out both the schema-side absence and the
+    # leaderTsCode vs board-ts_code distinction (different concept).
+    assert "``tsCode``" in sectors_prompt
+    assert "leaderTsCode" in sectors_prompt
+    assert "龙头股票" in sectors_prompt
+    # Must explicitly warn that even seeing ts_code in input does NOT
+    # license echoing it — this is the lesson the LLM keeps missing.
+    assert "extra_forbidden" in sectors_prompt
+
+
 def test_sentiment_user_prompt_serializes_series() -> None:
     snap = SentimentSnapshot(
         trade_date="20260530", median_pct_chg=0.5, mean_pct_chg=0.2,
