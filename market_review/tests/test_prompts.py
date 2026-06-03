@@ -10,7 +10,7 @@ from market_review.metrics.breadth import BreadthReview, BreadthSnapshot
 from market_review.metrics.capital import CapitalReview
 from market_review.metrics.leaders import LeaderReview
 from market_review.metrics.risk import RiskReview
-from market_review.metrics.sectors import SectorEntry, SectorReview
+from market_review.metrics.sectors import SectorEntry, SectorMatrix, SectorReview
 from market_review.metrics.sentiment import SentimentReview, SentimentSnapshot
 from market_review.metrics.style import StyleReview
 from market_review.prompts import (
@@ -213,6 +213,91 @@ def test_sectors_user_prompt_strips_ts_code_from_entries() -> None:
             # The semantically meaningful fields must still be present.
             assert "name" in entry
             assert "pct_chg" in entry
+
+
+def test_sectors_user_prompt_drops_matrix() -> None:
+    """v0.1.12 fix — :class:`SectorMatrix` is a (~500 boards) × (window days)
+    pct_chg grid. Shipping it into the user prompt verbatim bloated the
+    request body to the point where qwen-plus's streaming gateway closed
+    the chunked-transfer connection mid-response (``httpx.RemoteProtocolError:
+    peer closed connection without sending complete message body``). The
+    error escapes the framework's ``(APITimeoutError, APIError)`` transport
+    catch (httpx protocol errors don't subclass either), so tenacity does
+    NOT retry and the section fails immediately.
+
+    Output schema :class:`SectorsSection` consumes only ``today_top`` /
+    ``range_top`` / ``classification`` / ``rotation_commentary`` /
+    ``narrative_md`` / ``findings`` / ``error`` — none reference
+    ``matrix``, so dropping it is lossless. Pre-aggregated board entries
+    already carry the only per-board fact the prompt cares about
+    (``pct_chg`` / ``persistence_days``).
+    """
+    matrix = SectorMatrix(
+        sectors=["883424.TI"], sector_names=["光模块"],
+        trade_dates=["20260530"], values=[[5.0]],
+        cum_pct_chg=[5.0], persistence_days=[1],
+    )
+    sectors = SectorReview(
+        today_top=[SectorEntry(ts_code="883424.TI", name="光模块",
+                               pct_chg=5.0, persistence_days=1)],
+        matrix=matrix,
+    )
+    out = build_sectors_user_prompt(
+        window=_make_window(), sectors=sectors, prev_context={},
+    )
+    decoded = json.loads(out)
+    assert "matrix" not in decoded["sectors"], decoded["sectors"]
+
+
+def test_sectors_user_prompt_size_under_budget() -> None:
+    """Real-world regression guard: with full THS catalog (~500 boards) ×
+    a 5-day window, the serialized user prompt must stay well under the
+    8 KB ceiling that v0.1.11 routinely blew past via ``matrix``. 8 KB is
+    a generous upper bound — historic non-sectors prompts measure 2–4 KB.
+    """
+    n_boards, n_days = 500, 5
+    trade_dates = [f"2026053{i}" for i in range(n_days)]
+    entries = [
+        SectorEntry(
+            ts_code=f"88{3000 + i:04d}.TI",
+            name=f"板块{i:03d}",
+            pct_chg=float(i % 10),
+            persistence_days=i % 3,
+        )
+        for i in range(10)
+    ]
+    matrix = SectorMatrix(
+        sectors=[f"88{3000 + i:04d}.TI" for i in range(n_boards)],
+        sector_names=[f"板块{i:03d}" for i in range(n_boards)],
+        trade_dates=trade_dates,
+        values=[[float((i + d) % 10) for d in range(n_days)] for i in range(n_boards)],
+        cum_pct_chg=[float(i % 10) for i in range(n_boards)],
+        persistence_days=[i % 3 for i in range(n_boards)],
+    )
+    sectors = SectorReview(
+        today_top=entries[:10], range_top=entries[:10],
+        new_mainline=entries[:5], relay=entries[5:8], fading=entries[8:],
+        matrix=matrix,
+    )
+    out = build_sectors_user_prompt(
+        window=_make_window(), sectors=sectors, prev_context={},
+    )
+    # Without the matrix drop this same fixture serializes to >50 KB.
+    assert len(out.encode("utf-8")) < 8_192, (
+        f"sectors user prompt too large: {len(out.encode('utf-8'))} bytes"
+    )
+
+
+def test_sectors_system_prompt_no_longer_references_matrix() -> None:
+    """v0.1.12 — once ``matrix`` is dropped from the input payload, the
+    system prompt's "+ 板块强度矩阵" reference becomes a contract leak: it
+    promises the LLM input data it will not actually receive. The prompt
+    now lists only the inputs it really gets: per-board pct_chg + 持续性
+    天数.
+    """
+    sectors_prompt = SECTION_SYSTEM_PROMPTS["sectors"]
+    assert "板块强度矩阵" not in sectors_prompt
+    assert "板块持续性天数" in sectors_prompt
 
 
 def test_sectors_system_prompt_forbids_ts_code_in_entries() -> None:

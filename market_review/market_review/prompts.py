@@ -99,8 +99,8 @@ _OVERVIEW_SYSTEM = """
 
 
 _SECTORS_SYSTEM = """
-你是板块轮动分析师。基于 user prompt 提供的当日 / 区间板块涨幅 + 板块持续性
-+ 板块强度矩阵，判断主线归属 / 主线轮动 / 退潮信号：
+你是板块轮动分析师。基于 user prompt 提供的当日 / 区间板块涨幅 +
+板块持续性天数，判断主线归属 / 主线轮动 / 退潮信号：
 
 - ``today_top`` / ``range_top`` 给出今日 Top 10 与区间累计 Top 10。每一项必须
   是完整对象 ``{name, pctChg, netInflowYi?, limitUpCount?, leaderTsCode?,
@@ -363,30 +363,41 @@ def build_sectors_user_prompt(
 
 
 def _serialize_sectors_for_prompt(sectors: Any) -> Any:
-    """Serialize ``SectorReview`` with ``ts_code`` stripped from each entry.
+    """Serialize ``SectorReview`` minus the bulky ``matrix`` axis and the
+    ``ts_code`` field on every board entry.
 
-    The internal :class:`market_review.metrics.sectors.SectorEntry` dataclass
-    carries a ``ts_code`` (板块自身的 THS 指数代码, e.g. ``883424.TI``) for
-    DB / matrix indexing, but the LLM-output
-    :class:`market_review.schemas.SectorEntry` **deliberately omits it** —
-    sectors are referenced by ``name``, and ``leader_ts_code`` is reserved
-    for the leading **stock** inside a sector (different concept).
+    Two strip rules:
 
-    v0.1.10 fix: prior to this, ``_serialize(sectors)`` faithfully echoed
-    ``ts_code`` into the user prompt, and qwen-plus replayed it back as
-    ``tsCode`` on every today_top / range_top / classification.new_mainline
-    entry (30× ``extra_forbidden`` → SectorsSection fail). The system prompt
-    now forbids ``tsCode`` explicitly *and* this helper removes the
-    temptation from the input data — belt-and-suspenders, matching the
-    v0.1.9 ``provider`` fix pattern.
+    1. ``ts_code`` removed from ``today_top`` / ``range_top`` /
+       ``new_mainline`` / ``relay`` / ``fading`` entries. The internal
+       :class:`market_review.metrics.sectors.SectorEntry` dataclass carries
+       it for DB / matrix indexing, but the LLM-output
+       :class:`market_review.schemas.SectorEntry` **deliberately omits it**
+       — sectors are referenced by ``name``, and ``leader_ts_code`` is
+       reserved for the leading **stock** inside a sector (different
+       concept). v0.1.10 introduced this strip after qwen-plus replayed
+       ``tsCode`` back on every entry (30× ``extra_forbidden``).
 
-    ``matrix`` is left alone: its ``sectors`` list is a 2-D indexing axis
-    paired with ``sector_names`` + ``values``, not a list of objects the
-    LLM would mistake for ``SectorEntry``.
+    2. ``matrix`` dropped entirely. v0.1.12 fix:
+       :class:`SectorMatrix` is sized (~全 THS 板块 = 400–500) × (窗口交易日)
+       and serializes to 50–100 KB of largely redundant pct_chg values
+       (the same numbers already aggregate into ``today_top`` / ``range_top``
+       / ``classification.*``). Shipping the whole grid into the user
+       prompt bloated the request body to the point where qwen-plus's
+       streaming gateway closed the chunked-transfer connection mid-stream
+       before producing the full JSON response — surfacing as
+       ``httpx.RemoteProtocolError: peer closed connection without sending
+       complete message body``. The error escapes the framework's
+       ``(APITimeoutError, APIError)`` transport-layer catch (httpx
+       protocol errors do not subclass either), so tenacity does NOT
+       retry and the section fails immediately. Output schema
+       :class:`SectorsSection` does not consume ``matrix`` in any field,
+       so dropping it is lossless for the LLM contract.
     """
     raw = _serialize(sectors)
     if not isinstance(raw, dict):
         return raw
+    raw.pop("matrix", None)
     for key in ("today_top", "range_top", "new_mainline", "relay", "fading"):
         entries = raw.get(key)
         if not isinstance(entries, list):
