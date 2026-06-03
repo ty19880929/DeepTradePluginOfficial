@@ -7,7 +7,14 @@ import json
 import pytest
 
 from market_review.metrics.breadth import BreadthReview, BreadthSnapshot
-from market_review.metrics.capital import CapitalReview
+from market_review.metrics.capital import (
+    CapitalReview,
+    HsgtTopRow,
+    IndustryFlowRow,
+    MktFlowRow,
+    NorthFlowRow,
+    StockFlowRow,
+)
 from market_review.metrics.leaders import LeaderReview
 from market_review.metrics.risk import RiskReview
 from market_review.metrics.sectors import SectorEntry, SectorMatrix, SectorReview
@@ -486,6 +493,174 @@ def test_capital_user_prompt_keys_present() -> None:
     )
     decoded = json.loads(out)
     assert "capital" in decoded
+
+
+def _make_capital_fixture() -> CapitalReview:
+    """CapitalReview with one of every list field populated.
+
+    Covers each shape transformation in ``_serialize_capital_for_prompt``:
+    north_series + mkt_series → north_summary[*]; north_top10_anchor →
+    north_top10_today (net_amount_yi → net_inflow_yi); industry/concept
+    pct_change_avg → pct_chg; stock_top_inflow/outflow → stock_top/bottom.
+    """
+    return CapitalReview(
+        north_series=[NorthFlowRow(trade_date="20260530", north_money_yi=41.47)],
+        mkt_series=[MktFlowRow(
+            trade_date="20260530", main_net_yi=12.5, retail_net_yi=-3.2,
+        )],
+        north_top10_anchor=[HsgtTopRow(
+            trade_date="20260530", ts_code="688048.SH",
+            name="源杰科技", net_amount_yi=1.8,
+        )],
+        industry_top=[IndustryFlowRow(
+            name="半导体", net_inflow_yi=22.5, pct_change_avg=3.4,
+        )],
+        concept_top=[IndustryFlowRow(
+            name="光模块", net_inflow_yi=18.2, pct_change_avg=4.1,
+        )],
+        stock_top_inflow=[StockFlowRow(
+            ts_code="300750.SZ", name="宁德时代", net_inflow_yi=5.6,
+        )],
+        stock_top_outflow=[StockFlowRow(
+            ts_code="600519.SH", name="贵州茅台", net_inflow_yi=-4.9,
+        )],
+    )
+
+
+def test_capital_user_prompt_north_summary_matches_output_schema_shape() -> None:
+    """v0.1.13 fix — :class:`CapitalDailyRow` (the item schema for
+    ``northSummary[*]``) requires 5 fields keyed by ``trade_date`` /
+    ``north_money_yi`` / ``main_net_inflow_yi`` / ``margin_balance_yi`` /
+    ``margin_delta_yi``. Prior to this fix, ``build_capital_user_prompt``
+    only did ``_serialize(capital)``, so the LLM saw ``capital.north_series[*]``
+    (input-side key + inner ``trade_date`` / ``north_money_yi``) and had to
+    invent the mapping to ``northSummary[*]``. Once renaming is in play,
+    qwen-plus rationally generalized "all 5 sibling capital fields use
+    ``netInflowYi``, so the 6th does too" → emitted
+    ``"northSummary":[{"trade_date":"...","net_inflow_yi":41.47}]``, schema
+    rejected with ``extra_forbidden``.
+
+    Fix mirrors v0.1.11 sentiment: zip ``north_series`` + ``mkt_series`` by
+    trade_date so the helper emits exactly the 3 keys ``CapitalDailyRow``
+    consumes when there's data for them (snake_case, since
+    ``populate_by_name=True`` lets the LLM either pass through or
+    camelCase-flip). ``margin_*`` has no v0.1 upstream source and is
+    omitted entirely (schema allows ``None``).
+    """
+    capital = _make_capital_fixture()
+    out = build_capital_user_prompt(
+        window=_make_window(), capital=capital, prev_context={},
+    )
+    decoded = json.loads(out)
+    payload = decoded["capital"]
+    assert "north_summary" in payload, payload
+    summary = payload["north_summary"]
+    assert len(summary) == 1, summary
+    entry = summary[0]
+    # Exactly the keys CapitalDailyRow consumes when upstream has the data.
+    # margin_* omitted (no source); main_net_inflow_yi present (mkt_series has it).
+    assert set(entry) == {
+        "trade_date", "north_money_yi", "main_net_inflow_yi",
+    }, sorted(entry)
+    assert entry["trade_date"] == "20260530"
+    assert entry["north_money_yi"] == 41.47
+    # Renamed from MktFlowRow.main_net_yi → CapitalDailyRow.main_net_inflow_yi.
+    assert entry["main_net_inflow_yi"] == 12.5
+    # The exact hallucination we're guarding against.
+    assert "net_inflow_yi" not in entry, entry
+
+
+def test_capital_user_prompt_strips_input_side_north_keys() -> None:
+    """The internal ``CapitalReview.north_series`` / ``mkt_series`` /
+    ``north_top10_anchor`` / ``mkt_series[*].main_net_yi`` /
+    ``mkt_series[*].retail_net_yi`` / ``north_top10_anchor[*].net_amount_yi``
+    / ``industry_top[*].pct_change_avg`` are intermediate inputs to the
+    metric — they must NOT appear in the user prompt under those names,
+    otherwise the LLM either mirrors them back (v0.1.10 / v0.1.11 / v0.1.13
+    failure mode) or burns budget renaming and rationalizing.
+
+    Pre-shaping renames every input-side key to its output schema name
+    before the LLM sees it, so the LLM's only job is verbatim copy.
+    ``mkt_series.retail_net_yi`` is dropped entirely — CapitalSection
+    schema has no slot for it (mkt 散户 net 数据用于 narrative 推导可由
+    derived ``main_net_inflow_yi`` 推出，不再单独透传).
+    """
+    capital = _make_capital_fixture()
+    out = build_capital_user_prompt(
+        window=_make_window(), capital=capital, prev_context={},
+    )
+    decoded = json.loads(out)
+    payload = decoded["capital"]
+    # Output-side allowlist — only these 6 keys appear in `capital` payload.
+    assert set(payload) == {
+        "north_summary", "north_top10_today",
+        "industry_top", "concept_top",
+        "stock_top", "stock_bottom",
+    }, sorted(payload)
+    # Input-side keys must not leak at the capital top level.
+    for forbidden in (
+        "north_series", "mkt_series",
+        "north_top10_anchor", "stock_top_inflow", "stock_top_outflow",
+        "industry_bottom", "concept_bottom",
+        "north_total_yi", "lhb_series",
+    ):
+        assert forbidden not in payload, f"capital payload leaked {forbidden!r}"
+    # north_summary[*] must not carry input-side leaf names.
+    entry = payload["north_summary"][0]
+    for forbidden in (
+        "net_inflow_yi", "main_net_yi", "retail_net_yi",
+        "net_amount_yi", "north_total_yi",
+    ):
+        assert forbidden not in entry, f"north_summary[0] leaked {forbidden!r}: {entry!r}"
+    # north_top10_today[*] uses CapitalLeader (net_inflow_yi), not the
+    # input-side HsgtTopRow.net_amount_yi.
+    top10_entry = payload["north_top10_today"][0]
+    assert set(top10_entry) == {"ts_code", "name", "net_inflow_yi"}, sorted(top10_entry)
+    assert top10_entry["net_inflow_yi"] == 1.8  # was net_amount_yi=1.8
+    assert "net_amount_yi" not in top10_entry
+    # industry_top[*] uses IndustryFlowRowJson.pct_chg, not pct_change_avg.
+    ind_entry = payload["industry_top"][0]
+    assert set(ind_entry) == {"name", "net_inflow_yi", "pct_chg"}, sorted(ind_entry)
+    assert ind_entry["pct_chg"] == 3.4  # was pct_change_avg=3.4
+    assert "pct_change_avg" not in ind_entry
+
+
+def test_capital_system_prompt_pins_north_summary_field_list() -> None:
+    """v0.1.13 fix — the system prompt must explicitly list the 5 keys
+    CapitalDailyRow consumes AND explicitly blacklist ``netInflowYi`` in
+    ``northSummary[*]`` (the dominant in-section convention and the exact
+    hallucination qwen-plus produced).
+
+    Belt-and-suspenders with ``_serialize_capital_for_prompt``: the helper
+    pre-shapes the input so the LLM has nothing to mirror; the prompt
+    explicitly names the right + wrong keys so a future LLM that ignores
+    the input shape still gets corrected. Either alone catches
+    well-behaved models; both together catch qwen-plus.
+
+    The capital section sits at the **bottom** of a "local regex" trap:
+    five of six neighboring leaves (northTop10Today / industryTop /
+    conceptTop / stockTop / stockBottom) all use ``netInflowYi``, but
+    ``northSummary[*]`` uniquely uses ``northMoneyYi``. The prompt must
+    name this asymmetry out loud — see ``test_sectors_system_prompt_…``
+    for the same belt-and-suspenders pattern (v0.1.10) and
+    ``test_sentiment_system_prompt_pins_series_field_list`` (v0.1.11).
+    """
+    capital_prompt = SECTION_SYSTEM_PROMPTS["capital"]
+    # Required CapitalDailyRow field names — each must be called out explicitly.
+    for required in (
+        "``tradeDate``", "``northMoneyYi``", "``mainNetInflowYi``",
+        "``marginBalanceYi``", "``marginDeltaYi``",
+    ):
+        assert required in capital_prompt, f"missing required key in prompt: {required}"
+    # The exact hallucination — must be on the blacklist.
+    assert "``netInflowYi``" in capital_prompt
+    # The "unique exception" disambiguator — qwen-plus generalized "all
+    # capital fields use netInflowYi" because the prompt didn't surface
+    # that northSummary is the lone exception.
+    assert "唯一例外" in capital_prompt or "例外" in capital_prompt
+    # The schema name must be referenced so the reason for the exception
+    # is anchored to a class, not folklore.
+    assert "CapitalDailyRow" in capital_prompt
 
 
 def test_leaders_user_prompt_includes_sectors_context() -> None:

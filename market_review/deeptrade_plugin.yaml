@@ -1,6 +1,6 @@
 plugin_id: market-review
 name: 市场复盘
-version: 0.1.12
+version: 0.1.13
 type: strategy
 api_version: "1"
 entrypoint: market_review.plugin:MarketReviewPlugin

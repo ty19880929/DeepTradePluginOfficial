@@ -4,6 +4,133 @@ All notable changes to this plugin land here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/spec/v2.0.0.html).
 
+## v0.1.13 — 2026-06-03 — 修复 CapitalSection.northSummary[*] schema-prompt 契约缺口
+
+### Fixed
+
+- `run --llm qwen-plus` 在 §4 capital section 上踩 `LLMValidationError`：
+  ```
+  northSummary.0.net_inflow_yi
+    Extra inputs are not permitted [type=extra_forbidden, input_value=41.47]
+  ```
+
+  根因是第 5 例 schema-prompt 契约缺口（前 4 例：v0.1.8 evidence.unit /
+  evidence.value、v0.1.9 sectors.provider、v0.1.10 SectorEntry.tsCode、
+  v0.1.11 SentimentSnapshotJson.series），且**三条裂缝叠加**：
+
+  1. **schema 自身不一致 — 局部正则投毒**。`CapitalSection` 的 6 个并列字段
+     里 5 个 (``northTop10Today`` / ``industryTop`` / ``conceptTop`` /
+     ``stockTop`` / ``stockBottom``) 的每行都用 ``netInflowYi`` 表示净流入，
+     只有 ``northSummary[*]`` (CapitalDailyRow) 反其道用 ``northMoneyYi``。
+     LLM 在章节内推断"局部正则"：6 个并列槽 5 个叫 ``netInflowYi`` → 第 6 个
+     也该叫 ``netInflowYi``。qwen-plus 不是失控，是"忠实于章节惯例"。
+  2. **user prompt 没预整形，key 名错位强迫 LLM 改名**。
+     ``build_capital_user_prompt`` 之前裸 ``_serialize(capital)``，
+     ``CapitalReview`` 暴露 ``north_series`` / ``mkt_series`` /
+     ``north_top10_anchor`` / ``stock_top_inflow`` / ``stock_top_outflow``
+     一堆与 schema 字段名不对齐的 key (输出 schema 对应叫 ``north_summary`` /
+     合并 ``north_summary[*]`` / ``north_top10_today`` / ``stock_top`` /
+     ``stock_bottom``)；item 内部 ``NorthFlowRow.north_money_yi`` /
+     ``MktFlowRow.main_net_yi`` / ``HsgtTopRow.net_amount_yi`` /
+     ``IndustryFlowRow.pct_change_avg`` 也都需要重命名才匹配 schema。一旦
+     LLM 进入"改名模式"，第 1 条的局部正则就会牵引它把 ``northMoneyYi`` 也
+     "统一化"为 ``netInflowYi``。
+  3. **system prompt 没锁字段表，且主动 prime 错的字段名**。原 ``_CAPITAL_SYSTEM``
+     只一句 ``"north_summary 直接列每日北向净流入序列"`` —— "净流入" 直接
+     camelCase → ``netInflowYi``，再加上没有任何字段允许 / 禁止清单，相当于
+     提示语主动把 LLM 推向错的字段名。对照 ``_SENTIMENT_SYSTEM`` 在 v0.1.11
+     后用一整段明文锁定 8 字段，capital 章节**完全没有这一段**。
+
+### Changed
+
+- `prompts.py::_serialize_capital_for_prompt(capital)` 新增帮手：与 v0.1.10
+  ``_serialize_sectors_for_prompt`` / v0.1.11 ``_serialize_sentiment_for_prompt``
+  同款"输入侧预整形"模式。按 ``trade_date`` zip ``north_series`` +
+  ``mkt_series`` → 输出 ``north_summary[*]`` (``tradeDate`` /
+  ``northMoneyYi`` / ``mainNetInflowYi``)；``margin_balance_yi`` /
+  ``margin_delta_yi`` v0.1 无上游数据，直接省略键（schema 允许 None，
+  HARD_DISCIPLINE 2 严禁引用不在输入的字段）。同时把 ``north_top10_anchor`` →
+  ``north_top10_today``（``net_amount_yi`` → ``net_inflow_yi``）、
+  ``stock_top_inflow`` → ``stock_top``、``stock_top_outflow`` →
+  ``stock_bottom``、``industry_top`` / ``concept_top`` 每行
+  ``pct_change_avg`` → ``pct_chg`` 全部预映射好。``mkt_series.retail_net_yi``
+  / ``industry_bottom`` / ``concept_bottom`` / ``north_total_yi`` /
+  ``lhb_series`` 输出 schema 没槽位，直接 drop——LLM 工作退化为 verbatim 复制。
+- `prompts.py::_CAPITAL_SYSTEM` 新增 ``northSummary[*]`` 5 字段清单段：
+  明文列允许字段 (``tradeDate`` / ``northMoneyYi`` / ``mainNetInflowYi`` /
+  ``marginBalanceYi`` / ``marginDeltaYi``)，**显式 blacklist ``netInflowYi``
+  及 8 个输入侧字段名** (``northSeries`` / ``mktSeries`` / ``northTotal`` /
+  ``netAmountYi`` / ``mainNetYi`` / ``pctChange`` / ``pctChangeAvg``)，并
+  专段说明"capital 章节其它 5 个并列字段确实都叫 ``netInflowYi``，但
+  ``northSummary[*]`` 是**唯一例外**（CapitalDailyRow schema 设计如此）"——
+  把"局部正则"诱因反向锁死。后 3 个 margin / mainNetInflowYi 无数据时**直接
+  省略**该键的指令也明文（呼应 HARD_DISCIPLINE 2）。
+
+### Tests
+
+- `tests/test_prompts.py` 新增 3 条回归 + 一个 `_make_capital_fixture` 帮手：
+  - `test_capital_user_prompt_north_summary_matches_output_schema_shape` —
+    断言 ``north_summary[0]`` 恰含 ``trade_date`` / ``north_money_yi`` /
+    ``main_net_inflow_yi`` 3 key（``margin_*`` 因无数据省略），且**不含**
+    ``net_inflow_yi``；
+  - `test_capital_user_prompt_strips_input_side_north_keys` — 断言
+    ``capital`` 顶层 6-key allowlist + 9 个输入侧 key 被剥；
+    ``north_top10_today[*]`` 已是 CapitalLeader 形状 (``net_inflow_yi`` 而非
+    ``net_amount_yi``)；``industry_top[*]`` 已是 IndustryFlowRowJson 形状
+    (``pct_chg`` 而非 ``pct_change_avg``)；
+  - `test_capital_system_prompt_pins_north_summary_field_list` —
+    ``_CAPITAL_SYSTEM`` 含 5 必填字段名 + ``netInflowYi`` 禁词 +
+    "唯一例外" 反向锁定语 + 引用 ``CapitalDailyRow`` 类名锚定。
+
+无迁移变更；纯 schema-prompt 契约修复。0.1.12 → 0.1.13 升级时框架不会执行
+任何 SQL。
+
+---
+
+## v0.1.12 — 2026-06-03 — 修复 sectors user prompt 矩阵巨型化导致流式连接中断
+
+### Fixed
+
+- `run --llm qwen-plus` 在 §2 sectors section 上踩 `LLMValidationError`
+  的另一种走法：``httpx.RemoteProtocolError: peer closed connection without
+  sending complete message body`` —— qwen-plus 流式网关在生成中途强制断流。
+  该异常**不继承** openai SDK 的 ``(APITimeoutError, APIError)``，框架
+  transport 层 except 接不住，tenacity 0 次重试，section 立即 fail。
+
+  根因是 ``SectorReview.matrix`` (~全 THS 板块 = 400–500 行 × 窗口交易日 列
+  的 ``pct_chg`` 二维浮点格 + ``sector_names`` + ``sectors`` 两条 500-长度
+  并列轴) 被 ``_serialize(sectors)`` 原样塞进 sectors 段 user prompt，单段
+  payload 膨胀到 50–100 KB，流式网关在 chunked-transfer 中途主动关连接。
+  这不是 v0.1.11 的"LLM 输出错"，是**输入端**就已经把请求体撑爆。
+
+### Changed
+
+- `prompts.py::_serialize_sectors_for_prompt` 在 v0.1.10 的 ``ts_code`` 剥离
+  之外，额外 ``raw.pop("matrix", None)``。输出 :class:`SectorsSection` schema
+  不消费 ``matrix`` 字段，其内容已聚合进 ``today_top`` / ``range_top`` /
+  ``classification.*`` 的 ``pct_chg`` + ``persistence_days``，对 LLM 契约无损。
+- `prompts.py::_SECTORS_SYSTEM` 把 "+ 板块强度矩阵" 改为 "+ 板块持续性天数"，
+  避免 prompt 承诺 matrix 输入而实际不再投喂——否则会变成 schema-prompt
+  契约的反向缺口（prompt 说有，data 实际没有）。
+
+### Tests
+
+- `tests/test_prompts.py` 新增 3 条用例：
+  - `test_sectors_user_prompt_drops_matrix` — ``matrix`` 不在 ``decoded["sectors"]``
+    里；
+  - `test_sectors_user_prompt_size_under_budget` — 500 boards × 5 days
+    fixture 序列化后 < 8 KB（修复前同 fixture > 50 KB）；
+  - `test_sectors_system_prompt_no_longer_references_matrix` — 系统 prompt
+    不再出现 "板块强度矩阵"。
+
+无迁移变更；纯 prompt-builder 数据流瘦身。0.1.11 → 0.1.12 升级时框架不会
+执行任何 SQL。
+
+> 框架侧 transport 异常过滤过窄（``httpx.RemoteProtocolError`` 没被
+> ``(APITimeoutError, APIError)`` 接住）是兜底层问题，另案处理。
+
+---
+
 ## v0.1.11 — 2026-06-03 — 修复 SentimentSection.series[*] schema-prompt 契约缺口 + error 字段类型保护
 
 ### Fixed

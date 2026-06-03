@@ -186,9 +186,31 @@ _CAPITAL_SYSTEM = """
 你是资金面分析师。基于六类资金（北向 / 北向 Top10 / 大盘主力 vs 散户 /
 行业 / 概念 / 个股 Top&Bottom / 龙虎榜）数据，给出：
 
-- ``north_summary`` 直接列每日北向净流入序列。
+- ``north_summary`` 直接列每日北向 + 大盘主力净流入序列。每一项**只能且必须只含
+  以下 5 个字段**（其中后 3 个无数据时**直接省略**该键，不要填 0 / null 凑数）：
+
+  - ``tradeDate``        — 8 位日期字符串 ``"YYYYMMDD"``
+  - ``northMoneyYi``     — 当日北向资金净流入（亿）。**注意**：本字段命名
+    是 ``northMoneyYi``，**不是** ``netInflowYi``——capital 章节其它 5 个
+    并列字段（``northTop10Today`` / ``industryTop`` / ``conceptTop`` /
+    ``stockTop`` / ``stockBottom``）的每行确实都叫 ``netInflowYi``，但
+    ``northSummary[*]`` 是**唯一例外**（CapitalDailyRow schema 设计如此）。
+    严禁把 ``netInflowYi`` 写进 ``northSummary[*]``——schema 会以
+    ``extra_forbidden`` 拒收，并把整段 capital section 判为失败。
+  - ``mainNetInflowYi``  — 当日大盘主力（大单+特大单）净流入（亿），有数据时填
+  - ``marginBalanceYi``  — 融资融券余额（亿）；v0.1 暂无上游数据，省略即可
+  - ``marginDeltaYi``    — 融资融券日变动（亿）；v0.1 暂无上游数据，省略即可
+
+  严禁在 ``northSummary[*]`` 里出现 ``netInflowYi`` / ``northSeries`` /
+  ``mktSeries`` / ``northTotal`` / ``netAmountYi`` / ``mainNetYi`` /
+  ``pctChange`` / ``pctChangeAvg`` 等**输入侧 / 旧版字段名**——它们是
+  CapitalReview 内部字段或上游 dataclass 命名，**不属于** CapitalDailyRow
+  schema。schema 会以 extra_forbidden 拒收。
+
 - ``industry_top`` / ``concept_top`` 各 ≤ 10 条 (name / netInflowYi / pctChg)。
-- ``stock_top`` / ``stock_bottom`` 各 ≤ 10 个 universe 内个股。
+- ``stock_top`` / ``stock_bottom`` 各 ≤ 10 个 universe 内个股
+  (tsCode / name / netInflowYi)。
+- ``north_top10_today`` ≤ 10 条北向 Top10 个股 (tsCode / name / netInflowYi)。
 - ``lhb_highlights`` 用 ≤ 5 条 Finding 提炼游资席位 / 重点个股的亮点 / 异常。
 - narrativeMd 用 {target} 串联资金口径之间的逻辑（如：北向走 ↔ 行业流向匹配；
   主力净额 ↔ 散户净额方向相反 ↔ 趋势可信度）。
@@ -486,9 +508,125 @@ def build_capital_user_prompt(
 ) -> str:
     payload = _inject_prev_context({
         "window": _serialize(window),
-        "capital": _serialize(capital),
+        "capital": _serialize_capital_for_prompt(capital),
     }, prev_context)
     return _dump(payload)
+
+
+def _serialize_capital_for_prompt(capital: Any) -> dict[str, Any]:
+    """Emit a capital payload whose top-level keys + nested item shapes
+    exactly match :class:`market_review.schemas.CapitalSection`.
+
+    Prior to v0.1.13 this builder just did ``_serialize(capital)``. The
+    internal :class:`CapitalReview` carries seven calibers under
+    dataclass-native names (``north_series`` / ``mkt_series`` /
+    ``north_top10_anchor`` / ``stock_top_inflow`` / ``stock_top_outflow`` /
+    ``industry_top`` / ``concept_top`` / ``lhb_series``) and its item
+    dataclasses use field names tuned for the metrics layer
+    (``NorthFlowRow.north_money_yi`` / ``MktFlowRow.main_net_yi`` /
+    ``HsgtTopRow.net_amount_yi`` / ``IndustryFlowRow.pct_change_avg``).
+    The output :class:`CapitalSection` schema deliberately groups these
+    differently — north + mkt + margin merge into one
+    ``north_summary[*]`` row of :class:`CapitalDailyRow`, and every "net
+    flow" leaf is called ``net_inflow_yi`` except `north_money_yi` on
+    :class:`CapitalDailyRow`. Feeding raw `_serialize(capital)` then
+    asking the LLM to "produce ``northSummary`` from this" forces it to
+    rename keys mid-flight, and once renaming is in play the LLM
+    rationally generalizes "all six neighboring leaves use
+    ``netInflowYi``, the seventh must too" → it emits
+    ``"northSummary":[{"trade_date":"...","net_inflow_yi":41.47}]`` and
+    pydantic rejects with ``extra_forbidden``.
+
+    Fix is symmetric with v0.1.10 ``_serialize_sectors_for_prompt`` and
+    v0.1.11 ``_serialize_sentiment_for_prompt``: pre-shape the input to
+    the **exact** output schema so the LLM's job degenerates to verbatim
+    copy. Specifically:
+
+    - ``north_series`` + ``mkt_series`` → zipped per ``trade_date`` into
+      ``north_summary[*]`` carrying ``trade_date`` / ``north_money_yi``
+      (verbatim from NorthFlowRow) / ``main_net_inflow_yi`` (renamed
+      from ``MktFlowRow.main_net_yi``). ``margin_balance_yi`` /
+      ``margin_delta_yi`` have no upstream source in v0.1 and are
+      omitted from each row (schema allows ``None``, but per
+      HARD_DISCIPLINE rule 2 "don't reference fields not in input" we
+      simply don't expose them).
+    - ``north_top10_anchor`` → renamed ``north_top10_today``; each item
+      maps ``net_amount_yi`` → ``net_inflow_yi`` (CapitalLeader schema).
+    - ``stock_top_inflow`` → ``stock_top`` (CapitalLeader); same shape
+      so item passes through verbatim.
+    - ``stock_top_outflow`` → ``stock_bottom`` (CapitalLeader).
+    - ``industry_top`` / ``concept_top`` each item maps
+      ``pct_change_avg`` → ``pct_chg`` (IndustryFlowRowJson schema).
+    - ``mkt_series`` / ``industry_bottom`` / ``concept_bottom`` /
+      ``north_total_yi`` / ``lhb_series`` are NOT consumed by
+      :class:`CapitalSection` — dropped to keep the prompt tight (≤ 4 KB
+      typical) and the LLM focused.
+    """
+    if capital is None:
+        return {}
+
+    # 1. north_summary — zip north_series + mkt_series by trade_date.
+    mkt_by_date: dict[str, Any] = {}
+    for row in getattr(capital, "mkt_series", []) or []:
+        td = getattr(row, "trade_date", None)
+        if td:
+            mkt_by_date[td] = row
+
+    north_summary: list[dict[str, Any]] = []
+    for row in getattr(capital, "north_series", []) or []:
+        td = getattr(row, "trade_date", None)
+        if not td:
+            continue
+        entry: dict[str, Any] = {
+            "trade_date": td,
+            "north_money_yi": getattr(row, "north_money_yi", None),
+        }
+        mkt_row = mkt_by_date.get(td)
+        if mkt_row is not None:
+            entry["main_net_inflow_yi"] = getattr(mkt_row, "main_net_yi", None)
+        north_summary.append(entry)
+
+    # 2. north_top10_today — rename net_amount_yi → net_inflow_yi.
+    north_top10_today = [
+        {
+            "ts_code": getattr(row, "ts_code", ""),
+            "name": getattr(row, "name", ""),
+            "net_inflow_yi": getattr(row, "net_amount_yi", 0.0),
+        }
+        for row in getattr(capital, "north_top10_anchor", []) or []
+    ]
+
+    # 3. industry_top / concept_top — rename pct_change_avg → pct_chg.
+    def _ind_row(row: Any) -> dict[str, Any]:
+        return {
+            "name": getattr(row, "name", ""),
+            "net_inflow_yi": getattr(row, "net_inflow_yi", 0.0),
+            "pct_chg": getattr(row, "pct_change_avg", 0.0),
+        }
+
+    industry_top = [_ind_row(r) for r in getattr(capital, "industry_top", []) or []]
+    concept_top = [_ind_row(r) for r in getattr(capital, "concept_top", []) or []]
+
+    # 4. stock_top / stock_bottom — StockFlowRow shape already matches
+    #    CapitalLeader (ts_code / name / net_inflow_yi); just relabel.
+    def _stk_row(row: Any) -> dict[str, Any]:
+        return {
+            "ts_code": getattr(row, "ts_code", ""),
+            "name": getattr(row, "name", ""),
+            "net_inflow_yi": getattr(row, "net_inflow_yi", 0.0),
+        }
+
+    stock_top = [_stk_row(r) for r in getattr(capital, "stock_top_inflow", []) or []]
+    stock_bottom = [_stk_row(r) for r in getattr(capital, "stock_top_outflow", []) or []]
+
+    return {
+        "north_summary": north_summary,
+        "north_top10_today": north_top10_today,
+        "industry_top": industry_top,
+        "concept_top": concept_top,
+        "stock_top": stock_top,
+        "stock_bottom": stock_bottom,
+    }
 
 
 def build_leaders_user_prompt(
