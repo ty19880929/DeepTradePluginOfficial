@@ -40,6 +40,16 @@
       "tag_prefix": "market-review/",
       "min_framework_version": "0.14.0",
       "latest_version": "market-review/v0.1.14"
+    },
+    "vwap-reversion": {
+      "name": "VWAP 带回归日内策略",
+      "type": "strategy",
+      "description": "T+0 ETF 日内 VWAP 带回归：实时采集 daemon + 模拟交易 + 实时双面板 + 收盘双报告",
+      "repo": "ty19880929/DeepTradePluginOfficial",
+      "subdir": "vwap_reversion",
+      "tag_prefix": "vwap-reversion/",
+      "min_framework_version": "0.14.0",
+      "latest_version": "vwap-reversion/v0.1.0"
     }
   }
 }

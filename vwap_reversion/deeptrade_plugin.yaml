@@ -1,0 +1,72 @@
+plugin_id: vwap-reversion
+name: VWAP 带回归日内策略
+version: 0.1.0
+type: strategy
+api_version: "1"
+entrypoint: vwap_reversion.plugin:VwapReversionPlugin
+description: T+0 ETF 日内 VWAP 带回归：实时采集 daemon + 模拟交易 + 实时双面板 + 收盘双报告
+author: DeepTrade
+
+# v0.4.0 框架起：插件自行声明非框架自带的运行时依赖（PEP 508）。
+# 框架在 install / upgrade 阶段会先 `uv pip install` 这里列出的包再进入
+# migrations / validate_static。见 plugin_required_dependencies.md。
+# tzdata：Windows 无系统 IANA 时区库，zoneinfo("Asia/Shanghai") 依赖它（设计 §4）。
+dependencies:
+  - "tushare>=1.4"
+  - "pandas>=2.2,<3"
+  - "numpy>=1.26,<3"
+  - "tzdata"
+
+permissions:
+  tushare_apis:
+    required:
+      # ETF 实时行情（轮询源；含 累计成交量/累计成交额 —— VWAP = amount/vol）
+      - rt_etf_k
+      # 交易日历：启动时机决策（待机/运行/退出）+ 交易日校验（设计 §4）
+      - trade_cal
+    optional:
+      # ETF 基础信息（标的合法性校验，P1）
+      - fund_basic
+    # 框架 API_CACHE_CLASS 表未覆盖的 API 必须显式声明 cache 策略。
+    # rt_etf_k 是盘中实时数据 → 最热缓存级；若后续框架内置分类则删除此行。
+    cache_overrides:
+      rt_etf_k: hot_or_anns
+  llm: false
+  llm_tools: false
+
+migrations:
+  - version: "20260603_001"
+    file: migrations/20260603_001_init.sql
+    checksum: "sha256:b3bc04551032e281b7490424a3e5184180390de726079dde365714eddb8a03aa"
+
+# 框架 v0.4+ 会从 plugin_id 推导默认前缀（vwap_reversion_），需显式声明 vwr_ 以匹配实际表名。
+table_prefix: vwr_
+
+tables:
+  - name: vwr_runs
+    description: 本插件 run 历史（替代框架 strategy_runs；status 含 standby 待机态）
+    purge_on_uninstall: true
+  - name: vwr_events
+    description: 本插件 run 事件流（替代框架 strategy_events；执行报告与实时面板之源）
+    purge_on_uninstall: true
+  - name: vwr_snapshots
+    description: rt_etf_k 原始累计快照（按 code+trade_date+ts，不绑 run）
+    purge_on_uninstall: true
+  - name: vwr_bars
+    description: 区间增量 bar（快照差分/回填；含 vwap/sigma/band/z 在线快照）
+    purge_on_uninstall: true
+  - name: vwr_signals
+    description: 引擎信号（含被风控抑制的，suppressed_by 标注）
+    purge_on_uninstall: true
+  - name: vwr_trades
+    description: 模拟成交（paper / backtest 撮合）
+    purge_on_uninstall: true
+  - name: vwr_daily_summary
+    description: 当日交易汇总（交易汇总报告之源）
+    purge_on_uninstall: true
+  - name: vwr_trade_cal
+    description: trade_cal 落库（限本插件使用）
+    purge_on_uninstall: true
+  - name: vwr_config
+    description: 本插件用户可调设置（VWAP 带 k 值 / 风控 / 模拟账户 / 时区）
+    purge_on_uninstall: true
