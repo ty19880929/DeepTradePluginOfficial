@@ -25,22 +25,38 @@ class RiskManager:
         max_trades_per_day: int,
         min_holding_seconds: int,
         cooldown_seconds: int,
+        max_consecutive_losses: int,
+        new_entry_cutoff_ts: int | None = None,
+        kill_switch_enabled: bool = False,
     ) -> None:
         self.max_trades_per_day = max_trades_per_day
         self.min_holding_seconds = min_holding_seconds
         self.cooldown_seconds = cooldown_seconds
+        self.max_consecutive_losses = max_consecutive_losses
+        self.new_entry_cutoff_ts = new_entry_cutoff_ts
+        self.kill_switch_enabled = kill_switch_enabled
         self.fills_today = 0
         self.last_close_ts: int | None = None
+        self.consecutive_losses = 0
         self.circuit_broken = False
         self.eod_halted = False
+        self.data_halted = False
 
     # ---- 闸门 -------------------------------------------------------------
 
     def check_open(self, ts: int) -> str | None:
+        if self.kill_switch_enabled:
+            return "kill_switch"
         if self.circuit_broken:
             return "circuit_breaker"
         if self.eod_halted:
             return "eod_halt"
+        if self.data_halted:
+            return "data_stale"
+        if self.new_entry_cutoff_ts is not None and ts >= self.new_entry_cutoff_ts:
+            return "entry_cutoff"
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            return "consecutive_losses"
         # 开腿必然伴随将来一次平腿 → 留出余量，fills 已达上限-1 时不再开新腿，
         # 保证任何已开腿都还有名额平掉（不会被 max_trades 锁死在持仓里）。
         if self.fills_today >= self.max_trades_per_day - 1:
@@ -62,5 +78,11 @@ class RiskManager:
     def note_fill(self) -> None:
         self.fills_today += 1
 
-    def note_close(self, ts: int) -> None:
+    def note_close(self, ts: int, realized_pnl: float | None = None) -> None:
         self.last_close_ts = ts
+        if realized_pnl is None:
+            return
+        if realized_pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0

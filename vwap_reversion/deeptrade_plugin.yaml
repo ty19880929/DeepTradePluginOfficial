@@ -1,6 +1,6 @@
 plugin_id: vwap-reversion
 name: VWAP 带回归日内策略
-version: 0.1.0
+version: 0.2.0
 type: strategy
 api_version: "1"
 entrypoint: vwap_reversion.plugin:VwapReversionPlugin
@@ -27,6 +27,14 @@ permissions:
     optional:
       # ETF 基础信息（标的合法性校验，P1）
       - fund_basic
+      # ETF 日线/复权/规模/净值：盘前流动性、波动、容量与风控画像
+      - fund_daily
+      - fund_adj
+      - fund_share
+      - fund_nav
+      # 每日涨跌停价格（包含基金）与融资融券标的标签
+      - stk_limit
+      - margin_secs
     # 框架 API_CACHE_CLASS 表未覆盖的 API 必须显式声明 cache 策略。
     # rt_etf_k 是盘中实时数据 → 最热缓存级；若后续框架内置分类则删除此行。
     cache_overrides:
@@ -38,6 +46,9 @@ migrations:
   - version: "20260603_001"
     file: migrations/20260603_001_init.sql
     checksum: "sha256:b3bc04551032e281b7490424a3e5184180390de726079dde365714eddb8a03aa"
+  - version: "20260701_001"
+    file: migrations/20260701_001_etf_cache.sql
+    checksum: "sha256:f23fad6c874684efd881c5de8efb4456f5dc980a22a2e28743b0cb2a0a9a0082"
 
 # 框架 v0.4+ 会从 plugin_id 推导默认前缀（vwap_reversion_），需显式声明 vwr_ 以匹配实际表名。
 table_prefix: vwr_
@@ -69,4 +80,13 @@ tables:
     purge_on_uninstall: true
   - name: vwr_config
     description: 本插件用户可调设置（VWAP 带 k 值 / 风控 / 模拟账户 / 时区）
+    purge_on_uninstall: true
+  - name: vwr_etf_universe
+    description: ETF 基础信息、T+0 白名单、融资融券与启用标签缓存
+    purge_on_uninstall: true
+  - name: vwr_etf_daily
+    description: ETF 日线、复权、规模、净值与涨跌停缓存
+    purge_on_uninstall: true
+  - name: vwr_daily_features
+    description: ETF 盘前流动性、波动、跳空与趋势 regime 特征
     purge_on_uninstall: true

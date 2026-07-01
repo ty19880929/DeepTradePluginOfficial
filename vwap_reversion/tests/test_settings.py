@@ -98,6 +98,13 @@ def test_reset_clears_persisted_rows(db: Database) -> None:
         ("band_k_exit", 2.0, "band_k_exit"),          # >= k_entry
         ("band_k_stop", 1.0, "band_k_stop"),          # <= k_entry
         ("warmup_minutes", -1, "warmup_minutes"),
+        ("signal_version", "v3", "signal_version"),
+        ("confirm_z_recover", -0.1, "confirm_z_recover"),
+        ("min_rebound_bps", -0.1, "min_rebound_bps"),
+        ("max_holding_seconds", -1, "max_holding_seconds"),
+        ("high_vol_sigma_bps", -0.1, "high_vol_sigma_bps"),
+        ("high_vol_entry_multiplier", 0.9, "high_vol_entry_multiplier"),
+        ("trend_guard_vwap_slope_bps", -0.1, "trend_guard_vwap_slope_bps"),
         ("position_mode", "short", "position_mode"),
         ("base_shares", 150, "base_shares"),          # 非 100 整数倍
         ("order_qty", 0, "order_qty"),
@@ -105,6 +112,11 @@ def test_reset_clears_persisted_rows(db: Database) -> None:
         ("max_trades_per_day", 0, "max_trades_per_day"),
         ("per_trade_stop_pct", 0.0, "per_trade_stop_pct"),
         ("daily_loss_limit_pct", 0.0, "daily_loss_limit_pct"),
+        ("max_consecutive_losses", 0, "max_consecutive_losses"),
+        ("stale_quote_seconds", 1, "stale_quote_seconds"),
+        ("limit_price_guard_bps", -0.1, "limit_price_guard_bps"),
+        ("new_entry_cutoff_time", "15:01", "new_entry_cutoff_time"),
+        ("new_entry_cutoff_time", "abc", "new_entry_cutoff_time"),
         ("eod_flat_time", "15:30", "eod_flat_time"),  # 不在 13:00–15:00
         ("eod_flat_time", "abc", "eod_flat_time"),
         ("initial_cash", 0.0, "initial_cash"),

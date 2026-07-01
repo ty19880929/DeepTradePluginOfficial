@@ -31,6 +31,8 @@ def build_execution_report(db: Database, run_id: str) -> str:
     n_no_volume = sum(1 for e in samples if "vwap" not in _payload(e))
     n_fetch_err = sum(1 for e in events if _kind(e) == "fetch_error")
     n_regression = sum(1 for e in events if _kind(e) == "regression")
+    n_data_quality = sum(1 for e in events if _kind(e) == "data_quality")
+    n_stale = sum(1 for e in events if _kind(e) == "stale_quote")
     resumed = any(_kind(e) == "resume" for e in events)
 
     # ---- VWAP/σ 收敛快照：取当日第 1 / N/4 / N/2 / 最后 根 bar ----
@@ -71,6 +73,7 @@ def build_execution_report(db: Database, run_id: str) -> str:
         "",
         f"- 采样次数: **{n_samples}**（有效 bar {len(bars)} 根，无新成交跳过 {n_no_volume} 次）",
         f"- 行情拉取失败: {n_fetch_err} 次 ｜ 累计量回退丢弃: {n_regression} 次",
+        f"- 数据质量跳过: {n_data_quality} 次 ｜ stale 暂停新开仓: {n_stale} 次",
         f"- 崩溃恢复重放: {'是' if resumed else '否'}",
         "",
     ]

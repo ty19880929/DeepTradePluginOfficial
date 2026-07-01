@@ -43,6 +43,38 @@ settings_app = typer.Typer(
 )
 app.add_typer(settings_app, name="settings")
 
+universe_app = typer.Typer(
+    name="universe",
+    help="同步和查看 ETF 交易池缓存（盘前过滤数据）。",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(universe_app, name="universe")
+
+daily_app = typer.Typer(
+    name="daily",
+    help="同步 ETF 日线、复权、规模、净值与涨跌停缓存。",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(daily_app, name="daily")
+
+features_app = typer.Typer(
+    name="features",
+    help="基于已缓存 ETF 日线构建盘前特征。",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(features_app, name="features")
+
+kill_app = typer.Typer(
+    name="kill-switch",
+    help="查看或切换策略全局停手开关。",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(kill_app, name="kill-switch")
+
 
 def _open_runtime() -> tuple[Database, VwrRuntime, PluginContext]:
     """Build the per-process services bundle（仿 limit_up_board._open_runtime）。
@@ -299,6 +331,157 @@ def cmd_history(
         typer.echo(
             f"{r[0]}  {r[1]:<8}  {r[2]:<10}  {r[3]:<10}  {r[4]:<8}  {r[5]} → {r[6] or '-'}"
         )
+
+
+# ---------------------------------------------------------------------------
+# universe / daily — P1 data cache for pretrade filters
+# ---------------------------------------------------------------------------
+
+
+@universe_app.command("sync")
+def cmd_universe_sync(
+    t0_whitelist: str = typer.Option(
+        "",
+        "--t0-whitelist",
+        help="逗号分隔的 T+0 ETF 白名单；为空则只同步基础 ETF 列表。",
+    ),
+    margin_date: str | None = typer.Option(
+        None,
+        "--margin-date",
+        help="可选：同步该交易日融资融券标的标签 YYYYMMDD。",
+    ),
+) -> None:
+    """同步场内 ETF 基础信息，并可标记用户维护的 T+0 白名单。"""
+    from .data import sync_etf_universe, sync_margin_eligibility  # noqa: PLC0415
+    from .runtime import build_tushare_client  # noqa: PLC0415
+
+    db, rt, _ctx = _open_runtime()
+    try:
+        tushare = build_tushare_client(rt)
+        whitelist = [c.strip() for c in t0_whitelist.split(",") if c.strip()]
+        result = sync_etf_universe(db, tushare, t0_whitelist=whitelist)
+        typer.echo(f"✔ {result.message}")
+        if margin_date:
+            margin = sync_margin_eligibility(db, tushare, trade_date=margin_date.strip())
+            typer.echo(f"✔ {margin.message}")
+    finally:
+        db.close()
+
+
+@universe_app.command("show")
+def cmd_universe_show(
+    limit: int = typer.Option(50, "--limit", help="展示行数"),
+) -> None:
+    """查看已同步的 ETF 交易池缓存。"""
+    from .data import list_enabled_universe  # noqa: PLC0415
+
+    db = Database(paths.db_path())
+    try:
+        rows = list_enabled_universe(db, limit=limit)
+    finally:
+        db.close()
+    if not rows:
+        typer.echo("(no ETF universe rows; run `universe sync` first)")
+        return
+    table = Table(title="vwap-reversion ETF universe")
+    for col in ("ts_code", "name", "fund_type", "invest_type", "margin", "t0", "enabled"):
+        table.add_column(col)
+    for row in rows:
+        table.add_row(
+            str(row["ts_code"]),
+            str(row.get("name") or ""),
+            str(row.get("fund_type") or ""),
+            str(row.get("invest_type") or ""),
+            "Y" if row.get("margin_eligible") else "N",
+            "Y" if row.get("t0_eligible") else "N",
+            "Y" if row.get("enabled") else "N",
+        )
+    Console().print(table)
+
+
+@daily_app.command("sync")
+def cmd_daily_sync(
+    code: str = typer.Option(..., "--code", help="ETF 代码，如 159518.SZ"),
+    start: str = typer.Option(..., "--start", help="起始交易日 YYYYMMDD"),
+    end: str = typer.Option(..., "--end", help="结束交易日 YYYYMMDD"),
+) -> None:
+    """同步单只 ETF 的日线及辅助风险数据缓存。"""
+    from .data import sync_etf_daily  # noqa: PLC0415
+    from .runtime import build_tushare_client  # noqa: PLC0415
+
+    db, rt, _ctx = _open_runtime()
+    try:
+        result = sync_etf_daily(
+            db,
+            build_tushare_client(rt),
+            code=code,
+            start=start,
+            end=end,
+        )
+        typer.echo(f"✔ {result.message}")
+    finally:
+        db.close()
+
+
+@features_app.command("build")
+def cmd_features_build(
+    code: str = typer.Option(..., "--code", help="ETF 代码，如 159518.SZ"),
+    start: str = typer.Option(..., "--start", help="起始交易日 YYYYMMDD"),
+    end: str = typer.Option(..., "--end", help="结束交易日 YYYYMMDD"),
+    min_amount_ma20: float = typer.Option(
+        200_000_000.0,
+        "--min-amount-ma20",
+        help="20日平均成交额流动性阈值，单位元。",
+    ),
+) -> None:
+    """从 vwr_etf_daily 生成 vwr_daily_features。"""
+    from .data import build_daily_features  # noqa: PLC0415
+
+    db = Database(paths.db_path())
+    try:
+        result = build_daily_features(
+            db,
+            code=code,
+            start=start,
+            end=end,
+            min_amount_ma20=min_amount_ma20,
+        )
+        typer.echo(f"✔ {result.message}")
+    finally:
+        db.close()
+
+
+@kill_app.command("status")
+def cmd_kill_status() -> None:
+    """查看全局停手开关。"""
+    db = Database(paths.db_path())
+    try:
+        cfg = load_config(db)
+    finally:
+        db.close()
+    typer.echo("ON" if cfg.kill_switch_enabled else "OFF")
+
+
+@kill_app.command("on")
+def cmd_kill_on() -> None:
+    """开启全局停手：只抑制新开仓，不阻止已有持仓平仓。"""
+    db = Database(paths.db_path())
+    try:
+        cfg = set_one(db, "kill_switch_enabled", "true")
+    finally:
+        db.close()
+    typer.echo(f"✔ kill_switch_enabled = {cfg.kill_switch_enabled}")
+
+
+@kill_app.command("off")
+def cmd_kill_off() -> None:
+    """关闭全局停手。"""
+    db = Database(paths.db_path())
+    try:
+        cfg = set_one(db, "kill_switch_enabled", "false")
+    finally:
+        db.close()
+    typer.echo(f"✔ kill_switch_enabled = {cfg.kill_switch_enabled}")
 
 
 # ---------------------------------------------------------------------------

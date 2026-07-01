@@ -18,8 +18,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 BandMode = Literal["vol_weighted", "time_std"]
 PositionMode = Literal["round_trip", "base_position_t"]
+SignalVersion = Literal["v1", "v2"]
 _VALID_BAND_MODES: frozenset[str] = frozenset({"vol_weighted", "time_std"})
 _VALID_POSITION_MODES: frozenset[str] = frozenset({"round_trip", "base_position_t"})
+_VALID_SIGNAL_VERSIONS: frozenset[str] = frozenset({"v1", "v2"})
 
 
 @dataclass
@@ -41,6 +43,13 @@ class VwrConfig:
     band_k_exit: float = 0.3
     band_k_stop: float = 3.5
     warmup_minutes: int = 15
+    signal_version: SignalVersion = "v1"
+    confirm_z_recover: float = 0.35
+    min_rebound_bps: float = 3.0
+    max_holding_seconds: int = 1800
+    high_vol_sigma_bps: float = 60.0
+    high_vol_entry_multiplier: float = 1.2
+    trend_guard_vwap_slope_bps: float = 3.0
 
     # ---- 持仓模式 ----
     position_mode: PositionMode = "round_trip"
@@ -53,6 +62,11 @@ class VwrConfig:
     cooldown_seconds: int = 60
     per_trade_stop_pct: float = 0.8
     daily_loss_limit_pct: float = 1.5
+    kill_switch_enabled: bool = False
+    max_consecutive_losses: int = 2
+    stale_quote_seconds: int = 90
+    limit_price_guard_bps: float = 20.0
+    new_entry_cutoff_time: str = "14:40"
     eod_flat_time: str = "14:55"
 
     # ---- 模拟账户 / 成本 ----
@@ -104,6 +118,26 @@ def validate_config(cfg: VwrConfig) -> None:
         )
     if cfg.warmup_minutes < 0:
         raise ValueError(f"warmup_minutes 必须 >= 0（当前 {cfg.warmup_minutes}）")
+    if cfg.signal_version not in _VALID_SIGNAL_VERSIONS:
+        raise ValueError(
+            f"signal_version 必须为 'v1' / 'v2' 之一（当前 {cfg.signal_version!r}）"
+        )
+    if cfg.confirm_z_recover < 0:
+        raise ValueError(f"confirm_z_recover 必须 >= 0（当前 {cfg.confirm_z_recover}）")
+    if cfg.min_rebound_bps < 0:
+        raise ValueError(f"min_rebound_bps 必须 >= 0（当前 {cfg.min_rebound_bps}）")
+    if cfg.max_holding_seconds < 0:
+        raise ValueError(f"max_holding_seconds 必须 >= 0（当前 {cfg.max_holding_seconds}）")
+    if cfg.high_vol_sigma_bps < 0:
+        raise ValueError(f"high_vol_sigma_bps 必须 >= 0（当前 {cfg.high_vol_sigma_bps}）")
+    if cfg.high_vol_entry_multiplier < 1.0:
+        raise ValueError(
+            f"high_vol_entry_multiplier 必须 >= 1（当前 {cfg.high_vol_entry_multiplier}）"
+        )
+    if cfg.trend_guard_vwap_slope_bps < 0:
+        raise ValueError(
+            f"trend_guard_vwap_slope_bps 必须 >= 0（当前 {cfg.trend_guard_vwap_slope_bps}）"
+        )
     if cfg.position_mode not in _VALID_POSITION_MODES:
         raise ValueError(
             f"position_mode 必须为 'round_trip' / 'base_position_t' 之一"
@@ -125,8 +159,21 @@ def validate_config(cfg: VwrConfig) -> None:
         raise ValueError(f"per_trade_stop_pct 必须 > 0（当前 {cfg.per_trade_stop_pct}）")
     if cfg.daily_loss_limit_pct <= 0:
         raise ValueError(f"daily_loss_limit_pct 必须 > 0（当前 {cfg.daily_loss_limit_pct}）")
+    if cfg.max_consecutive_losses < 1:
+        raise ValueError(
+            f"max_consecutive_losses 必须 >= 1（当前 {cfg.max_consecutive_losses}）"
+        )
+    if cfg.stale_quote_seconds < cfg.poll_interval_seconds:
+        raise ValueError(
+            "stale_quote_seconds 必须 >= poll_interval_seconds"
+            f"（当前 {cfg.stale_quote_seconds} < {cfg.poll_interval_seconds}）"
+        )
+    if cfg.limit_price_guard_bps < 0:
+        raise ValueError(
+            f"limit_price_guard_bps 必须 >= 0（当前 {cfg.limit_price_guard_bps}）"
+        )
     # eod_flat_time 必须可解析且落在下午连续竞价段内（否则强平永远不会触发）。
-    from .clock import AFTERNOON_CLOSE, AFTERNOON_OPEN, parse_hhmm  # noqa: PLC0415
+    from .clock import AFTERNOON_CLOSE, AFTERNOON_OPEN, MORNING_OPEN, parse_hhmm  # noqa: PLC0415
 
     try:
         eod = parse_hhmm(cfg.eod_flat_time)
@@ -135,6 +182,17 @@ def validate_config(cfg: VwrConfig) -> None:
     if not (AFTERNOON_OPEN <= eod < AFTERNOON_CLOSE):
         raise ValueError(
             f"eod_flat_time 必须落在 13:00–15:00 之间（当前 {cfg.eod_flat_time!r}）"
+        )
+    try:
+        cutoff = parse_hhmm(cfg.new_entry_cutoff_time)
+    except ValueError as e:
+        raise ValueError(
+            f"new_entry_cutoff_time 无法解析为 HH:MM: {cfg.new_entry_cutoff_time!r}"
+        ) from e
+    if not (MORNING_OPEN <= cutoff < eod):
+        raise ValueError(
+            "new_entry_cutoff_time 必须落在 09:30 之后且早于 eod_flat_time"
+            f"（当前 {cfg.new_entry_cutoff_time!r}, eod={cfg.eod_flat_time!r}）"
         )
     if cfg.initial_cash <= 0:
         raise ValueError(f"initial_cash 必须 > 0（当前 {cfg.initial_cash}）")

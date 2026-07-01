@@ -45,6 +45,7 @@ from .persistence import (
     upsert_daily_summary,
     upsert_snapshot,
 )
+from .schemas import Snapshot
 from .trading import BarOutcome, TradingSession
 from .ui import LegacyStreamRenderer, RunMeta
 
@@ -263,6 +264,8 @@ class CollectDaemon:
         warmup_end = clock.epoch_of(_date_of(trade_date), MORNING_OPEN) + \
             self.cfg.warmup_minutes * 60
         n_samples, n_bars, consec_fail = 0, len(resumed_bars), 0
+        last_progress_epoch = clock.now_epoch()
+        stale_warned = False
 
         while True:
             phase = clock.phase()
@@ -296,8 +299,45 @@ class CollectDaemon:
                 self._sleep(min(_BACKOFF_CAP, _BACKOFF_BASE * (2 ** (consec_fail - 1))))
                 continue
             consec_fail = 0
+            quality_error = _snapshot_quality_error(snap, self.cfg.limit_price_guard_bps)
+            if quality_error is not None:
+                self._emit(
+                    EventType.LOG,
+                    f"实时快照异常，跳过本次采样：{quality_error}",
+                    level=EventLevel.WARN,
+                    kind="data_quality",
+                    last=snap.last,
+                    cum_vol=snap.cum_vol,
+                    cum_amount=snap.cum_amount,
+                    trade_time=snap.trade_time,
+                )
+                self._sleep(self.cfg.poll_interval_seconds)
+                continue
             n_samples += 1
+            prev_before = builder.prev
             upsert_snapshot(db, snap)
+            progressed = _snapshot_progressed(prev_before, snap)
+            if progressed:
+                last_progress_epoch = snap.ts
+                if session.risk.data_halted:
+                    session.risk.data_halted = False
+                    self._emit(
+                        EventType.LOG,
+                        "实时行情恢复推进，解除 data_stale 新开仓抑制",
+                        kind="stale_recovered",
+                    )
+                stale_warned = False
+            elif clock.now_epoch() - last_progress_epoch >= self.cfg.stale_quote_seconds:
+                session.risk.data_halted = True
+                if not stale_warned:
+                    stale_warned = True
+                    self._emit(
+                        EventType.LOG,
+                        f"实时行情 {self.cfg.stale_quote_seconds}s 未推进，暂停新开仓",
+                        level=EventLevel.WARN,
+                        kind="stale_quote",
+                        stale_seconds=int(clock.now_epoch() - last_progress_epoch),
+                    )
 
             # ---- EOD 强平（有最新价即可触发，不依赖新 bar；§13）----
             if not session.eod_done and clock.now_epoch() >= eod_epoch:
@@ -473,3 +513,28 @@ def _date_of(trade_date: str):
 def _fmt_mmss(seconds: float) -> str:
     s = max(0, int(seconds))
     return f"{s // 60:02d}:{s % 60:02d}"
+
+
+def _snapshot_progressed(prev: Snapshot | None, snap: Snapshot) -> bool:
+    if prev is None:
+        return True
+    if snap.cum_vol > prev.cum_vol or snap.cum_amount > prev.cum_amount:
+        return True
+    if snap.trade_time and prev.trade_time and snap.trade_time != prev.trade_time:
+        return True
+    return False
+
+
+def _snapshot_quality_error(snap: Snapshot, guard_bps: float) -> str | None:
+    if snap.last <= 0:
+        return f"last 非正数: {snap.last}"
+    if snap.cum_vol < 0 or snap.cum_amount < 0:
+        return f"累计量额为负: vol={snap.cum_vol}, amount={snap.cum_amount}"
+    guard = guard_bps / 10_000.0
+    if snap.high is not None and snap.high > 0 and snap.last > snap.high * (1.0 + guard):
+        return f"last 高于 high 保护阈值: last={snap.last}, high={snap.high}"
+    if snap.low is not None and snap.low > 0 and snap.last < snap.low * (1.0 - guard):
+        return f"last 低于 low 保护阈值: last={snap.last}, low={snap.low}"
+    if snap.cum_vol > 0 and snap.cum_amount <= 0:
+        return f"有成交量但成交额非正: vol={snap.cum_vol}, amount={snap.cum_amount}"
+    return None

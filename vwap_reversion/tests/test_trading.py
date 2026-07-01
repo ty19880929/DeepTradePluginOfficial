@@ -7,6 +7,8 @@ fee 5bps / slip 10bps 取好手算的值。
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -17,6 +19,11 @@ from vwap_reversion.trading import TradingSession
 
 DAY = "20260603"
 CODE = "159518.SZ"
+SH = ZoneInfo("Asia/Shanghai")
+
+
+def sh_epoch(hh: int, mm: int, ss: int = 0) -> int:
+    return int(datetime(2026, 6, 3, hh, mm, ss, tzinfo=SH).timestamp())
 
 
 def cfg(**kw) -> VwrConfig:
@@ -82,6 +89,49 @@ def test_no_entry_in_warmup_or_z_none_or_small_z() -> None:
     assert s.leg is None
 
 
+def test_signal_v2_arms_then_confirms_long_entry() -> None:
+    s = session(
+        signal_version="v2",
+        confirm_z_recover=0.3,
+        min_rebound_bps=5.0,
+        trend_guard_vwap_slope_bps=0.0,
+        high_vol_sigma_bps=9999.0,
+    )
+    out = s.on_bar(bar(1000, 0.9900), m(-2.5), in_warmup=False)
+    assert out.signals == [] and out.trades == []
+    assert s.arm is not None
+
+    out = s.on_bar(bar(1060, 0.9908), m(-2.1), in_warmup=False)
+    assert [sig.reason for sig in out.signals] == ["entry_long_confirmed"]
+    assert out.trades and s.leg is not None
+
+
+def test_signal_v2_blocks_adverse_vwap_trend() -> None:
+    s = session(
+        signal_version="v2",
+        trend_guard_vwap_slope_bps=1.0,
+        high_vol_sigma_bps=9999.0,
+    )
+    # Prime prev VWAP.
+    assert s.on_bar(bar(1000, 1.0), m(-1.0, vwap=1.0000), in_warmup=False).signals == []
+    out = s.on_bar(bar(1060, 0.99), m(-2.5, vwap=0.9990), in_warmup=False)
+    assert out.signals == [] and out.trades == []
+    assert s.arm is None
+
+
+def test_signal_v2_high_vol_requires_wider_entry() -> None:
+    s = session(
+        signal_version="v2",
+        high_vol_sigma_bps=50.0,
+        high_vol_entry_multiplier=1.5,
+        trend_guard_vwap_slope_bps=0.0,
+    )
+    out = s.on_bar(bar(1000, 0.99), m(-2.5, vwap=1.0, sigma=0.01), in_warmup=False)
+    assert out.signals == [] and s.arm is None  # dynamic k = 3.0
+    out = s.on_bar(bar(1060, 0.98), m(-3.2, vwap=1.0, sigma=0.01), in_warmup=False)
+    assert out.signals == [] and s.arm is not None
+
+
 def test_round_trip_never_shorts_on_high_z() -> None:
     s = session()  # round_trip：z 高位空仓不开空腿
     out = s.on_bar(bar(1, 1.02), m(+5.0), in_warmup=False)
@@ -94,6 +144,14 @@ def test_held_leg_no_pyramiding() -> None:
     out = s.on_bar(bar(1030, 0.999), m(-2.6), in_warmup=False)  # 仍深负
     assert out.trades == []  # 不加仓、不重复入场
     assert s.broker.position == 100
+
+
+def test_max_holding_seconds_time_exit() -> None:
+    s = session(max_holding_seconds=60, min_holding_seconds=0)
+    open_leg(s, ts=1000, price=1.0)
+    out = s.on_bar(bar(1061, 0.999), m(-1.0), in_warmup=False)
+    assert [sig.reason for sig in out.signals] == ["time_exit"]
+    assert out.trades and s.leg is None
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +241,37 @@ def test_circuit_breaker_flattens_and_halts() -> None:
     out = s.on_bar(bar(1200, 0.96), m(-5.0), in_warmup=False)
     assert out.signals[0].suppressed_by == "circuit_breaker"
     assert int(s.risk.circuit_broken) == 1
+
+
+def test_kill_switch_suppresses_new_open_only() -> None:
+    s = session(kill_switch_enabled=True)
+    out = s.on_bar(bar(1000, 1.0), m(-2.5), in_warmup=False)
+    assert out.signals[0].suppressed_by == "kill_switch"
+    assert out.trades == [] and s.leg is None
+
+
+def test_entry_cutoff_suppresses_new_open_only() -> None:
+    s = session(new_entry_cutoff_time="14:40")
+    out = s.on_bar(bar(sh_epoch(14, 41), 1.0), m(-2.5), in_warmup=False)
+    assert out.signals[0].suppressed_by == "entry_cutoff"
+    assert out.trades == []
+
+
+def test_consecutive_losses_suppress_new_open_after_threshold() -> None:
+    s = session(
+        max_consecutive_losses=2,
+        cooldown_seconds=0,
+        min_holding_seconds=0,
+        per_trade_stop_pct=0.5,
+    )
+    open_leg(s, ts=sh_epoch(10, 0), price=1.0)
+    s.on_bar(bar(sh_epoch(10, 1), 0.99), m(-4.0), in_warmup=False)
+    open_leg(s, ts=sh_epoch(10, 2), price=1.0)
+    s.on_bar(bar(sh_epoch(10, 3), 0.99), m(-4.0), in_warmup=False)
+
+    out = s.on_bar(bar(sh_epoch(10, 4), 1.0), m(-2.5), in_warmup=False)
+    assert out.signals[0].suppressed_by == "consecutive_losses"
+    assert out.trades == []
 
 
 def test_insufficient_cash_suppressed_not_crash() -> None:

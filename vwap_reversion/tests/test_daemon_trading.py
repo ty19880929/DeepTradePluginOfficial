@@ -177,7 +177,9 @@ def test_eod_force_flat_when_dip_never_recovers(db: Database) -> None:
     def price_fn(epoch: float) -> float:
         return 0.99 if epoch >= dip else 1.00
 
-    outcome, renderer = run_daemon(db, sh_epoch(14, 0), price_fn)
+    outcome, renderer = run_daemon(
+        db, sh_epoch(14, 0), price_fn, new_entry_cutoff_time="14:54"
+    )
     assert outcome.status == "done"
 
     trades = trades_of(db, outcome.run_id)

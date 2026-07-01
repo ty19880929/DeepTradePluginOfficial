@@ -22,8 +22,11 @@ aborted run 的虚拟持仓**不跨 run 延续**，新 run 一律从锚点（空
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
+from .clock import parse_hhmm
 from .engine.signal import (
     Intent,
     IntentKind,
@@ -50,6 +53,16 @@ class BarOutcome:
     circuit_tripped: bool = False   # 本根 bar 首次触发熔断
 
 
+@dataclass
+class ArmState:
+    """V2 两段式入场的候选状态。direction=+1 低吸，-1 高抛底仓。"""
+
+    direction: int
+    armed_z: float
+    extreme_price: float
+    armed_ts: int
+
+
 class TradingSession:
     def __init__(self, cfg: VwrConfig, *, code: str, trade_date: str) -> None:
         self.cfg = cfg
@@ -62,8 +75,14 @@ class TradingSession:
             max_trades_per_day=cfg.max_trades_per_day,
             min_holding_seconds=cfg.min_holding_seconds,
             cooldown_seconds=cfg.cooldown_seconds,
+            max_consecutive_losses=cfg.max_consecutive_losses,
+            new_entry_cutoff_ts=_epoch_of_hhmm(
+                trade_date, cfg.new_entry_cutoff_time, cfg.market_timezone
+            ),
+            kill_switch_enabled=cfg.kill_switch_enabled,
         )
         self.leg: LegState | None = None
+        self.arm: ArmState | None = None
         self.eod_done = False
 
         self._anchor_qty = (
@@ -82,6 +101,7 @@ class TradingSession:
         self._total_slip = 0.0
         self._turnover = 0.0          # Σ 成交额（元）
         self._trade_seq = 0
+        self._prev_vwap: float | None = None
 
     # ------------------------------------------------------------------
     # 对 daemon 的只读快照（实时面板 payload）
@@ -136,11 +156,10 @@ class TradingSession:
         if in_warmup or metrics.z is None:
             return out
         z = metrics.z
+        vwap_slope_bps = self._vwap_slope_bps(metrics.vwap)
 
         if self.leg is None:
-            intent = evaluate_flat(
-                z, k_entry=self.cfg.band_k_entry, allow_short_leg=self._allow_short_leg()
-            )
+            intent = self._evaluate_flat(metrics, price, ts, z, vwap_slope_bps)
             if intent is None:
                 return out
             self._open_leg(out, intent, metrics, price, ts, z)
@@ -150,6 +169,13 @@ class TradingSession:
                 k_exit=self.cfg.band_k_exit, k_stop=self.cfg.band_k_stop,
                 per_trade_stop_pct=self.cfg.per_trade_stop_pct,
             )
+            if (
+                intent is None
+                and self.cfg.max_holding_seconds > 0
+                and ts - self.leg.entry_ts >= self.cfg.max_holding_seconds
+            ):
+                side = Side.SELL if self.leg.direction > 0 else Side.BUY
+                intent = Intent(IntentKind.CLOSE, side, "time_exit")
             if intent is None:
                 return out
             suppressed = self.risk.check_close(intent.reason, self.leg, ts)
@@ -230,6 +256,85 @@ class TradingSession:
             and self.broker.position >= self.cfg.order_qty
         )
 
+    def _evaluate_flat(
+        self,
+        metrics: BarMetrics,
+        price: float,
+        ts: int,
+        z: float,
+        vwap_slope_bps: float | None,
+    ) -> Intent | None:
+        if self.cfg.signal_version == "v1":
+            return evaluate_flat(
+                z, k_entry=self.cfg.band_k_entry, allow_short_leg=self._allow_short_leg()
+            )
+
+        k_entry = self._dynamic_entry_k(metrics)
+        allow_short = self._allow_short_leg()
+        if self.arm is None:
+            if z <= -k_entry and not self._trend_blocks(direction=1, slope_bps=vwap_slope_bps):
+                self.arm = ArmState(direction=1, armed_z=z, extreme_price=price, armed_ts=ts)
+            elif (
+                allow_short
+                and z >= k_entry
+                and not self._trend_blocks(direction=-1, slope_bps=vwap_slope_bps)
+            ):
+                self.arm = ArmState(direction=-1, armed_z=z, extreme_price=price, armed_ts=ts)
+            return None
+
+        arm = self.arm
+        if arm.direction > 0:
+            arm.extreme_price = min(arm.extreme_price, price)
+            if z > -self.cfg.band_k_exit:
+                self.arm = None
+                return None
+            if self._trend_blocks(direction=1, slope_bps=vwap_slope_bps):
+                return None
+            rebound_ok = price >= arm.extreme_price * (1.0 + self.cfg.min_rebound_bps / 10_000.0)
+            z_ok = z >= arm.armed_z + self.cfg.confirm_z_recover
+            if rebound_ok and z_ok:
+                self.arm = None
+                return Intent(IntentKind.OPEN, Side.BUY, "entry_long_confirmed")
+            return None
+
+        arm.extreme_price = max(arm.extreme_price, price)
+        if z < self.cfg.band_k_exit:
+            self.arm = None
+            return None
+        if not allow_short or self._trend_blocks(direction=-1, slope_bps=vwap_slope_bps):
+            return None
+        pullback_ok = price <= arm.extreme_price * (1.0 - self.cfg.min_rebound_bps / 10_000.0)
+        z_ok = z <= arm.armed_z - self.cfg.confirm_z_recover
+        if pullback_ok and z_ok:
+            self.arm = None
+            return Intent(IntentKind.OPEN, Side.SELL, "entry_short_t_confirmed")
+        return None
+
+    def _dynamic_entry_k(self, metrics: BarMetrics) -> float:
+        k = self.cfg.band_k_entry
+        if metrics.vwap > 0:
+            sigma_bps = metrics.sigma / metrics.vwap * 10_000.0
+            if sigma_bps >= self.cfg.high_vol_sigma_bps:
+                k *= self.cfg.high_vol_entry_multiplier
+        return k
+
+    def _vwap_slope_bps(self, vwap: float) -> float | None:
+        prev = self._prev_vwap
+        self._prev_vwap = vwap
+        if prev is None or prev <= 0:
+            return None
+        return (vwap / prev - 1.0) * 10_000.0
+
+    def _trend_blocks(self, *, direction: int, slope_bps: float | None) -> bool:
+        if slope_bps is None:
+            return False
+        guard = self.cfg.trend_guard_vwap_slope_bps
+        if guard <= 0:
+            return False
+        if direction > 0:
+            return slope_bps <= -guard
+        return slope_bps >= guard
+
     def _open_leg(
         self, out: BarOutcome, intent: Intent, metrics: BarMetrics,
         price: float, ts: int, z: float,
@@ -247,6 +352,7 @@ class TradingSession:
         if fill is None:
             return
         direction = 1 if intent.side is Side.BUY else -1
+        self.arm = None
         self.leg = LegState(
             direction=direction, qty=fill.qty, entry_price=fill.price,
             entry_z=z, entry_ts=ts,
@@ -285,7 +391,7 @@ class TradingSession:
             ))
         self._closed_pnls.append(realized)
         self._holding_secs.append(ts - leg.entry_ts)
-        self.risk.note_close(ts)
+        self.risk.note_close(ts, realized)
         self.leg = None
         self._entry_fee = 0.0
         self._book_fill(out, fill, realized=realized)
@@ -323,3 +429,8 @@ class TradingSession:
     @property
     def trade_seq(self) -> int:
         return self._trade_seq
+
+
+def _epoch_of_hhmm(trade_date: str, hhmm: str, market_timezone: str) -> int:
+    d = date(int(trade_date[:4]), int(trade_date[4:6]), int(trade_date[6:8]))
+    return int(datetime.combine(d, parse_hhmm(hhmm), tzinfo=ZoneInfo(market_timezone)).timestamp())

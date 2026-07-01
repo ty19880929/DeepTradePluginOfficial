@@ -74,6 +74,22 @@ class FakeSource:
         )
 
 
+class StaleSource(FakeSource):
+    def fetch(self) -> Snapshot:
+        self.fetches += 1
+        now = self.clock.now_epoch()
+        return Snapshot(
+            code=self.code,
+            trade_date=self.clock.today_str(),
+            ts=int(now),
+            last=1.0,
+            cum_vol=100_000.0,
+            cum_amount=100_000.0,
+            num_trades=1.0,
+            trade_time="10:00:00",
+        )
+
+
 class CaptureRenderer:
     def __init__(self) -> None:
         self.meta = None
@@ -272,6 +288,18 @@ def test_fetch_failures_backoff_but_survive(db: Database) -> None:
     assert len(errs) >= 6
     assert any(str(e.level.value) == "error" for e in errs)  # 第 5 次起升级 ERROR
     assert any(str(e.level.value) == "warn" for e in errs)
+
+
+def test_stale_quote_warns_and_halts_new_entries(db: Database) -> None:
+    clock = FakeClock(sh_epoch(14, 56))
+    cfg = replace(VwrConfig(), poll_interval_seconds=30, stale_quote_seconds=60)
+    source = StaleSource(clock)
+    daemon, _, renderer = make_daemon(db, clock, cfg=cfg, source=source)
+    outcome = daemon.execute(code="159518.SZ")
+    assert outcome.status == "done"
+    stale = [e for e in renderer.events if e.payload.get("kind") == "stale_quote"]
+    assert stale
+    assert any(str(e.level.value) == "warn" for e in stale)
 
 
 def test_broken_renderer_degrades_and_run_completes(db: Database, capsys) -> None:
