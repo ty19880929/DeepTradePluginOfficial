@@ -26,6 +26,29 @@ def test_buy_math_exact() -> None:
     assert fill.position_after == 100
 
 
+def test_min_fee_per_trade_floor() -> None:
+    b = PaperBroker(
+        cash=10_000.0,
+        fee_bps=2.5,
+        min_fee_per_trade=5.0,
+        slippage_bps=0.0,
+    )
+    fill = b.fill(Side.BUY, 100, 1.0, ts=1)
+    assert fill.fee == pytest.approx(5.0)
+    assert b.cash == pytest.approx(10_000.0 - 100.0 - 5.0)
+
+
+def test_percentage_fee_applies_above_floor() -> None:
+    b = PaperBroker(
+        cash=100_000.0,
+        fee_bps=2.5,
+        min_fee_per_trade=5.0,
+        slippage_bps=0.0,
+    )
+    fill = b.fill(Side.BUY, 10_000, 3.0, ts=1)
+    assert fill.fee == pytest.approx(30_000.0 * 2.5 / 10_000.0)
+
+
 def test_sell_math_exact() -> None:
     b = broker()
     b.fill(Side.BUY, 100, 1.0, ts=1)

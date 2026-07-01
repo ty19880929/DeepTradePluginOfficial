@@ -55,7 +55,7 @@ def params_block(run: dict[str, Any]) -> str:
         "position_mode", "base_shares", "order_qty", "max_trades_per_day",
         "min_holding_seconds", "cooldown_seconds", "per_trade_stop_pct",
         "daily_loss_limit_pct", "eod_flat_time", "initial_cash", "fee_bps",
-        "slippage_bps",
+        "min_fee_per_trade", "slippage_bps",
     )
     lines = [f"- `{k}` = {params[k]}" for k in keys if k in params]
     return "\n".join(lines) if lines else "(无)"

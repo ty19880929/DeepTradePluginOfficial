@@ -121,6 +121,7 @@ def test_reset_clears_persisted_rows(db: Database) -> None:
         ("eod_flat_time", "abc", "eod_flat_time"),
         ("initial_cash", 0.0, "initial_cash"),
         ("fee_bps", -1.0, "fee_bps"),
+        ("min_fee_per_trade", -0.1, "min_fee_per_trade"),
         ("slippage_bps", -0.1, "slippage_bps"),
     ],
 )

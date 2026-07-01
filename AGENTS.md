@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is a DeepTrade official plugin monorepo. `registry/index.json` is the public plugin registry consumed by `deeptrade plugin install <short-name>`. Shared maintenance scripts live in `tools/`.
+This repository is the DeepTrade official plugin monorepo. The public plugin registry is `registry/index.json`, which is consumed by `deeptrade plugin install <short-name>`. Shared maintenance scripts live in `tools/`.
 
 Each plugin is self-contained:
 
@@ -14,6 +14,8 @@ Each plugin is self-contained:
 
 ## Build, Test, and Development Commands
 
+Run commands from the repository root unless a test requires plugin-local paths.
+
 - `python tools/check_registry.py`: validates registry schema, plugin metadata consistency, and migration checksums.
 - `python tools/check_release.py limit-up-board 0.5.1`: verifies a release tag version against the plugin YAML.
 - `python -m pytest limit_up_board`: runs the `limit_up_board` tests using its `pytest.ini`.
@@ -21,23 +23,21 @@ Each plugin is self-contained:
 - `python -m pytest checkmate`: runs the `checkmate` tests.
 - `python -m pytest limit_up_board -m "not slow"`: skips long-running LightGBM tests where marked.
 
-Run commands from the repository root unless a test requires plugin-local paths.
-
 ## Coding Style & Naming Conventions
 
 Use Python 3 style with `from __future__ import annotations`, explicit type hints where useful, and 4-space indentation. Keep module and package names snake_case. Plugin IDs and release tags use kebab-case, for example `accumulation-probe-washout/v0.7.0`.
 
-Keep framework entry classes in `plugin.py` small: static validation should avoid network access and defer runtime work to `cli.py`, `runner.py`, or `pipeline.py`. Do not add generated caches, model artifacts, or virtual environments to the repository.
+Keep framework entry classes in `plugin.py` small. Static validation should avoid network access and defer runtime work to `cli.py`, `runner.py`, or `pipeline.py`. Do not add generated caches, model artifacts, or virtual environments to the repository.
 
 ## Testing Guidelines
 
-Tests use pytest. Place tests under the matching plugin’s `tests/` directory and name files `test_*.py`. Snapshot outputs live under `tests/snapshots/`; update them only when UI/rendering output changes intentionally.
+Tests use pytest. Place tests under the matching plugin's `tests/` directory and name files `test_*.py`. Snapshot outputs live under `tests/snapshots/`; update them only when UI or rendering output changes intentionally.
 
 For model or LightGBM work, include focused unit coverage for dataset creation, labels, features, scoring, registry behavior, and prompt-injection safeguards when relevant.
 
 ## Commit & Pull Request Guidelines
 
-Prefer scoped commit messages matching recent history, such as `feat(accumulation-probe-washout): ...`, `fix(limit-up-board): ...`, or `release(accumulation-probe-washout): v0.7.0 — ...`. Avoid vague messages like `update` for reviewable work.
+Prefer scoped commit messages matching recent history, such as `feat(accumulation-probe-washout): ...`, `fix(limit-up-board): ...`, or `release(accumulation-probe-washout): v0.7.0 - ...`. Avoid vague messages like `update`.
 
 Pull requests should describe the changed plugin, user-visible behavior, tests run, and any migration or registry impact. Link issues when available. Include screenshots or snapshot diffs for UI/dashboard changes.
 

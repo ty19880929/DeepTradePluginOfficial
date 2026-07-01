@@ -31,6 +31,10 @@ htmlcov/
 # Claude Code workspace
 .claude/
 
+# Local MCP config with credentials
+.mcp.json
+.codex/config.toml
+
 # OS
 .DS_Store
 Thumbs.db

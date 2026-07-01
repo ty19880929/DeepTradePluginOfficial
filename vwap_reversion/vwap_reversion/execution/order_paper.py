@@ -73,6 +73,7 @@ class PaperOrderBroker:
         cash: float,
         fee_bps: float,
         base_slippage_bps: float,
+        min_fee_per_trade: float = 0.0,
         max_participation_rate: float = 0.10,
         impact_slippage_coef: float = 2.0,
         position: int = 0,
@@ -81,11 +82,17 @@ class PaperOrderBroker:
             raise ValueError(f"cash/position 不可为负（cash={cash}, position={position}）")
         if not (0 < max_participation_rate <= 1):
             raise ValueError("max_participation_rate 必须落在 (0, 1]")
-        if fee_bps < 0 or base_slippage_bps < 0 or impact_slippage_coef < 0:
+        if (
+            fee_bps < 0
+            or min_fee_per_trade < 0
+            or base_slippage_bps < 0
+            or impact_slippage_coef < 0
+        ):
             raise ValueError("fee/slippage/impact 参数不可为负")
         self._cash = float(cash)
         self._position = int(position)
         self._fee_bps = float(fee_bps)
+        self._min_fee = float(min_fee_per_trade)
         self._base_slippage_bps = float(base_slippage_bps)
         self._max_participation_rate = float(max_participation_rate)
         self._impact_slippage_coef = float(impact_slippage_coef)
@@ -212,7 +219,7 @@ class PaperOrderBroker:
         if side is Side.BUY:
             px = ref_price + slip
             notional = px * qty
-            fee = notional * self._fee_bps / 10_000.0
+            fee = self._fee(notional)
             if self._cash < notional + fee:
                 raise ExecutionRejected(f"现金不足：需 {notional + fee:.2f}，仅有 {self._cash:.2f}")
             self._cash -= notional + fee
@@ -222,7 +229,7 @@ class PaperOrderBroker:
                 raise ExecutionRejected(f"持仓不足：需卖 {qty}，仅持 {self._position}")
             px = ref_price - slip
             notional = px * qty
-            fee = notional * self._fee_bps / 10_000.0
+            fee = self._fee(notional)
             self._cash += notional - fee
             self._position -= qty
         return Fill(
@@ -235,3 +242,6 @@ class PaperOrderBroker:
             cash_after=self._cash,
             position_after=self._position,
         )
+
+    def _fee(self, notional: float) -> float:
+        return max(notional * self._fee_bps / 10_000.0, self._min_fee)

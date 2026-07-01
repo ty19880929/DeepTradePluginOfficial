@@ -72,6 +72,7 @@ class VwrConfig:
     # ---- 模拟账户 / 成本 ----
     initial_cash: float = 100_000.0
     fee_bps: float = 0.5
+    min_fee_per_trade: float = 0.0
     slippage_bps: float = 1.0
 
 
@@ -198,6 +199,10 @@ def validate_config(cfg: VwrConfig) -> None:
         raise ValueError(f"initial_cash 必须 > 0（当前 {cfg.initial_cash}）")
     if cfg.fee_bps < 0:
         raise ValueError(f"fee_bps 必须 >= 0（当前 {cfg.fee_bps}）")
+    if cfg.min_fee_per_trade < 0:
+        raise ValueError(
+            f"min_fee_per_trade 必须 >= 0（当前 {cfg.min_fee_per_trade}）"
+        )
     if cfg.slippage_bps < 0:
         raise ValueError(f"slippage_bps 必须 >= 0（当前 {cfg.slippage_bps}）")
 

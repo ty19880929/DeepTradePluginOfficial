@@ -69,7 +69,10 @@ class TradingSession:
         self.code = code
         self.trade_date = trade_date
         self.broker = PaperBroker(
-            cash=cfg.initial_cash, fee_bps=cfg.fee_bps, slippage_bps=cfg.slippage_bps,
+            cash=cfg.initial_cash,
+            fee_bps=cfg.fee_bps,
+            min_fee_per_trade=cfg.min_fee_per_trade,
+            slippage_bps=cfg.slippage_bps,
         )
         self.risk = RiskManager(
             max_trades_per_day=cfg.max_trades_per_day,

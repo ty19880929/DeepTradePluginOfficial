@@ -49,7 +49,7 @@
       "subdir": "vwap_reversion",
       "tag_prefix": "vwap-reversion/",
       "min_framework_version": "0.14.0",
-      "latest_version": "vwap-reversion/v0.2.0"
+      "latest_version": "vwap-reversion/v0.2.1"
     }
   }
 }

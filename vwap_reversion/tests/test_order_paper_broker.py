@@ -53,6 +53,14 @@ def test_submit_and_partial_fill_then_full_fill() -> None:
     assert b.position == 300
 
 
+def test_min_fee_per_trade_floor() -> None:
+    b = broker(fee_bps=2.5, min_fee_per_trade=5.0)
+    b.submit_order(intent(qty=100))
+    events = b.process_bar(ts=2, last=1.0, interval_vol=10_000)
+    assert events[0].fill is not None
+    assert events[0].fill.fee == pytest.approx(5.0)
+
+
 def test_limit_price_must_be_marketable() -> None:
     b = broker()
     b.submit_order(intent(qty=100))

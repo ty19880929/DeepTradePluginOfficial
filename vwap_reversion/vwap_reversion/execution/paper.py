@@ -2,7 +2,7 @@
 
 撮合假设：
 * 成交价 = ``ref_price × (1 ± slippage_bps/1e4)``（买加卖减，保守偏不利）
-* 佣金   = ``成交额 × fee_bps/1e4``（ETF 无印花税）
+* 佣金   = ``max(成交额 × fee_bps/1e4, min_fee_per_trade)``（ETF 无印花税）
 * 现金/持仓硬约束：买入需 ``cash ≥ 成交额+佣金``；卖出需 ``position ≥ qty``。
   违约抛 :class:`ExecutionRejected`（调用方落 suppressed 信号，不崩 run）。
 
@@ -22,13 +22,17 @@ class PaperBroker:
         cash: float,
         fee_bps: float,
         slippage_bps: float,
+        min_fee_per_trade: float = 0.0,
         position: int = 0,
     ) -> None:
         if cash < 0 or position < 0:
             raise ValueError(f"cash/position 不可为负（cash={cash}, position={position}）")
+        if min_fee_per_trade < 0:
+            raise ValueError(f"min_fee_per_trade 不可为负（{min_fee_per_trade}）")
         self._cash = float(cash)
         self._position = int(position)
         self._fee_bps = float(fee_bps)
+        self._min_fee = float(min_fee_per_trade)
         self._slip_bps = float(slippage_bps)
 
     @property
@@ -55,7 +59,7 @@ class PaperBroker:
         if side is Side.BUY:
             px = ref_price + slip
             notional = px * qty
-            fee = notional * self._fee_bps / 1e4
+            fee = self._fee(notional)
             if self._cash < notional + fee:
                 raise ExecutionRejected(
                     f"现金不足：需 {notional + fee:.2f}，仅有 {self._cash:.2f}"
@@ -69,7 +73,7 @@ class PaperBroker:
                 )
             px = ref_price - slip
             notional = px * qty
-            fee = notional * self._fee_bps / 1e4
+            fee = self._fee(notional)
             self._cash += notional - fee
             self._position -= qty
 
@@ -78,3 +82,6 @@ class PaperBroker:
             slippage_cost=abs(px - ref_price) * qty,
             cash_after=self._cash, position_after=self._position,
         )
+
+    def _fee(self, notional: float) -> float:
+        return max(notional * self._fee_bps / 10_000.0, self._min_fee)
