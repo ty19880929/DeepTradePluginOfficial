@@ -29,9 +29,11 @@ from .calendar import TradeCalendar
 from .cancellation import cancel_requested
 from .config import ApwConfig, ApwConfigStore
 from .data import (
+    apply_volume_adjustment,
     compute_accumulation,
     compute_alpha_features,
     compute_launch_setup,
+    compute_limit_up_history_map,
     compute_long_range_features,
     compute_ma_distances,
     compute_returns_and_labels,
@@ -40,11 +42,13 @@ from .data import (
     compute_washout,
     derive_phase,
     detect_probe_day,
+    fetch_adj_factor,
     fetch_daily,
     fetch_daily_basic,
     fetch_daily_basic_on,
     fetch_index_daily,
     fetch_latest_trade_date,
+    fetch_limit_list_d,
     fetch_moneyflow,
     fetch_realized_prices,
     fetch_stock_basic,
@@ -463,6 +467,12 @@ class ApwRunner:
             mf_outcome = fetch_moneyflow(
                 tushare, ts_codes=uni_codes, start=window_start, end=T
             )
+            adj_outcome = (
+                fetch_adj_factor(tushare, ts_codes=uni_codes, start=window_start, end=T)
+                if cfg.volume_adjust_enabled
+                else None
+            )
+            limit_up_outcome = fetch_limit_list_d(tushare, start=window_start, end=T)
 
             # ---- index_daily for relative_strength_20d (cfg.baseline_index_code).
             # Empty string disables the baseline (rs20 falls back to None +
@@ -569,6 +579,16 @@ class ApwRunner:
                 if mf_outcome.df.empty
                 else dict(list(mf_outcome.df.groupby("ts_code")))
             )
+            adj_by_code = (
+                {}
+                if adj_outcome is None or adj_outcome.df.empty
+                else dict(list(adj_outcome.df.groupby("ts_code")))
+            )
+            limit_up_history_by_code = compute_limit_up_history_map(
+                limit_up_outcome.df,
+                trade_dates=trade_dates_in_window,
+                lookback_trade_days=60,
+            )
 
             n_after_accumulation = 0
             n_after_probe = 0
@@ -582,6 +602,8 @@ class ApwRunner:
                 if qdf.empty:
                     continue
                 qdf = _normalize_quotes(qdf, basic_extra_by_code.get(code, pd.DataFrame()))
+                if cfg.volume_adjust_enabled:
+                    qdf = apply_volume_adjustment(qdf, adj_by_code.get(code, pd.DataFrame()))
                 mfd = mf_by_code.get(code, pd.DataFrame())
 
                 acc = compute_accumulation(qdf, mfd, cfg)
@@ -627,6 +649,8 @@ class ApwRunner:
                 missing = list(set(
                     acc.get("missing_data", [])
                     + (mf_outcome.missing or [])
+                    + ((adj_outcome.missing if adj_outcome is not None else []) or [])
+                    + (limit_up_outcome.missing or [])
                     + index_missing
                 ))
                 # v0.4.0 — extended derived features (VCP / long-range
@@ -656,6 +680,7 @@ class ApwRunner:
                     alpha=alpha_features,
                     ma_distances=ma_distances,
                     volume_event_score=volume_event,
+                    limit_up_history=limit_up_history_by_code.get(code),
                 )
                 hits.append(cand)
 

@@ -14,7 +14,9 @@ import pandas as pd
 import pytest
 
 from accumulation_probe_washout.data import (
+    apply_volume_adjustment,
     compute_alpha_features,
+    compute_limit_up_history_map,
     compute_long_range_features,
     compute_ma_distances,
     compute_vcp_features,
@@ -179,6 +181,54 @@ def test_volume_event_score_bounded_0_100():
     s = compute_volume_event_score(df)
     assert s is not None
     assert 0.0 <= s <= 100.0
+
+
+def test_volume_event_score_prefers_adjusted_volume():
+    df = make_quotes(n=20, pattern="flat")
+    raw_score = compute_volume_event_score(df)
+    df["vol_adj"] = df["vol"]
+    df.at[len(df) - 1, "vol_adj"] = df["vol"].iloc[-6:-1].mean() * 4.0
+    adjusted_score = compute_volume_event_score(df)
+    assert raw_score is not None
+    assert adjusted_score is not None
+    assert adjusted_score > raw_score
+
+
+def test_apply_volume_adjustment_normalizes_inverse_to_adj_factor():
+    quotes = pd.DataFrame(
+        [
+            {"ts_code": "600000.SH", "trade_date": "20240101", "vol": 100.0},
+            {"ts_code": "600000.SH", "trade_date": "20240102", "vol": 100.0},
+        ]
+    )
+    adj = pd.DataFrame(
+        [
+            {"ts_code": "600000.SH", "trade_date": "20240101", "adj_factor": 0.5},
+            {"ts_code": "600000.SH", "trade_date": "20240102", "adj_factor": 1.0},
+        ]
+    )
+    out = apply_volume_adjustment(quotes, adj)
+    assert out.loc[0, "vol_adj"] == 200.0
+    assert out.loc[1, "vol_adj"] == 100.0
+
+
+def test_limit_up_history_counts_trailing_trade_days():
+    trade_dates = [f"202401{i:02d}" for i in range(1, 11)]
+    limit_list = pd.DataFrame(
+        [
+            {"trade_date": "20240103", "ts_code": "600000.SH", "limit": "U"},
+            {"trade_date": "20240109", "ts_code": "600000.SH", "limit": "U"},
+            {"trade_date": "20240110", "ts_code": "600001.SH", "limit": "D"},
+        ]
+    )
+    out = compute_limit_up_history_map(
+        limit_list,
+        trade_dates=trade_dates,
+        lookback_trade_days=6,
+    )
+    assert out["600000.SH"]["prior_limit_up_count_60d"] == 1
+    assert out["600000.SH"]["days_since_last_limit_up"] == 1
+    assert "600001.SH" not in out
 
 
 # ---------------------------------------------------------------------------

@@ -6,8 +6,10 @@ import pandas as pd
 import pytest
 
 from accumulation_probe_washout.data import (
+    fetch_adj_factor,
     fetch_daily_basic_on,
     fetch_index_daily,
+    fetch_limit_list_d,
     fetch_moneyflow,
 )
 
@@ -52,6 +54,18 @@ class TestOptionalDegradation:
         outcome = fetch_index_daily(fake, index_code="000300.SH", start="20260101", end="20260131")
         assert outcome.df.empty
         assert "index_daily" in outcome.missing
+
+    def test_adj_factor_failure_degrades(self) -> None:
+        fake = _FakeTushare(raise_on={"adj_factor"})
+        outcome = fetch_adj_factor(fake, ts_codes=["600000.SH"], start="20260101", end="20260131")
+        assert outcome.df.empty
+        assert "adj_factor" in outcome.missing
+
+    def test_limit_list_d_failure_degrades(self) -> None:
+        fake = _FakeTushare(raise_on={"limit_list_d"})
+        outcome = fetch_limit_list_d(fake, start="20260101", end="20260131")
+        assert outcome.df.empty
+        assert "limit_list_d" in outcome.missing
 
 
 class _BatchRecordingTushare:
@@ -166,3 +180,50 @@ class TestDailyBasicOnTradeDate:
 
         df = fetch_daily_basic_on(_Fake(), trade_date="20260520")
         assert df.empty
+
+
+class TestAdjFactorAndLimitListCalls:
+    def test_fetch_adj_factor_uses_range_params(self) -> None:
+        captured: list[dict] = []
+
+        class _Fake:
+            def call(self, api, *, params=None, **kwargs):
+                captured.append({"api": api, "params": params})
+                return pd.DataFrame(
+                    [{"ts_code": "600000.SH", "trade_date": "20260520",
+                      "adj_factor": 1.0}]
+                )
+
+        outcome = fetch_adj_factor(
+            _Fake(),
+            ts_codes=["600000.SH"],
+            start="20260501",
+            end="20260520",
+        )
+        assert not outcome.df.empty
+        assert captured[0]["api"] == "adj_factor"
+        assert captured[0]["params"] == {
+            "ts_code": "600000.SH",
+            "start_date": "20260501",
+            "end_date": "20260520",
+        }
+
+    def test_fetch_limit_list_d_uses_range_params(self) -> None:
+        captured: dict = {}
+
+        class _Fake:
+            def call(self, api, *, params=None, **kwargs):
+                captured["api"] = api
+                captured["params"] = params
+                return pd.DataFrame(
+                    [{"ts_code": "600000.SH", "trade_date": "20260520",
+                      "limit": "U"}]
+                )
+
+        outcome = fetch_limit_list_d(_Fake(), start="20260501", end="20260520")
+        assert not outcome.df.empty
+        assert captured["api"] == "limit_list_d"
+        assert captured["params"] == {
+            "start_date": "20260501",
+            "end_date": "20260520",
+        }

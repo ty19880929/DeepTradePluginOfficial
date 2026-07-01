@@ -9,7 +9,7 @@
 | 插件 ID | 类型 | 当前版本 | 简介 | 子目录 |
 |---------|------|---------|------|--------|
 | `limit-up-board` | strategy | 0.8.0 | 打板策略：双轮 LLM 漏斗 + LightGBM 连板概率评分（量化锚点 ⊕ LLM 决策） | [limit_up_board/](./limit_up_board) |
-| `accumulation-probe-washout` | strategy | 0.7.0 | 吸筹试盘洗盘主升浪策略：主板吸筹 / 试盘 / 洗盘链路 + LLM 主升浪启动预测 + LightGBM 启动概率评分 | [accumulation_probe_washout/](./accumulation_probe_washout) |
+| `accumulation-probe-washout` | strategy | 0.7.11 | 吸筹试盘洗盘主升浪策略：主板吸筹 / 试盘 / 洗盘链路 + LLM 主升浪启动预测 + LightGBM 启动概率评分 | [accumulation_probe_washout/](./accumulation_probe_washout) |
 | `checkmate` | strategy | 0.4.0 | A 股 long-only 中期趋势跟踪：股票池 + 市场环境 + 突破 / 回踩 + ATR 风控 + 防守退出 | [checkmate/](./checkmate) |
 
 各插件版本号以其 `deeptrade_plugin.yaml` 中的 `version` 字段为准。
@@ -116,7 +116,7 @@ DeepTradePluginOfficial/
 每个插件维护独立的 SemVer 发布线，tag 形式为 `<plugin-id>/v<X.Y.Z>`，例如：
 
 - `limit-up-board/v0.8.0`
-- `accumulation-probe-washout/v0.7.0`
+- `accumulation-probe-washout/v0.7.11`
 - `checkmate/v0.4.0`
 
 发布流程：

@@ -192,6 +192,85 @@ def _last_n_open(window_df: pd.DataFrame, n: int) -> pd.DataFrame:
     return df.tail(n).reset_index(drop=True)
 
 
+def _volume_values(df: pd.DataFrame) -> pd.Series:
+    """Return the volume series used by signal math.
+
+    ``vol_adj`` is preferred when the runner has merged ``adj_factor`` and
+    normalized historical volume into the latest share base.  Missing or
+    invalid adjusted rows fall back to raw ``vol`` row-by-row so partial
+    adj_factor coverage does not erase otherwise usable candidates.
+    """
+    if df is None or df.empty or "vol" not in df.columns:
+        return pd.Series(dtype="float64")
+    raw = pd.to_numeric(df["vol"], errors="coerce")
+    if "vol_adj" not in df.columns:
+        return raw
+    adj = pd.to_numeric(df["vol_adj"], errors="coerce")
+    return adj.where(adj.notna() & (adj > 0), raw)
+
+
+def _volume_at(row: pd.Series) -> float:
+    if "vol_adj" in row.index:
+        try:
+            v = float(row.get("vol_adj"))
+            if math.isfinite(v) and v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    try:
+        v = float(row.get("vol", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
+
+
+def apply_volume_adjustment(
+    quotes: pd.DataFrame,
+    adj_factor: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Attach ``vol_adj`` using ``adj_factor`` when available.
+
+    Tushare's price adjustment is multiplicative, so volume is normalized by
+    the inverse ratio: ``vol_adj = vol * latest_adj_factor / adj_factor``.
+    This keeps pre/post split volumes comparable inside 5d/20d/60d ratios.
+    Raw ``vol`` is left untouched for auditability and fallback.
+    """
+    if quotes is None or quotes.empty:
+        return quotes
+    out = quotes.copy()
+    if adj_factor is None or adj_factor.empty:
+        return out
+    if "trade_date" not in out.columns or "vol" not in out.columns:
+        return out
+    if "trade_date" not in adj_factor.columns or "adj_factor" not in adj_factor.columns:
+        return out
+
+    q = out.copy()
+    q["trade_date"] = q["trade_date"].astype(str)
+    adj = adj_factor.copy()
+    adj["trade_date"] = adj["trade_date"].astype(str)
+    keep = ["trade_date", "adj_factor"]
+    if "ts_code" in adj.columns and "ts_code" in q.columns:
+        keep.insert(0, "ts_code")
+        merge_on = ["ts_code", "trade_date"]
+    else:
+        merge_on = ["trade_date"]
+    adj = adj[keep].drop_duplicates(subset=merge_on, keep="last")
+    q = q.merge(adj, on=merge_on, how="left")
+    factors = pd.to_numeric(q["adj_factor"], errors="coerce")
+    valid = factors.dropna()
+    if valid.empty:
+        q = q.drop(columns=["adj_factor"], errors="ignore")
+        return q
+    latest_adj = float(valid.iloc[-1])
+    if not math.isfinite(latest_adj) or latest_adj <= 0:
+        q = q.drop(columns=["adj_factor"], errors="ignore")
+        return q
+    raw_vol = pd.to_numeric(q["vol"], errors="coerce")
+    q["vol_adj"] = raw_vol * latest_adj / factors
+    return q
+
+
 # ---------------------------------------------------------------------------
 # accumulation_score — bottom accumulation detection
 # ---------------------------------------------------------------------------
@@ -302,8 +381,8 @@ def compute_accumulation(
         ups = acc[acc["pct_chg"] > 0]
         downs = acc[acc["pct_chg"] < 0]
         if not ups.empty and not downs.empty:
-            up_avg = float(ups["vol"].mean())
-            dn_avg = float(downs["vol"].mean())
+            up_avg = float(_volume_values(ups).mean())
+            dn_avg = float(_volume_values(downs).mean())
             if dn_avg > 0:
                 ratio = up_avg / dn_avg
                 # ratio >=1 is healthy, peak at ~1.5
@@ -313,9 +392,10 @@ def compute_accumulation(
     # already been outed → not truly under-the-radar
     spike_penalty = 0.0
     if days > 1:
-        avg_vol = float(acc["vol"].mean())
+        acc_vol = _volume_values(acc)
+        avg_vol = float(acc_vol.mean())
         if avg_vol > 0:
-            top_vol = float(acc["vol"].max())
+            top_vol = float(acc_vol.max())
             if top_vol / avg_vol > 4.0:
                 spike_penalty = min(20.0, (top_vol / avg_vol - 4.0) * 4.0)
 
@@ -378,7 +458,7 @@ def detect_probe_day(
     candidates = tail.iloc[::-1]
     for _, row in candidates.iterrows():
         trade_date = str(row["trade_date"])
-        vol = float(row["vol"])
+        vol = _volume_at(row)
         if vol <= 0:
             continue
         # Need 5d / 20d trailing windows ending the day BEFORE the probe.
@@ -391,8 +471,8 @@ def detect_probe_day(
 
         prev5 = df.iloc[max(0, pos - 5) : pos]
         prev20 = df.iloc[max(0, pos - 20) : pos]
-        avg5 = float(prev5["vol"].mean()) if not prev5.empty else 0.0
-        avg20 = float(prev20["vol"].mean()) if not prev20.empty else 0.0
+        avg5 = float(_volume_values(prev5).mean()) if not prev5.empty else 0.0
+        avg20 = float(_volume_values(prev20).mean()) if not prev20.empty else 0.0
         if avg5 <= 0 or avg20 <= 0:
             continue
         vol_ratio_5d = vol / avg5
@@ -404,7 +484,7 @@ def detect_probe_day(
         # ``df.tail(base_lookback)`` which leaked future sessions into the
         # ranking and made historic probes look weaker as the run progressed.
         base_start = max(0, pos - base_lookback + 1)
-        base_vols = df.iloc[base_start : pos + 1]["vol"].astype(float).values
+        base_vols = _volume_values(df.iloc[base_start : pos + 1]).astype(float).values
         rank_pct = float((base_vols < vol).sum()) / max(1, len(base_vols)) * 100.0
 
         turnover_rate = float(row.get("turnover_rate", 0.0) or 0.0)
@@ -583,8 +663,8 @@ def compute_washout(
     # Volume shrink — avg post-probe vol vs avg pre-probe 20d vol
     probe_pos = int(pos[0])
     prev20 = df.iloc[max(0, probe_pos - 20) : probe_pos]
-    pre_avg = float(prev20["vol"].mean()) if not prev20.empty else 0.0
-    post_avg = float(after["vol"].mean()) if not after.empty else 0.0
+    pre_avg = float(_volume_values(prev20).mean()) if not prev20.empty else 0.0
+    post_avg = float(_volume_values(after).mean()) if not after.empty else 0.0
     shrink_ratio = (post_avg / pre_avg) if pre_avg > 0 else 1.0
 
     # MA breaches — compute MAs on the full df up to each post-probe day
@@ -729,9 +809,9 @@ def compute_launch_setup(
 
     prev5 = df.iloc[max(0, last_pos - 5) : last_pos]
     prev20 = df.iloc[max(0, last_pos - 20) : last_pos]
-    avg5 = float(prev5["vol"].mean()) if not prev5.empty else 0.0
-    avg20 = float(prev20["vol"].mean()) if not prev20.empty else 0.0
-    cur_vol = float(last["vol"])
+    avg5 = float(_volume_values(prev5).mean()) if not prev5.empty else 0.0
+    avg20 = float(_volume_values(prev20).mean()) if not prev20.empty else 0.0
+    cur_vol = _volume_at(last)
     vr5 = cur_vol / avg5 if avg5 > 0 else 0.0
     vr20 = cur_vol / avg20 if avg20 > 0 else 0.0
 
@@ -1063,12 +1143,12 @@ def compute_volume_event_score(window_df: pd.DataFrame) -> float | None:
     prev_5 = df.iloc[-6:-1]
     if prev_5.empty:
         return None
-    avg_vol = float(prev_5["vol"].mean())
+    avg_vol = float(_volume_values(prev_5).mean())
     cur = df.iloc[-1]
     if avg_vol <= 0:
         return None
 
-    vol_ratio_5d = float(cur["vol"]) / avg_vol
+    vol_ratio_5d = _volume_at(cur) / avg_vol
     range_ = max(float(cur["high"]) - float(cur["low"]), 1e-9)
     body = abs(float(cur["close"]) - float(cur.get("open", cur["close"])))
     body_ratio = min(1.0, body / range_)
@@ -1123,6 +1203,57 @@ def compute_ma_distances(window_df: pd.DataFrame) -> dict[str, Any]:
         out[key] = round(ma, 4)
         if ma > 0:
             out[key_pct] = round((last_close - ma) / ma * 100.0, 4)
+    return out
+
+
+def compute_limit_up_history_map(
+    limit_list_d: pd.DataFrame | None,
+    *,
+    trade_dates: list[str],
+    lookback_trade_days: int = 60,
+) -> dict[str, dict[str, int | None]]:
+    """Return limit-up history features keyed by ``ts_code``.
+
+    ``prior_limit_up_count_60d`` counts U-limit events in the trailing
+    ``lookback_trade_days`` open sessions ending at T. ``days_since_last_limit_up``
+    is measured in trade days, so a limit-up on T is 0 and missing history is
+    ``None``.
+    """
+    if limit_list_d is None or limit_list_d.empty:
+        return {}
+    if "ts_code" not in limit_list_d.columns or "trade_date" not in limit_list_d.columns:
+        return {}
+
+    dates = [str(d) for d in trade_dates if d]
+    if not dates:
+        return {}
+    window_dates = dates[-max(1, lookback_trade_days):]
+    date_pos = {d: i for i, d in enumerate(dates)}
+    latest_pos = date_pos.get(dates[-1])
+    if latest_pos is None:
+        return {}
+
+    df = limit_list_d.copy()
+    df["trade_date"] = df["trade_date"].astype(str)
+    if "limit" in df.columns:
+        df = df[df["limit"].astype(str).str.upper() == "U"]
+    df = df[df["trade_date"].isin(window_dates)]
+    if df.empty:
+        return {}
+
+    out: dict[str, dict[str, int | None]] = {}
+    for code, sub in df.groupby("ts_code"):
+        unique_dates = sorted(set(sub["trade_date"].astype(str)))
+        if not unique_dates:
+            continue
+        last_date = unique_dates[-1]
+        last_pos = date_pos.get(last_date)
+        out[str(code)] = {
+            "prior_limit_up_count_60d": int(len(unique_dates)),
+            "days_since_last_limit_up": (
+                int(latest_pos - last_pos) if last_pos is not None else None
+            ),
+        }
     return out
 
 
@@ -1482,6 +1613,46 @@ def fetch_index_daily(tushare: Any, *, index_code: str, start: str, end: str) ->
         tushare,
         "index_daily",
         params={"ts_code": index_code, "start_date": start, "end_date": end},
+    )
+
+
+def fetch_adj_factor(
+    tushare: Any,
+    *,
+    ts_codes: list[str],
+    start: str,
+    end: str,
+    batch_size: int = 50,
+) -> FetchOutcome:
+    """Optional adj_factor pull used for volume normalization."""
+    if not ts_codes:
+        return FetchOutcome(pd.DataFrame(), [])
+    if batch_size <= 0:
+        batch_size = 50
+    chunks: list[pd.DataFrame] = []
+    missing: list[str] = []
+    for i in range(0, len(ts_codes), batch_size):
+        sub = ts_codes[i : i + batch_size]
+        outcome = _try_optional(
+            tushare,
+            "adj_factor",
+            params={"ts_code": ",".join(sub), "start_date": start, "end_date": end},
+        )
+        if outcome.df is not None and not outcome.df.empty:
+            chunks.append(outcome.df)
+        for tag in outcome.missing:
+            if tag not in missing:
+                missing.append(tag)
+    df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+    return FetchOutcome(df, missing)
+
+
+def fetch_limit_list_d(tushare: Any, *, start: str, end: str) -> FetchOutcome:
+    """Optional range pull for historical limit-up events."""
+    return _try_optional(
+        tushare,
+        "limit_list_d",
+        params={"start_date": start, "end_date": end},
     )
 
 

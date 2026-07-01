@@ -94,10 +94,10 @@ no_setup → accumulating → probe_seen → washing_after_probe → launch_read
 - Tushare 可选接口（`moneyflow` / `index_daily`）可能缺失或延迟，缺失字段会进入 `missing_data` 并降级运行；
 - 表结构和 schema 一旦发布，后续升级需要 migration。
 
-## 后续路线
+## 文档与已实现增强
 
-- **辩论模式**：`analyze --debate --debate-llms <p1,p2,p3>`，复用 LUB 的 worker 编排范式（规划中）。
-- **`adj_factor` 复权量比**：`volume_adjust_enabled` 配置位已在 v0.4.0 引入，实际的 `fetch_daily` 接口扩展计划在后续 PR 落地。
-- **涨停历史特征**：`prior_limit_up_count_60d` / `days_since_last_limit_up` 已在 `FEATURE_NAMES` 中占位，等待接入 Tushare `limit_list_d`。
+- **用户手册**：详见 `docs/accumulation_probe_washout_user_manual.md`，覆盖全量配置项、执行场景、LGB 生命周期和输出字段。
+- **`adj_factor` 复权量比**：`volume_adjust_enabled=true` 时会拉取 `adj_factor`，生成 `vol_adj`，并用于试盘量比、洗盘缩量、启动放量和量能事件评分。
+- **涨停历史特征**：已接入 Tushare `limit_list_d`，输出 `prior_limit_up_count_60d` / `days_since_last_limit_up`，供 LGB 与 LLM 使用。
 
 完整设计见飞书知识库《吸筹试盘洗盘主升浪插件 详细功能设计方案》。
